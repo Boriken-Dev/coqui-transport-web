@@ -482,18 +482,21 @@ fn queued_bytes_over_the_budget_are_refused_rather_than_held() {
 fn a_receive_timeout_leaves_the_channel_usable() {
     let listener = websocket::Listener::bind(loopback(), None).unwrap();
     let url = plain_ws_url(listener.local_addr().unwrap());
+    // The client sends only once the timeout has happened, whatever the machine's speed.
+    let (timed_out, wait_for_it) = std::sync::mpsc::channel();
     let server = thread::spawn(move || {
         let channel = listener.accept(Some(WAIT)).unwrap();
         assert_eq!(
             channel.receive(Some(Duration::from_millis(30))),
             Err(Failure::Timeout)
         );
+        timed_out.send(()).unwrap();
         echo_once(&channel);
     });
     let client = websocket::Dialer::new()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
-    thread::sleep(Duration::from_millis(60));
+    wait_for_it.recv_timeout(WAIT).unwrap();
     client.send(b"later").unwrap();
     assert_eq!(client.receive(Some(WAIT)).unwrap().unwrap(), b"later");
     server.join().unwrap();
