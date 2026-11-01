@@ -53,6 +53,10 @@ impl Default for Limits {
     }
 }
 
+/// Decides whether a source address may start a handshake.
+#[cfg(any(feature = "websocket", feature = "webtransport"))]
+pub(crate) type Admission = alloc::sync::Arc<dyn Fn(core::net::SocketAddr) -> bool + Send + Sync>;
+
 /// What the driver's worker hands to the channel's reader. An `Err` ends the channel.
 pub(crate) type Received = Result<Vec<u8>, Failure>;
 

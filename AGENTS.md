@@ -218,10 +218,12 @@ pub fn Dialer::new() -> Self                // no TLS: reaches only ws://; wss:/
 pub fn Dialer::with_tls(self, tls: Arc<rustls::ClientConfig>) -> Self
 pub const fn Dialer::with_limits(self, limits: Limits) -> Self
 pub const fn Dialer::with_frames(self, frames: Frames) -> Self
+pub fn Dialer::with_header(self, name: impl Into<String>, value: impl Into<String>) -> Self // a value never prints
 pub fn Listener::bind(address: SocketAddr, tls: Option<Arc<rustls::ServerConfig>>) -> Result<Self, Failure>
 pub const fn Listener::with_limits(self, limits: Limits) -> Self
 pub const fn Listener::with_frames(self, frames: Frames) -> Self
 pub fn Listener::with_origins(self, origins: impl IntoIterator<Item = String>) -> Self
+pub fn Listener::with_admission(self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self
 pub fn Listener::local_addr(&self) -> Result<SocketAddr, Failure>
 pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Failure>
 ```
@@ -238,6 +240,7 @@ pub const fn Dialer::with_limits(self, limits: Limits) -> Self
 pub fn Listener::bind(address: SocketAddr, tls: Arc<rustls::ServerConfig>) -> Result<Self, Failure>
 pub const fn Listener::with_limits(self, limits: Limits) -> Self
 pub fn Listener::with_origins(self, origins: impl IntoIterator<Item = String>) -> Self
+pub fn Listener::with_admission(self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self
 pub const fn Listener::local_addr(&self) -> SocketAddr
 pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Failure>
 ```

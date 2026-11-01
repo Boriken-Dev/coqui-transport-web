@@ -29,7 +29,7 @@ use crate::channel::{self, Kind};
 use crate::endpoints::CertificatePin;
 use crate::failure::Failure;
 use crate::frame::{self, Decoder};
-use crate::pump::{Inbox, Limits, Received};
+use crate::pump::{Admission, Inbox, Limits, Received};
 
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -313,6 +313,7 @@ pub struct Listener {
     address: SocketAddr,
     limits: Limits,
     origins: Vec<alloc::string::String>,
+    admission: Option<Admission>,
     runtime: Arc<Runtime>,
 }
 
@@ -355,6 +356,7 @@ impl Listener {
             address,
             limits: Limits::default(),
             origins: Vec::new(),
+            admission: None,
             runtime,
         })
     }
@@ -374,6 +376,16 @@ impl Listener {
         origins: impl IntoIterator<Item = alloc::string::String>,
     ) -> Self {
         self.origins = origins.into_iter().collect();
+        self
+    }
+
+    /// Refuses a source address before any handshake, so a denied peer costs nothing. Decided on each connection.
+    #[must_use]
+    pub fn with_admission(
+        mut self,
+        admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.admission = Some(Arc::new(admit));
         self
     }
 
@@ -398,6 +410,12 @@ impl Listener {
                 .map_err(|_| Failure::Timeout)?,
             None => self.runtime.block_on(self.endpoint.accept()),
         };
+        if let Some(admit) = &self.admission
+            && !admit(incoming.remote_address())
+        {
+            incoming.refuse();
+            return Err(Failure::Permission);
+        }
         let origins = &self.origins;
         let opened = self.runtime.block_on(bounded(self.limits.handshake, async {
             let request = incoming.await.map_err(|e| connection_failure(&e))?;

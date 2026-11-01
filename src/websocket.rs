@@ -19,15 +19,16 @@ use std::time::Instant;
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, ServerConfig, ServerConnection, StreamOwned};
+use tungstenite::client::IntoClientRequest;
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
-use tungstenite::http::{HeaderValue, StatusCode};
+use tungstenite::http::{HeaderName, HeaderValue, StatusCode};
 use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{HandshakeError, Message, WebSocket};
 use url::Url;
 
 use crate::channel::{self, Kind};
 use crate::failure::Failure;
-use crate::pump::{Inbox, Limits, Received};
+use crate::pump::{Admission, Inbox, Limits, Received};
 
 /// How long a worker waits on a silent socket before it looks for something to send.
 const POLL: Duration = Duration::from_millis(10);
@@ -99,16 +100,13 @@ fn interrupted(error: &io::Error) -> bool {
 }
 
 fn io_failure(error: &io::Error) -> Failure {
-    if let Some(inner) = error.get_ref()
-        && let Some(tls) = inner.downcast_ref::<rustls::Error>()
+    // Any TLS error is a security failure, whichever verifier raised it: it must never read as a path
+    // problem, which is what permits a fallback.
+    if error
+        .get_ref()
+        .is_some_and(|inner| inner.downcast_ref::<rustls::Error>().is_some())
     {
-        return match tls {
-            rustls::Error::InvalidCertificate(_)
-            | rustls::Error::PeerIncompatible(_)
-            | rustls::Error::NoCertificatesPresented
-            | rustls::Error::AlertReceived(_) => Failure::Certificate,
-            _ => Failure::Protocol,
-        };
+        return Failure::Certificate;
     }
     if interrupted(error) {
         Failure::Timeout
@@ -316,6 +314,7 @@ fn finish(socket: &mut WebSocket<Stream>) {
 /// Dials WebSocket endpoints.
 #[derive(Clone, Default)]
 pub struct Dialer {
+    headers: Vec<(alloc::string::String, alloc::string::String)>,
     tls: Option<Arc<ClientConfig>>,
     limits: Limits,
     frames: Frames,
@@ -327,6 +326,7 @@ impl fmt::Debug for Dialer {
             .field("tls", &self.tls.is_some())
             .field("limits", &self.limits)
             .field("frames", &self.frames)
+            .field("headers", &self.headers.len())
             .finish()
     }
 }
@@ -356,6 +356,18 @@ impl Dialer {
     #[must_use]
     pub const fn with_frames(mut self, frames: Frames) -> Self {
         self.frames = frames;
+        self
+    }
+
+    /// Adds a header to the opening request. A value may be a credential: it is never printed. A header
+    /// authenticates nothing by itself and does not replace proving the peer.
+    #[must_use]
+    pub fn with_header(
+        mut self,
+        name: impl Into<alloc::string::String>,
+        value: impl Into<alloc::string::String>,
+    ) -> Self {
+        self.headers.push((name.into(), value.into()));
         self
     }
 
@@ -412,15 +424,21 @@ impl channel::Dialer for Dialer {
             }
             _ => return Err(Failure::Unsupported),
         };
-        let (socket, _) = tungstenite::client::client_with_config(
-            endpoint.as_str(),
-            stream,
-            Some(config(self.limits)),
-        )
-        .map_err(|error| match error {
-            HandshakeError::Interrupted(_) => Failure::Timeout,
-            HandshakeError::Failure(error) => ws_failure(&error),
-        })?;
+        let mut request = endpoint
+            .as_str()
+            .into_client_request()
+            .map_err(|e| ws_failure(&e))?;
+        for (name, value) in &self.headers {
+            let name = HeaderName::try_from(name.as_str()).map_err(|_| Failure::Protocol)?;
+            let value = HeaderValue::try_from(value.as_str()).map_err(|_| Failure::Protocol)?;
+            request.headers_mut().append(name, value);
+        }
+        let (socket, _) =
+            tungstenite::client::client_with_config(request, stream, Some(config(self.limits)))
+                .map_err(|error| match error {
+                    HandshakeError::Interrupted(_) => Failure::Timeout,
+                    HandshakeError::Failure(error) => ws_failure(&error),
+                })?;
         Channel::start(socket, self.limits, self.frames)
     }
 }
@@ -432,6 +450,7 @@ pub struct Listener {
     limits: Limits,
     frames: Frames,
     origins: Vec<alloc::string::String>,
+    admission: Option<Admission>,
 }
 
 impl fmt::Debug for Listener {
@@ -465,6 +484,7 @@ impl Listener {
             limits: Limits::default(),
             frames: Frames::default(),
             origins: Vec::new(),
+            admission: None,
         })
     }
 
@@ -490,6 +510,16 @@ impl Listener {
         origins: impl IntoIterator<Item = alloc::string::String>,
     ) -> Self {
         self.origins = origins.into_iter().collect();
+        self
+    }
+
+    /// Refuses a source address before any handshake, so a denied peer costs nothing. Decided on each connection.
+    #[must_use]
+    pub fn with_admission(
+        mut self,
+        admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.admission = Some(Arc::new(admit));
         self
     }
 
@@ -559,7 +589,11 @@ impl Listener {
         let deadline = timeout.map(|limit| Instant::now() + limit);
         loop {
             match self.socket.accept() {
-                Ok((tcp, _)) => return Ok(tcp),
+                Ok((tcp, source)) => {
+                    if self.admission.as_ref().is_none_or(|admit| admit(source)) {
+                        return Ok(tcp);
+                    }
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                         return Err(Failure::Timeout);

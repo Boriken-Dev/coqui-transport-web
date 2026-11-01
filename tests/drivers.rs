@@ -238,6 +238,54 @@ fn a_listed_origin_is_required_when_origins_are_set() {
 }
 
 #[test]
+fn a_denied_source_never_starts_a_handshake() {
+    let listener = websocket::Listener::bind(loopback(), None)
+        .unwrap()
+        .with_admission(|_| false);
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        listener
+            .accept(Some(Duration::from_millis(600)))
+            .map(|_| ())
+    });
+    let url = plain_ws_url(address);
+    let refused = websocket::Dialer::new().dial(Kind::WebSocket, &url, Duration::from_millis(500));
+    assert!(refused.is_err());
+    assert_eq!(server.join().unwrap(), Err(Failure::Timeout));
+}
+
+#[test]
+fn a_dialer_header_and_the_path_reach_the_server_and_a_value_never_prints() {
+    use tungstenite::handshake::server::{ErrorResponse, Request, Response};
+    let raw = std::net::TcpListener::bind(loopback()).unwrap();
+    let port = raw.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (tcp, _) = raw.accept().unwrap();
+        let mut seen = None;
+        let check = |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
+            seen = Some((
+                request.uri().path().to_owned(),
+                request
+                    .headers()
+                    .get("authorization")
+                    .map(|value| value.to_str().unwrap().to_owned()),
+            ));
+            Ok(response)
+        };
+        let socket = tungstenite::accept_hdr(tcp, check).unwrap();
+        drop(socket);
+        seen.unwrap()
+    });
+    let url = Url::parse(&format!("ws://127.0.0.1:{port}/v1/assistant/agent-link")).unwrap();
+    let mut dialer = websocket::Dialer::new().with_header("authorization", "Bearer secret-token");
+    assert!(!format!("{dialer:?}").contains("secret-token"));
+    let _channel = dialer.dial(Kind::WebSocket, &url, WAIT).unwrap();
+    let (path, header) = server.join().unwrap();
+    assert_eq!(path, "/v1/assistant/agent-link");
+    assert_eq!(header.as_deref(), Some("Bearer secret-token"));
+}
+
+#[test]
 fn a_receive_timeout_leaves_the_channel_usable() {
     let listener = websocket::Listener::bind(loopback(), None).unwrap();
     let url = plain_ws_url(listener.local_addr().unwrap());
