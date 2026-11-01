@@ -7,13 +7,14 @@ import 'dart:collection';
 /// No cryptography, peer identity, authentication method or application protocol
 /// appears here. Consumers (such as coqui-peer) read setup messages, then hand off
 /// any pending data to the application only after verification succeeds.
-final class MessageHandoff {
+final class MessageHandoff<T> {
   MessageHandoff({
-    required Stream<String> incoming,
-    required Future<void> Function(String) send,
+    required Stream<T> incoming,
+    required Future<void> Function(T) send,
     required Future<void> Function() closeSource,
     this.maxPending = 16,
-  }) : _send = send, _closeSource = closeSource {
+  }) : _send = send,
+       _closeSource = closeSource {
     if (maxPending < 1) throw ArgumentError.value(maxPending, 'maxPending');
     _subscription = incoming.listen(
       _receive,
@@ -23,20 +24,20 @@ final class MessageHandoff {
   }
 
   final int maxPending;
-  final Future<void> Function(String) _send;
+  final Future<void> Function(T) _send;
   final Future<void> Function() _closeSource;
-  final Queue<String> _pending = Queue<String>();
-  final StreamController<String> _out = StreamController<String>(sync: true);
-  late final StreamSubscription<String> _subscription;
-  Completer<String>? _waiter;
+  final Queue<T> _pending = Queue<T>();
+  final StreamController<T> _out = StreamController<T>(sync: true);
+  late final StreamSubscription<T> _subscription;
+  Completer<T>? _waiter;
   Object? _failure;
   bool _handoff = false;
   bool _closed = false;
 
   /// Complete, ordered application messages, available after handoff.
-  Stream<String> get applicationMessages => _out.stream;
+  Stream<T> get applicationMessages => _out.stream;
 
-  void _receive(String message) {
+  void _receive(T message) {
     if (_closed || _failure != null) return;
     if (_handoff) {
       _out.add(message);
@@ -66,12 +67,12 @@ final class MessageHandoff {
 
   /// Read one setup message. The caller must enforce a deadline and drive
   /// the appropriate coqui-peer handshake; this class does not interpret it.
-  Future<String> nextSetupMessage() {
+  Future<T> nextSetupMessage() {
     if (_closed || _handoff) throw StateError('Setup phase ended');
     if (_waiter != null) throw StateError('Concurrent setup reads forbidden');
     if (_failure != null) return Future.error(_failure!);
     if (_pending.isNotEmpty) return Future.value(_pending.removeFirst());
-    final waiter = Completer<String>();
+    final waiter = Completer<T>();
     _waiter = waiter;
     return waiter.future;
   }
@@ -88,9 +89,16 @@ final class MessageHandoff {
     }
   }
 
-  Future<void> send(String message) {
-    if (_closed || _failure != null) throw StateError('Message channel is closed');
+  Future<void> send(T message) {
+    if (_closed || _failure != null)
+      throw StateError('Message channel is closed');
     return _send(message);
+  }
+
+  /// Throws unless this channel may still send: for a sender that goes round [send].
+  void checkOpen() {
+    if (_closed || _failure != null)
+      throw StateError('Message channel is closed');
   }
 
   Future<void> close() async {

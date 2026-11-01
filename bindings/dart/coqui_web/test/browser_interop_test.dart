@@ -3,6 +3,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:coqui_web/coqui_web.dart';
 import 'package:test/test.dart';
@@ -13,27 +14,60 @@ void main() {
 
   setUpAll(() async {
     final hybrid = spawnHybridUri('support/echo_hybrid.dart', stayAlive: true);
-    peer = jsonDecode(await hybrid.stream.first as String) as Map<String, dynamic>;
+    peer =
+        jsonDecode(await hybrid.stream.first as String) as Map<String, dynamic>;
   });
 
   Future<void> roundTrip(WebChannel channel) async {
     final received = channel.messages.take(2).toList();
     await channel.send('{"jsonrpc":"2.0","id":1}');
     await channel.send('café');
-    expect(await received.timeout(const Duration(seconds: 20)), ['{"jsonrpc":"2.0","id":1}', 'café']);
+    expect(await received.timeout(const Duration(seconds: 20)), [
+      '{"jsonrpc":"2.0","id":1}',
+      'café',
+    ]);
     await channel.close();
   }
 
-  test('a browser WebTransport channel with a pinned certificate reaches the Rust listener', () async {
-    final channel = await connectWebChannel(
-      WebEndpoints(
-        webTransport: Uri.parse('https://127.0.0.1:${peer['webtransport']}/channel'),
-        certificatePins: [peer['pin'] as String],
-      ),
-    );
-    expect(channel.kind, WebChannelKind.webTransport);
-    await roundTrip(channel);
-  });
+  test(
+    'a browser WebTransport channel carries bytes that are not text',
+    () async {
+      final channel =
+          await connectWebChannel(
+                WebEndpoints(
+                  webTransport: Uri.parse(
+                    'https://127.0.0.1:${peer['webtransport']}/channel',
+                  ),
+                  certificatePins: [peer['pin'] as String],
+                ),
+              )
+              as ByteWebChannel;
+      final received = channel.bytes.first;
+      await channel.sendBytes(Uint8List.fromList([0xff, 0x00, 0xfe]));
+      expect(await received.timeout(const Duration(seconds: 20)), [
+        0xff,
+        0x00,
+        0xfe,
+      ]);
+      await channel.close();
+    },
+  );
+
+  test(
+    'a browser WebTransport channel with a pinned certificate reaches the Rust listener',
+    () async {
+      final channel = await connectWebChannel(
+        WebEndpoints(
+          webTransport: Uri.parse(
+            'https://127.0.0.1:${peer['webtransport']}/channel',
+          ),
+          certificatePins: [peer['pin'] as String],
+        ),
+      );
+      expect(channel.kind, WebChannelKind.webTransport);
+      await roundTrip(channel);
+    },
+  );
 
   test('a browser WebSocket channel reaches the Rust listener', () async {
     final channel = await connectWebChannel(
@@ -50,7 +84,9 @@ void main() {
     await expectLater(
       connectWebChannel(
         WebEndpoints(
-          webTransport: Uri.parse('https://127.0.0.1:${peer['webtransport']}/channel'),
+          webTransport: Uri.parse(
+            'https://127.0.0.1:${peer['webtransport']}/channel',
+          ),
           webSocket: Uri.parse('ws://127.0.0.1:${peer['websocket']}/channel'),
           allowLocalPlainWebSocket: true,
           certificatePins: ['sha256:${'ab' * 32}'],

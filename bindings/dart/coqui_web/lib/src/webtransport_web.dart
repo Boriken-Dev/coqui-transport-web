@@ -49,7 +49,7 @@ Uint8List _unhex(String pin) {
   final text = pin.substring('sha256:'.length);
   return Uint8List.fromList([
     for (var i = 0; i < text.length; i += 2)
-      int.parse(text.substring(i, i + 2), radix: 16)
+      int.parse(text.substring(i, i + 2), radix: 16),
   ]);
 }
 
@@ -59,7 +59,9 @@ Future<WebChannel> openWebTransportChannel(
   List<String> certificatePins,
 ) async {
   if (_webTransportConstructor == null) {
-    throw const TransportUnavailable('This browser does not implement WebTransport');
+    throw const TransportUnavailable(
+      'This browser does not implement WebTransport',
+    );
   }
   final _WebTransport transport;
   try {
@@ -69,15 +71,15 @@ Future<WebChannel> openWebTransportChannel(
     ];
     transport = _WebTransport(
       uri.toString(),
-      pins.isEmpty
-          ? JSObject()
-          : _Options(serverCertificateHashes: pins.toJS),
+      pins.isEmpty ? JSObject() : _Options(serverCertificateHashes: pins.toJS),
     );
   } catch (e) {
     // Browsers may deliberately obscure TLS diagnostics. A failed pinned
     // endpoint MUST NOT downgrade to an unpinned WebSocket.
     if (certificatePins.isNotEmpty) {
-      throw const TransportSecurityFailure('Pinned WebTransport connection rejected');
+      throw const TransportSecurityFailure(
+        'Pinned WebTransport connection rejected',
+      );
     }
     throw TransportUnavailable('WebTransport construction failed: $e');
   }
@@ -93,20 +95,24 @@ Future<WebChannel> openWebTransportChannel(
     link.start();
     return link;
   } catch (e) {
-    try { transport.close(); } catch (_) { }
+    try {
+      transport.close();
+    } catch (_) {}
     if (certificatePins.isNotEmpty) {
-      throw const TransportSecurityFailure('Pinned WebTransport connection rejected');
+      throw const TransportSecurityFailure(
+        'Pinned WebTransport connection rejected',
+      );
     }
     throw TransportUnavailable('WebTransport could not establish a stream: $e');
   }
 }
 
-final class _WebTransportConnection implements WebChannel {
+final class _WebTransportConnection implements ByteWebChannel {
   _WebTransportConnection(this._transport, this._reader, this._writer);
   final _WebTransport _transport;
   final _Reader _reader;
   final _Writer _writer;
-  final StreamController<String> _messages = StreamController<String>();
+  final StreamController<Uint8List> _messages = StreamController<Uint8List>();
   final FrameDecoder _decoder = FrameDecoder();
   bool _ended = false;
   bool _released = false;
@@ -114,7 +120,9 @@ final class _WebTransportConnection implements WebChannel {
   @override
   WebChannelKind get kind => WebChannelKind.webTransport;
   @override
-  Stream<String> get messages => _messages.stream;
+  Stream<String> get messages => _messages.stream.map(decodeText);
+  @override
+  Stream<Uint8List> get bytes => _messages.stream;
 
   void start() {
     unawaited(_read());
@@ -136,11 +144,18 @@ final class _WebTransportConnection implements WebChannel {
         final read = await _reader.read().toDart;
         if (read.done) break;
         final bytes = read.value?.toDart;
-        if (bytes == null) throw const TransportProtocolFailure('Null WebTransport stream chunk');
+        if (bytes == null)
+          throw const TransportProtocolFailure(
+            'Null WebTransport stream chunk',
+          );
         _decoder.push(bytes);
-        for (var text = _decoder.nextText(); text != null; text = _decoder.nextText()) {
+        for (
+          var body = _decoder.nextBytes();
+          body != null;
+          body = _decoder.nextBytes()
+        ) {
           if (_ended) return;
-          _messages.add(text);
+          _messages.add(body);
         }
       }
       _end();
@@ -158,9 +173,15 @@ final class _WebTransportConnection implements WebChannel {
   }
 
   @override
-  Future<void> send(String message) async {
-    if (_ended) throw const TransportUnavailable('WebTransport connection closed');
-    final frame = encodeFrame(message);
+  Future<void> send(String message) => _write(encodeFrame(message));
+
+  @override
+  Future<void> sendBytes(Uint8List message) =>
+      _write(encodeBytesFrame(message));
+
+  Future<void> _write(Uint8List frame) async {
+    if (_ended)
+      throw const TransportUnavailable('WebTransport connection closed');
     try {
       await _writer.write(frame.toJS).toDart;
     } catch (e) {
@@ -176,8 +197,14 @@ final class _WebTransportConnection implements WebChannel {
     if (_released) return;
     _released = true;
     _end();
-    try { await _writer.close().toDart.timeout(const Duration(seconds: 2)); } catch (_) { }
-    try { await _reader.cancel().toDart; } catch (_) { }
-    try { _transport.close(); } catch (_) { }
+    try {
+      await _writer.close().toDart.timeout(const Duration(seconds: 2));
+    } catch (_) {}
+    try {
+      await _reader.cancel().toDart;
+    } catch (_) {}
+    try {
+      _transport.close();
+    } catch (_) {}
   }
 }

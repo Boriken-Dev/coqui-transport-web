@@ -78,35 +78,51 @@ void main() {
 
   test('no fallback after an unknown or protocol failure', () async {
     var fallback = false;
-    await expectLater(connectWebChannel(
-      WebEndpoints(webTransport: wt, webSocket: ws),
-      webTransportDialer: (url, timeout, pins) async =>
-          throw const TransportProtocolFailure('bad envelope'),
-      webSocketDialer: (url, timeout, pins) async {
-        fallback = true;
-        return FakeLink(WebChannelKind.webSocket);
-      },
-    ), throwsA(isA<TransportProtocolFailure>()));
+    await expectLater(
+      connectWebChannel(
+        WebEndpoints(webTransport: wt, webSocket: ws),
+        webTransportDialer: (url, timeout, pins) async =>
+            throw const TransportProtocolFailure('bad envelope'),
+        webSocketDialer: (url, timeout, pins) async {
+          fallback = true;
+          return FakeLink(WebChannelKind.webSocket);
+        },
+      ),
+      throwsA(isA<TransportProtocolFailure>()),
+    );
     expect(fallback, isFalse);
   });
 
   test('only accepts explicitly named endpoints and secure defaults', () {
+    expect(() => WebEndpoints(webTransport: wt), returnsNormally);
+    expect(() => WebEndpoints(), throwsArgumentError);
     expect(
-      () => WebEndpoints(webTransport: wt),
+      () =>
+          WebEndpoints(webTransport: Uri.parse('https://peer.example/channel')),
+      throwsArgumentError,
+    );
+    expect(
+      () => WebEndpoints(webSocket: Uri.parse('ws://peer.example/channel')),
+      throwsArgumentError,
+    );
+    expect(
+      () => WebEndpoints(
+        webSocket: Uri.parse('wss://else.example'),
+        webTransport: wt,
+      ),
+      throwsArgumentError,
+    );
+    expect(
+      () => WebEndpoints(webSocket: Uri.parse('wss://peer.example?key=x')),
+      throwsArgumentError,
+    );
+    expect(
+      () => WebEndpoints(
+        webSocket: Uri.parse('ws://localhost:8080/channel'),
+        allowLocalPlainWebSocket: true,
+      ),
       returnsNormally,
     );
-    expect(() => WebEndpoints(), throwsArgumentError);
-    expect(() => WebEndpoints(webTransport: Uri.parse('https://peer.example/channel')),
-        throwsArgumentError);
-    expect(() => WebEndpoints(webSocket: Uri.parse('ws://peer.example/channel')),
-        throwsArgumentError);
-    expect(() => WebEndpoints(webSocket: Uri.parse('wss://else.example'), webTransport: wt),
-        throwsArgumentError);
-    expect(() => WebEndpoints(webSocket: Uri.parse('wss://peer.example?key=x')),
-        throwsArgumentError);
-    expect(() => WebEndpoints(
-      webSocket: Uri.parse('ws://localhost:8080/channel'), allowLocalPlainWebSocket: true,
-    ), returnsNormally);
   });
 
   test('direct WebSocket remains supported', () async {

@@ -13,7 +13,10 @@ Future<void> hybridMain(StreamChannel<Object?> channel) async {
     runInShell: true,
   );
   peer.stderr.transform(utf8.decoder).listen(stderr.write);
-  peer.stdout.transform(utf8.decoder).transform(const LineSplitter()).listen(channel.sink.add);
+  peer.stdout
+      .transform(utf8.decoder)
+      .transform(const LineSplitter())
+      .listen(channel.sink.add);
   await channel.stream.drain<void>();
   peer.kill();
 }

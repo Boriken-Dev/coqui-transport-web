@@ -4,11 +4,12 @@ import 'webtransport.dart';
 
 export 'contracts.dart';
 
-typedef WebDialer = Future<WebChannel> Function(
-  Uri uri,
-  Duration timeout,
-  List<String> certificatePins,
-);
+typedef WebDialer =
+    Future<WebChannel> Function(
+      Uri uri,
+      Duration timeout,
+      List<String> certificatePins,
+    );
 
 /// Opens a reliable, ordered message channel. This does not authenticate a peer,
 /// start an application protocol, or authorize anything.
@@ -28,7 +29,9 @@ Future<WebChannel> connectWebChannel(
   if (wt != null) {
     try {
       return await (webTransportDialer ?? openWebTransportChannel)(
-        wt, timeout, endpoints.certificatePins,
+        wt,
+        timeout,
+        endpoints.certificatePins,
       );
     } on TransportUnavailable {
       if (ws == null) rethrow;

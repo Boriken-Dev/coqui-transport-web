@@ -44,13 +44,11 @@ LinkRecovery decideRecovery({
     LinkFailure.transportUnavailable ||
     LinkFailure.pathLost ||
     LinkFailure.progressTimedOut ||
-    LinkFailure.suspectedMtuBlackhole =>
-      LinkRecovery.connectWssAndVerify,
+    LinkFailure.suspectedMtuBlackhole => LinkRecovery.connectWssAndVerify,
     LinkFailure.peerProofRejected ||
     LinkFailure.certificateRejected ||
     LinkFailure.protocolRejected ||
-    LinkFailure.userDisconnected =>
-      LinkRecovery.failClosed,
+    LinkFailure.userDisconnected => LinkRecovery.failClosed,
   };
 }
 
@@ -99,10 +97,11 @@ Future<RecoveredLink> recoverWebTransportPath({
     throw ArgumentError.value(timeout, 'timeout');
   }
   if (decideRecovery(
-    failedTransport: WebChannelKind.webTransport,
-    failure: failure,
-    endpoints: endpoints,
-  ) != LinkRecovery.connectWssAndVerify) {
+        failedTransport: WebChannelKind.webTransport,
+        failure: failure,
+        endpoints: endpoints,
+      ) !=
+      LinkRecovery.connectWssAndVerify) {
     throw StateError('Transport fallback denied by recovery policy');
   }
 
@@ -114,7 +113,9 @@ Future<RecoveredLink> recoverWebTransportPath({
   try {
     final proven = await verifyPeer(channel).timeout(timeout);
     if (proven != expectedPeerId) {
-      throw StateError('WSS fallback peer identity differs from the verified WebTransport peer');
+      throw StateError(
+        'WSS fallback peer identity differs from the verified WebTransport peer',
+      );
     }
     return RecoveredLink(
       connection: channel,

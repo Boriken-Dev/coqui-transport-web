@@ -5,4 +5,6 @@ Future<WebChannel> openWebTransportChannel(
   Uri uri,
   Duration timeout,
   List<String> certificatePins,
-) async => throw const TransportUnavailable('WebTransport requires a compatible browser');
+) async => throw const TransportUnavailable(
+  'WebTransport requires a compatible browser',
+);

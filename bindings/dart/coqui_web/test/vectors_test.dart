@@ -9,13 +9,17 @@ import 'package:coqui_web/coqui_web.dart';
 import 'package:test/test.dart';
 
 Uint8List _bytes(String hex) => Uint8List.fromList([
-  for (var at = 0; at < hex.length; at += 2) int.parse(hex.substring(at, at + 2), radix: 16),
+  for (var at = 0; at < hex.length; at += 2)
+    int.parse(hex.substring(at, at + 2), radix: 16),
 ]);
 
-String _hex(List<int> bytes) => bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
+String _hex(List<int> bytes) =>
+    bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
 
 void main() {
-  final vectors = jsonDecode(File('../../../vectors/frames.json').readAsStringSync()) as Map<String, dynamic>;
+  final vectors =
+      jsonDecode(File('../../../vectors/frames.json').readAsStringSync())
+          as Map<String, dynamic>;
 
   for (final raw in vectors['encode'] as List<dynamic>) {
     final item = raw as Map<String, dynamic>;
@@ -23,7 +27,10 @@ void main() {
       final text = item['text'] as String;
       final max = item['max'] as int;
       if (item['error'] == true) {
-        expect(() => encodeFrame(text, maxBytes: max), throwsA(isA<TransportProtocolFailure>()));
+        expect(
+          () => encodeFrame(text, maxBytes: max),
+          throwsA(isA<TransportProtocolFailure>()),
+        );
       } else {
         expect(_hex(encodeFrame(text, maxBytes: max)), item['hex']);
       }
@@ -39,7 +46,11 @@ void main() {
       for (final chunk in item['chunks'] as List<dynamic>) {
         decoder.push(_bytes(chunk as String));
         try {
-          for (var text = decoder.nextText(); text != null; text = decoder.nextText()) {
+          for (
+            var text = decoder.nextText();
+            text != null;
+            text = decoder.nextText()
+          ) {
             got.add(text);
           }
         } on TransportProtocolFailure {

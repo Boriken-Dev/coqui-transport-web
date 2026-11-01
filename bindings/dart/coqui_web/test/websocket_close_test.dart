@@ -16,7 +16,9 @@ final class _Peer {
   final Completer<void> released = Completer<void>();
 
   static Future<_Peer> start(void Function(WebSocket socket) onConnect) async {
-    final peer = _Peer._(await HttpServer.bind(InternetAddress.loopbackIPv4, 0));
+    final peer = _Peer._(
+      await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
+    );
     peer._server.listen((request) async {
       final socket = await WebSocketTransformer.upgrade(request);
       socket.listen((_) {}, onDone: peer.released.complete);
@@ -26,10 +28,10 @@ final class _Peer {
   }
 
   Future<WebChannel> dial() => openWebSocketChannel(
-        Uri.parse('ws://127.0.0.1:${_server.port}/'),
-        const Duration(seconds: 5),
-        const [],
-      );
+    Uri.parse('ws://127.0.0.1:${_server.port}/'),
+    const Duration(seconds: 5),
+    const [],
+  );
 
   Future<void> expectReleased() async {
     await released.future.timeout(const Duration(seconds: 5));
@@ -46,22 +48,37 @@ void main() {
     await peer.expectReleased();
   });
 
-  test('a frame over the limit fails the stream and releases the socket unprompted', () async {
-    final peer = await _Peer.start((socket) => socket.add('x' * (defaultMaxMessage + 1)));
-    final connection = await peer.dial();
-    final errors = <Object>[];
-    final done = Completer<void>();
-    connection.messages.listen((_) {}, onError: errors.add, onDone: done.complete);
-    await done.future.timeout(const Duration(seconds: 5));
-    expect(errors.single, isA<TransportProtocolFailure>());
-    await peer.expectReleased();
-  });
+  test(
+    'a frame over the limit fails the stream and releases the socket unprompted',
+    () async {
+      final peer = await _Peer.start(
+        (socket) => socket.add('x' * (defaultMaxMessage + 1)),
+      );
+      final connection = await peer.dial();
+      final errors = <Object>[];
+      final done = Completer<void>();
+      connection.messages.listen(
+        (_) {},
+        onError: errors.add,
+        onDone: done.complete,
+      );
+      await done.future.timeout(const Duration(seconds: 5));
+      expect(errors.single, isA<TransportProtocolFailure>());
+      await peer.expectReleased();
+    },
+  );
 
   test('close after a failed stream completes and is safe to repeat', () async {
-    final peer = await _Peer.start((socket) => socket.add('x' * (defaultMaxMessage + 1)));
+    final peer = await _Peer.start(
+      (socket) => socket.add('x' * (defaultMaxMessage + 1)),
+    );
     final connection = await peer.dial();
     final done = Completer<void>();
-    connection.messages.listen((_) {}, onError: (Object _) {}, onDone: done.complete);
+    connection.messages.listen(
+      (_) {},
+      onError: (Object _) {},
+      onDone: done.complete,
+    );
     await done.future.timeout(const Duration(seconds: 5));
     await connection.close();
     await connection.close();
@@ -74,7 +91,10 @@ void main() {
     final done = Completer<void>();
     connection.messages.listen((_) {}, onDone: done.complete);
     await done.future.timeout(const Duration(seconds: 5));
-    await expectLater(connection.send('late'), throwsA(isA<TransportUnavailable>()));
+    await expectLater(
+      connection.send('late'),
+      throwsA(isA<TransportUnavailable>()),
+    );
     await connection.close();
     await peer.expectReleased();
   });
