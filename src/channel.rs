@@ -41,6 +41,10 @@ pub trait Channel: Send + Sync {
 
     /// Ends the channel and releases its resources. Safe to call more than once, and after a failure.
     fn close(&self);
+
+    /// Changes the largest message this channel takes from now on, both ways, so a server can hold an unproven peer
+    /// to a small limit and raise it once the peer is proven. A channel with no limit of its own ignores it.
+    fn set_max_message(&self, _bytes: usize) {}
 }
 
 impl Channel for alloc::boxed::Box<dyn Channel> {
@@ -54,6 +58,10 @@ impl Channel for alloc::boxed::Box<dyn Channel> {
 
     fn close(&self) {
         (**self).close();
+    }
+
+    fn set_max_message(&self, bytes: usize) {
+        (**self).set_max_message(bytes);
     }
 }
 

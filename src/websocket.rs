@@ -9,6 +9,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 use core::net::SocketAddr;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -99,14 +100,33 @@ fn interrupted(error: &io::Error) -> bool {
     )
 }
 
+/// A rejected certificate will not fix itself, which a caller may act on by stopping. Any other TLS error may be one
+/// forged record, so it must not read that way. Neither may read as a path problem, which is what permits a fallback.
+fn tls_failure(error: &rustls::Error) -> Failure {
+    use rustls::AlertDescription as Alert;
+    match error {
+        rustls::Error::InvalidCertificate(_)
+        | rustls::Error::NoCertificatesPresented
+        | rustls::Error::AlertReceived(
+            Alert::BadCertificate
+            | Alert::UnsupportedCertificate
+            | Alert::CertificateRevoked
+            | Alert::CertificateExpired
+            | Alert::CertificateUnknown
+            | Alert::CertificateRequired
+            | Alert::UnknownCA
+            | Alert::AccessDenied,
+        ) => Failure::Certificate,
+        _ => Failure::Protocol,
+    }
+}
+
 fn io_failure(error: &io::Error) -> Failure {
-    // Any TLS error is a security failure, whichever verifier raised it: it must never read as a path
-    // problem, which is what permits a fallback.
-    if error
+    if let Some(tls) = error
         .get_ref()
-        .is_some_and(|inner| inner.downcast_ref::<rustls::Error>().is_some())
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
     {
-        return Failure::Certificate;
+        return tls_failure(tls);
     }
     if interrupted(error) {
         Failure::Timeout
@@ -136,15 +156,18 @@ fn config(limits: Limits) -> WebSocketConfig {
 pub struct Channel {
     inbox: Inbox,
     outgoing: Mutex<Option<SyncSender<Vec<u8>>>>,
+    queued: Arc<AtomicUsize>,
+    queued_limit: usize,
+    worker: Mutex<Option<thread::JoinHandle<()>>>,
     frames: Frames,
-    max_message: usize,
+    max_message: Arc<AtomicUsize>,
 }
 
 impl fmt::Debug for Channel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Channel")
             .field("frames", &self.frames)
-            .field("max_message", &self.max_message)
+            .field("max_message", &self.max_message.load(Ordering::SeqCst))
             .finish_non_exhaustive()
     }
 }
@@ -159,26 +182,42 @@ impl Channel {
         socket
             .get_ref()
             .tcp()
+            .set_write_timeout(Some(limits.send))
+            .map_err(|e| io_failure(&e))?;
+        socket
+            .get_ref()
+            .tcp()
             .set_nodelay(true)
             .map_err(|e| io_failure(&e))?;
         let (to_reader, inbox) = mpsc::sync_channel::<Received>(limits.pending.max(1));
         let (to_worker, outgoing) = mpsc::sync_channel::<Vec<u8>>(OUTGOING);
-        thread::Builder::new()
+        let queued = Arc::new(AtomicUsize::new(0));
+        let draining = Arc::clone(&queued);
+        let max_message = Arc::new(AtomicUsize::new(limits.max_message));
+        let current = Arc::clone(&max_message);
+        let worker = thread::Builder::new()
             .name("coqui-web-websocket".into())
-            .spawn(move || worker(socket, &to_reader, &outgoing, frames))
+            .spawn(move || {
+                worker(
+                    socket, &to_reader, &outgoing, frames, &draining, limits, &current,
+                )
+            })
             .map_err(|_| Failure::Unsupported)?;
         Ok(Self {
             inbox: Inbox::new(inbox),
             outgoing: Mutex::new(Some(to_worker)),
+            queued,
+            queued_limit: limits.queued_bytes,
+            worker: Mutex::new(Some(worker)),
             frames,
-            max_message: limits.max_message,
+            max_message,
         })
     }
 }
 
 impl channel::Channel for Channel {
     fn send(&self, message: &[u8]) -> Result<(), Failure> {
-        if message.is_empty() || message.len() > self.max_message {
+        if message.is_empty() || message.len() > self.max_message.load(Ordering::SeqCst) {
             return Err(Failure::Protocol);
         }
         if self.frames == Frames::Text && core::str::from_utf8(message).is_err() {
@@ -188,26 +227,51 @@ impl channel::Channel for Channel {
         let Some(queue) = outgoing.as_ref() else {
             return Err(Failure::Cancelled);
         };
-        queue
-            .try_send(message.to_vec())
-            .map_err(|error| match error {
+        if self
+            .queued
+            .load(Ordering::SeqCst)
+            .saturating_add(message.len())
+            > self.queued_limit
+        {
+            return Err(Failure::NoProgress);
+        }
+        self.queued.fetch_add(message.len(), Ordering::SeqCst);
+        queue.try_send(message.to_vec()).map_err(|error| {
+            self.queued.fetch_sub(message.len(), Ordering::SeqCst);
+            match error {
                 TrySendError::Full(_) => Failure::NoProgress,
                 TrySendError::Disconnected(_) => Failure::PathLost,
-            })
+            }
+        })
     }
 
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
         self.inbox.receive(timeout)
     }
 
+    fn set_max_message(&self, bytes: usize) {
+        self.max_message.store(bytes, Ordering::SeqCst);
+    }
+
     fn close(&self) {
-        // The worker sees its queue end, sends the close frame and releases the socket.
+        // The worker sends what is queued, then the close frame, then releases the socket. Waiting for it means a
+        // process that closes and exits has not lost what it sent.
         drop(
             self.outgoing
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .take(),
         );
+        let worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(worker) = worker
+            && worker.thread().id() != thread::current().id()
+        {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -217,19 +281,37 @@ impl Drop for Channel {
     }
 }
 
-/// Owns the socket: writes what is queued, reads what arrived, and stops reading while the reader
+/// A write that times out has not gone anywhere: the peer has stopped reading, which ends the channel. Reported as
+/// such, since a caller treats `Failure::Timeout` from `receive` as a quiet moment.
+fn ended(error: &tungstenite::Error) -> Failure {
+    match ws_failure(error) {
+        Failure::Timeout => Failure::NoProgress,
+        failure => failure,
+    }
+}
+
+/// Owns the socket: writes what is queued, reads what arrived, pings a silent peer, and stops reading while the reader
 /// is behind, which is the back-pressure a peer feels.
 fn worker(
     mut socket: WebSocket<Stream>,
     inbox: &SyncSender<Received>,
     outgoing: &mpsc::Receiver<Vec<u8>>,
     frames: Frames,
+    queued: &AtomicUsize,
+    limits: Limits,
+    max_message: &AtomicUsize,
 ) {
+    // What the socket was built with: the shared value may already have moved on.
+    let mut applied = limits.max_message;
+    let idle = limits.idle;
     let mut waiting: Option<Received> = None;
+    let mut heard = Instant::now();
+    let mut pinged = false;
     loop {
         loop {
             match outgoing.try_recv() {
                 Ok(message) => {
+                    queued.fetch_sub(message.len(), Ordering::SeqCst);
                     let framed = match frames {
                         Frames::Text => match core::str::from_utf8(&message) {
                             Ok(text) => Message::text(text.to_string()),
@@ -237,9 +319,16 @@ fn worker(
                         },
                         Frames::Binary => Message::binary(message),
                     };
-                    if let Err(error) = socket.write(framed) {
-                        let _ = inbox.send(Err(ws_failure(&error)));
-                        return;
+                    match socket.write(framed) {
+                        Ok(()) => {}
+                        Err(tungstenite::Error::Io(error)) if interrupted(&error) => {
+                            let _ = inbox.send(Err(Failure::NoProgress));
+                            return;
+                        }
+                        Err(error) => {
+                            let _ = inbox.send(Err(ended(&error)));
+                            return;
+                        }
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -249,12 +338,20 @@ fn worker(
                 }
             }
         }
+        if heard.elapsed() >= idle.saturating_mul(2) {
+            let _ = inbox.send(Err(Failure::NoProgress));
+            return;
+        }
+        if heard.elapsed() >= idle && !pinged {
+            pinged = true;
+            let _ = socket.write(Message::Ping(Vec::new().into()));
+        }
         match socket.flush() {
             Ok(()) => {}
             Err(tungstenite::Error::Io(error)) if interrupted(&error) => {}
             Err(tungstenite::Error::ConnectionClosed) => return,
             Err(error) => {
-                let _ = inbox.send(Err(ws_failure(&error)));
+                let _ = inbox.send(Err(ended(&error)));
                 return;
             }
         }
@@ -272,25 +369,44 @@ fn worker(
                 }
             }
         }
+        // Looked at after this turn's writes: a peer answering one of them meets the limit its sender had set.
+        let wanted = max_message.load(Ordering::SeqCst);
+        if wanted != applied {
+            applied = wanted;
+            socket.set_config(|config| {
+                config.max_message_size = Some(wanted);
+                config.max_frame_size = Some(wanted);
+            });
+        }
         match socket.read() {
-            Ok(Message::Text(text)) => waiting = Some(Ok(text.as_bytes().to_vec())),
-            Ok(Message::Binary(body)) if frames == Frames::Binary => {
-                waiting = Some(Ok(body.to_vec()))
+            Ok(message) => {
+                heard = Instant::now();
+                pinged = false;
+                match message {
+                    Message::Text(text) => waiting = Some(Ok(text.as_bytes().to_vec())),
+                    Message::Binary(body) if frames == Frames::Binary => {
+                        waiting = Some(Ok(body.to_vec()))
+                    }
+                    Message::Binary(_) => {
+                        let _ = inbox.send(Err(Failure::Protocol));
+                        finish(&mut socket);
+                        return;
+                    }
+                    Message::Close(_) => {
+                        // An orderly close: the reader sees the end when this sender drops.
+                        let _ = socket.flush();
+                        return;
+                    }
+                    _ => {}
+                }
             }
-            Ok(Message::Binary(_)) => {
-                let _ = inbox.send(Err(Failure::Protocol));
-                finish(&mut socket);
-                return;
-            }
-            Ok(Message::Close(_)) | Err(tungstenite::Error::ConnectionClosed) => {
-                // An orderly close: the reader sees the end when this sender drops.
+            Err(tungstenite::Error::ConnectionClosed) => {
                 let _ = socket.flush();
                 return;
             }
-            Ok(_) => {}
             Err(tungstenite::Error::Io(error)) if interrupted(&error) => {}
             Err(error) => {
-                let _ = inbox.send(Err(ws_failure(&error)));
+                let _ = inbox.send(Err(ended(&error)));
                 finish(&mut socket);
                 return;
             }
@@ -308,6 +424,15 @@ fn finish(socket: &mut WebSocket<Stream>) {
             Err(tungstenite::Error::Io(error)) if interrupted(&error) => {}
             Err(_) => return,
         }
+    }
+}
+
+fn endpoint_is_loopback(endpoint: &Url) -> bool {
+    match endpoint.host() {
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
     }
 }
 
@@ -409,7 +534,8 @@ impl channel::Dialer for Dialer {
         tcp.set_write_timeout(Some(timeout))
             .map_err(|e| io_failure(&e))?;
         let stream = match endpoint.scheme() {
-            "ws" => Stream::Plain(tcp),
+            "ws" if endpoint_is_loopback(endpoint) => Stream::Plain(tcp),
+            "ws" => return Err(Failure::Permission),
             "wss" => {
                 let tls = self.tls.clone().ok_or(Failure::Certificate)?;
                 let host = endpoint.host_str().ok_or(Failure::Protocol)?;
@@ -532,57 +658,30 @@ impl Listener {
         self.socket.local_addr().map_err(|e| io_failure(&e))
     }
 
-    /// Waits for one connection and completes its handshake within the handshake limit. A peer that
-    /// fails the handshake holds this up for no longer than that.
+    /// Waits for one connection and completes its handshake within the handshake limit.
     ///
     /// # Errors
     ///
     /// [`Failure::Timeout`] when no connection arrived within `timeout`, or a handshake took too long;
     /// [`Failure::Permission`] for a refused origin; otherwise why the handshake failed.
-    // tungstenite fixes the callback's error type, and it is large.
-    #[allow(clippy::result_large_err)]
     pub fn accept(&self, timeout: Option<Duration>) -> Result<Channel, Failure> {
-        let tcp = self.next_socket(timeout)?;
-        tcp.set_nonblocking(false).map_err(|e| io_failure(&e))?;
-        tcp.set_read_timeout(Some(self.limits.handshake))
-            .map_err(|e| io_failure(&e))?;
-        tcp.set_write_timeout(Some(self.limits.handshake))
-            .map_err(|e| io_failure(&e))?;
-        let stream = match &self.tls {
-            None => Stream::Plain(tcp),
-            Some(tls) => {
-                let session =
-                    ServerConnection::new(Arc::clone(tls)).map_err(|_| Failure::Protocol)?;
-                Stream::Server(Box::new(StreamOwned::new(session, tcp)))
-            }
-        };
-        let origins = self.origins.clone();
-        let check = move |request: &Request,
-                          response: Response|
-              -> Result<Response, ErrorResponse> {
-            let origin = request.headers().get("origin").map(HeaderValue::to_str);
-            match origin {
-                Some(Ok(origin))
-                    if !origins.is_empty() && !origins.iter().any(|allowed| allowed == origin) =>
-                {
-                    let mut refused = ErrorResponse::new(None);
-                    *refused.status_mut() = StatusCode::FORBIDDEN;
-                    Err(refused)
-                }
-                Some(Err(_)) if !origins.is_empty() => {
-                    let mut refused = ErrorResponse::new(None);
-                    *refused.status_mut() = StatusCode::FORBIDDEN;
-                    Err(refused)
-                }
-                _ => Ok(response),
-            }
-        };
-        let socket = tungstenite::accept_hdr_with_config(stream, check, Some(config(self.limits)))
-            .map_err(|error| match error {
-                HandshakeError::Interrupted(_) => Failure::Timeout,
-                HandshakeError::Failure(error) => ws_failure(&error),
-            })?;
-        Channel::start(socket, self.limits, self.frames)
+        self.next(timeout)?.handshake()
+    }
+
+    /// Waits for one connection and returns it before its handshake, so a server can run handshakes on threads of its
+    /// own and one slow peer cannot hold the others up. A source [`with_admission`](Self::with_admission) denies never appears.
+    ///
+    /// # Errors
+    ///
+    /// [`Failure::Timeout`] when no connection arrived within `timeout`.
+    pub fn next(&self, timeout: Option<Duration>) -> Result<Pending, Failure> {
+        Ok(Pending {
+            tcp: self.next_socket(timeout)?,
+            tls: self.tls.clone(),
+            limits: self.limits,
+            frames: self.frames,
+            origins: self.origins.clone(),
+        })
     }
 
     fn next_socket(&self, timeout: Option<Duration>) -> Result<TcpStream, Failure> {
@@ -602,6 +701,117 @@ impl Listener {
                 }
                 Err(error) => return Err(io_failure(&error)),
             }
+        }
+    }
+}
+
+/// A connection that has not done its handshake.
+pub struct Pending {
+    tcp: TcpStream,
+    tls: Option<Arc<ServerConfig>>,
+    limits: Limits,
+    frames: Frames,
+    origins: Vec<alloc::string::String>,
+}
+
+impl fmt::Debug for Pending {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Pending")
+            .field("peer", &self.tcp.peer_addr().ok())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Pending {
+    /// Completes the handshake within the handshake limit in total: a peer sending a byte at a time gets no longer.
+    ///
+    /// # Errors
+    ///
+    /// [`Failure::Timeout`] past the limit; [`Failure::Permission`] for a refused origin; otherwise why it failed.
+    // tungstenite fixes the callback's error type, and it is large.
+    #[allow(clippy::result_large_err)]
+    pub fn handshake(self) -> Result<Channel, Failure> {
+        let Self {
+            tcp,
+            tls,
+            limits,
+            frames,
+            origins,
+        } = self;
+        tcp.set_nonblocking(false).map_err(|e| io_failure(&e))?;
+        tcp.set_read_timeout(Some(limits.handshake))
+            .map_err(|e| io_failure(&e))?;
+        tcp.set_write_timeout(Some(limits.handshake))
+            .map_err(|e| io_failure(&e))?;
+        // Per-read timeouts alone let a slow peer stretch this: a watchdog ends the socket at the total limit.
+        let watched = tcp.try_clone().map_err(|e| io_failure(&e))?;
+        let (done, finished) = mpsc::channel::<()>();
+        let watchdog = thread::Builder::new()
+            .name("coqui-web-handshake".into())
+            .spawn(move || {
+                if finished.recv_timeout(limits.handshake) == Err(mpsc::RecvTimeoutError::Timeout) {
+                    let _ = watched.shutdown(std::net::Shutdown::Both);
+                }
+            })
+            .map_err(|_| Failure::Unsupported)?;
+        let stream = match &tls {
+            None => Stream::Plain(tcp),
+            Some(tls) => {
+                let session =
+                    ServerConnection::new(Arc::clone(tls)).map_err(|_| Failure::Protocol)?;
+                Stream::Server(Box::new(StreamOwned::new(session, tcp)))
+            }
+        };
+        let check =
+            move |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
+                let origin = request.headers().get("origin").map(HeaderValue::to_str);
+                let allowed = origins.is_empty()
+                    || match origin {
+                        None => true,
+                        Some(Ok(origin)) => origins.iter().any(|allowed| allowed == origin),
+                        Some(Err(_)) => false,
+                    };
+                if allowed {
+                    Ok(response)
+                } else {
+                    let mut refused = ErrorResponse::new(None);
+                    *refused.status_mut() = StatusCode::FORBIDDEN;
+                    Err(refused)
+                }
+            };
+        let started = Instant::now();
+        let socket = tungstenite::accept_hdr_with_config(stream, check, Some(config(limits)));
+        drop(done);
+        let _ = watchdog.join();
+        let socket = socket.map_err(|error| match error {
+            HandshakeError::Interrupted(_) => Failure::Timeout,
+            HandshakeError::Failure(_) if started.elapsed() >= limits.handshake => Failure::Timeout,
+            HandshakeError::Failure(error) => ws_failure(&error),
+        })?;
+        Channel::start(socket, limits, frames)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_rejected_certificate_reads_as_one() {
+        for rejected in [
+            rustls::Error::NoCertificatesPresented,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer),
+            rustls::Error::AlertReceived(rustls::AlertDescription::BadCertificate),
+            rustls::Error::AlertReceived(rustls::AlertDescription::CertificateRequired),
+        ] {
+            assert_eq!(tls_failure(&rejected), Failure::Certificate, "{rejected:?}");
+        }
+        for forgeable in [
+            rustls::Error::DecryptError,
+            rustls::Error::AlertReceived(rustls::AlertDescription::DecodeError),
+            rustls::Error::InvalidMessage(rustls::InvalidMessage::InvalidContentType),
+        ] {
+            assert_eq!(tls_failure(&forgeable), Failure::Protocol, "{forgeable:?}");
         }
     }
 }

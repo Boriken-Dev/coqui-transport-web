@@ -9,6 +9,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 use core::net::SocketAddr;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use std::io;
 use std::sync::mpsc::{self, SyncSender};
@@ -77,7 +78,8 @@ pub struct Channel {
     send: Mutex<Option<SendStream>>,
     reader: AbortHandle,
     handle: Handle,
-    max_message: usize,
+    max_message: Arc<AtomicUsize>,
+    send_limit: Duration,
     // Keeps the driver's runtime alive as long as a channel needs it.
     _runtime: Arc<Runtime>,
 }
@@ -86,7 +88,7 @@ impl fmt::Debug for Channel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Channel")
             .field("remote", &self.connection.remote_address())
-            .field("max_message", &self.max_message)
+            .field("max_message", &self.max_message.load(Ordering::SeqCst))
             .finish_non_exhaustive()
     }
 }
@@ -101,8 +103,9 @@ impl Channel {
     ) -> Self {
         let (to_reader, inbox) = mpsc::sync_channel::<Received>(limits.pending.max(1));
         let handle = runtime.handle().clone();
+        let max_message = Arc::new(AtomicUsize::new(limits.max_message));
         let reader = handle
-            .spawn(read_loop(recv, limits.max_message, to_reader))
+            .spawn(read_loop(recv, Arc::clone(&max_message), to_reader))
             .abort_handle();
         Self {
             inbox: Inbox::new(inbox),
@@ -110,7 +113,8 @@ impl Channel {
             send: Mutex::new(Some(send)),
             reader,
             handle,
-            max_message: limits.max_message,
+            max_message,
+            send_limit: limits.send,
             _runtime: runtime,
         }
     }
@@ -118,8 +122,8 @@ impl Channel {
 
 /// Decodes the stream into messages. A full queue parks this task, so QUIC flow control tells the
 /// peer to slow down rather than memory growing.
-async fn read_loop(mut recv: RecvStream, maximum: usize, inbox: SyncSender<Received>) {
-    let mut decoder = Decoder::new(maximum);
+async fn read_loop(mut recv: RecvStream, maximum: Arc<AtomicUsize>, inbox: SyncSender<Received>) {
+    let mut decoder = Decoder::new(maximum.load(Ordering::SeqCst));
     let mut chunk = vec![0_u8; READ_CHUNK];
     loop {
         let count = match recv.read(&mut chunk).await {
@@ -130,6 +134,7 @@ async fn read_loop(mut recv: RecvStream, maximum: usize, inbox: SyncSender<Recei
                 return;
             }
         };
+        decoder.set_maximum(maximum.load(Ordering::SeqCst));
         decoder.push(&chunk[..count]);
         loop {
             match decoder.next_frame() {
@@ -163,18 +168,33 @@ async fn deliver(inbox: &SyncSender<Received>, mut item: Received) -> bool {
 
 impl channel::Channel for Channel {
     fn send(&self, message: &[u8]) -> Result<(), Failure> {
-        let framed = frame::encode(message, self.max_message).map_err(|_| Failure::Protocol)?;
+        let framed = frame::encode(message, self.max_message.load(Ordering::SeqCst))
+            .map_err(|_| Failure::Protocol)?;
         let mut guard = self.send.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(stream) = guard.as_mut() else {
             return Err(Failure::Cancelled);
         };
-        self.handle
-            .block_on(stream.write_all(&framed))
-            .map_err(|_| Failure::PathLost)
+        match self
+            .handle
+            .block_on(bounded(self.send_limit, stream.write_all(&framed)))
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(Failure::PathLost),
+            // A peer's flow control can hold a send for ever: past the limit it has stopped reading. Part of a frame may
+            // have gone, so nothing more can follow it on this stream.
+            Err(_) => {
+                *guard = None;
+                Err(Failure::NoProgress)
+            }
+        }
     }
 
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
         self.inbox.receive(timeout)
+    }
+
+    fn set_max_message(&self, bytes: usize) {
+        self.max_message.store(bytes, Ordering::SeqCst);
     }
 
     fn close(&self) {
@@ -395,29 +415,86 @@ impl Listener {
         self.address
     }
 
-    /// Waits for one session and its first stream. A peer that stalls after connecting holds this up
-    /// for no longer than the handshake limit.
+    /// Waits for one session and its first stream, within the handshake limit once a session arrives.
     ///
     /// # Errors
     ///
     /// [`Failure::Timeout`] when no session arrived within `timeout` or a handshake took too long;
     /// [`Failure::Permission`] for a refused origin; otherwise why the session failed.
     pub fn accept(&self, timeout: Option<Duration>) -> Result<Channel, Failure> {
-        let incoming: IncomingSession = match timeout {
-            Some(limit) => self
-                .runtime
-                .block_on(bounded(limit, self.endpoint.accept()))
-                .map_err(|_| Failure::Timeout)?,
-            None => self.runtime.block_on(self.endpoint.accept()),
-        };
-        if let Some(admit) = &self.admission
-            && !admit(incoming.remote_address())
-        {
-            incoming.refuse();
-            return Err(Failure::Permission);
+        self.next(timeout)?.handshake()
+    }
+
+    /// Waits for one session from a validated source and returns it before its handshake, so a server can run handshakes on
+    /// threads of its own. UDP sources are forgeable, so a source is sent to retry first, and only then judged by admission.
+    ///
+    /// # Errors
+    ///
+    /// [`Failure::Timeout`] when none arrived within `timeout`.
+    pub fn next(&self, timeout: Option<Duration>) -> Result<Pending, Failure> {
+        let deadline = timeout.map(|limit| std::time::Instant::now() + limit);
+        loop {
+            let incoming: IncomingSession = match deadline {
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    self.runtime
+                        .block_on(bounded(left, self.endpoint.accept()))
+                        .map_err(|_| Failure::Timeout)?
+                }
+                None => self.runtime.block_on(self.endpoint.accept()),
+            };
+            if !incoming.remote_address_validated() {
+                incoming.retry();
+                continue;
+            }
+            if self
+                .admission
+                .as_ref()
+                .is_some_and(|admit| !admit(incoming.remote_address()))
+            {
+                incoming.refuse();
+                continue;
+            }
+            return Ok(Pending {
+                incoming,
+                limits: self.limits,
+                origins: self.origins.clone(),
+                runtime: Arc::clone(&self.runtime),
+            });
         }
-        let origins = &self.origins;
-        let opened = self.runtime.block_on(bounded(self.limits.handshake, async {
+    }
+}
+
+/// A session that has not done its handshake.
+pub struct Pending {
+    incoming: IncomingSession,
+    limits: Limits,
+    origins: Vec<alloc::string::String>,
+    runtime: Arc<Runtime>,
+}
+
+impl fmt::Debug for Pending {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Pending")
+            .field("limits", &self.limits)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Pending {
+    /// Completes the session and takes its first stream, within the handshake limit in total.
+    ///
+    /// # Errors
+    ///
+    /// [`Failure::Timeout`] past the limit; [`Failure::Permission`] for a refused origin; otherwise why it failed.
+    pub fn handshake(self) -> Result<Channel, Failure> {
+        let Self {
+            incoming,
+            limits,
+            origins,
+            runtime,
+        } = self;
+        let opened = runtime.block_on(bounded(limits.handshake, async {
             let request = incoming.await.map_err(|e| connection_failure(&e))?;
             if let Some(origin) = request.origin()
                 && !origins.is_empty()
@@ -434,12 +511,6 @@ impl Listener {
             Ok((connection, send, recv))
         }));
         let (connection, send, recv) = opened.map_err(|_| Failure::Timeout)??;
-        Ok(Channel::start(
-            connection,
-            send,
-            recv,
-            self.limits,
-            Arc::clone(&self.runtime),
-        ))
+        Ok(Channel::start(connection, send, recv, limits, runtime))
     }
 }

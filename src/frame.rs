@@ -57,6 +57,11 @@ pub struct Decoder {
 }
 
 impl Decoder {
+    /// Changes the largest body accepted from the next frame on.
+    pub const fn set_maximum(&mut self, maximum: usize) {
+        self.maximum = maximum;
+    }
+
     /// A decoder accepting bodies of at most `maximum` bytes.
     #[must_use]
     pub const fn new(maximum: usize) -> Self {

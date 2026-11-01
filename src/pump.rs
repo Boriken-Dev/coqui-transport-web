@@ -16,8 +16,14 @@ pub struct Limits {
     pub max_message: usize,
     /// Messages held for a slow reader, after which the driver stops reading from the peer.
     pub pending: usize,
-    /// How long opening may take: TCP or QUIC, TLS, and the HTTP upgrade.
+    /// How long opening may take in total: TCP or QUIC, TLS, and the HTTP upgrade.
     pub handshake: Duration,
+    /// Bytes queued to send, past which `send` answers `Failure::NoProgress` rather than growing.
+    pub queued_bytes: usize,
+    /// How long one send may wait on a peer that is not reading, where a driver waits at all.
+    pub send: Duration,
+    /// Silence after which a WebSocket peer is pinged, and twice this after which it is gone: `Failure::NoProgress`.
+    pub idle: Duration,
 }
 
 impl Limits {
@@ -35,10 +41,31 @@ impl Limits {
         self
     }
 
-    /// Sets how long opening may take.
+    /// Sets how long opening may take in total.
     #[must_use]
     pub const fn with_handshake(mut self, limit: Duration) -> Self {
         self.handshake = limit;
+        self
+    }
+
+    /// Sets how many bytes may wait to be sent.
+    #[must_use]
+    pub const fn with_queued_bytes(mut self, bytes: usize) -> Self {
+        self.queued_bytes = bytes;
+        self
+    }
+
+    /// Sets how long one send may wait.
+    #[must_use]
+    pub const fn with_send(mut self, limit: Duration) -> Self {
+        self.send = limit;
+        self
+    }
+
+    /// Sets the silence after which a peer is pinged.
+    #[must_use]
+    pub const fn with_idle(mut self, limit: Duration) -> Self {
+        self.idle = limit;
         self
     }
 }
@@ -49,6 +76,9 @@ impl Default for Limits {
             max_message: DEFAULT_MAX_MESSAGE,
             pending: 64,
             handshake: Duration::from_secs(10),
+            queued_bytes: 64 * 1024 * 1024,
+            send: Duration::from_secs(30),
+            idle: Duration::from_secs(60),
         }
     }
 }

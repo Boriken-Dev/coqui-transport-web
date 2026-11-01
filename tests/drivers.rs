@@ -290,6 +290,194 @@ fn a_dialer_header_and_the_path_reach_the_server_and_a_value_never_prints() {
 }
 
 #[test]
+fn close_delivers_what_was_queued_before_it_returns() {
+    let listener = websocket::Listener::bind(loopback(), None).unwrap();
+    let url = plain_ws_url(listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let channel = listener.accept(Some(WAIT)).unwrap();
+        let mut got = Vec::new();
+        while let Ok(Some(message)) = channel.receive(Some(WAIT)) {
+            got.push(message);
+        }
+        got
+    });
+    let client = websocket::Dialer::new()
+        .dial(Kind::WebSocket, &url, WAIT)
+        .unwrap();
+    let sent: Vec<Vec<u8>> = (0..20).map(|n| format!("{n}").into_bytes()).collect();
+    for message in &sent {
+        client.send(message).unwrap();
+    }
+    client.close();
+    assert_eq!(server.join().unwrap(), sent);
+}
+
+#[test]
+fn plain_websocket_from_a_dialer_is_refused_beyond_loopback() {
+    let url = Url::parse("ws://192.0.2.1:9/").unwrap();
+    let refused = websocket::Dialer::new().dial(Kind::WebSocket, &url, Duration::from_millis(200));
+    assert!(refused.is_err());
+    // A listener answering on another address of this machine is still not loopback by name.
+    let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let local = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    if local.connect("192.0.2.1:9").is_ok()
+        && let Ok(address) = local.local_addr()
+        && !address.ip().is_loopback()
+        && !address.ip().is_unspecified()
+    {
+        let url = Url::parse(&format!("ws://{}:{port}/", address.ip())).unwrap();
+        let refused = websocket::Dialer::new().dial(Kind::WebSocket, &url, Duration::from_secs(2));
+        assert_eq!(refused.unwrap_err(), Failure::Permission);
+    }
+}
+
+#[test]
+fn a_peer_dribbling_its_handshake_gets_no_longer_than_the_total_limit_and_holds_up_nobody() {
+    use std::io::Write;
+    let limits = Limits::default().with_handshake(Duration::from_millis(600));
+    let listener = websocket::Listener::bind(loopback(), None)
+        .unwrap()
+        .with_limits(limits);
+    let address = listener.local_addr().unwrap();
+    let mut slow = std::net::TcpStream::connect(address).unwrap();
+    let dribbling = thread::spawn(move || {
+        for _ in 0..40 {
+            if slow.write_all(b"G").is_err() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+    let pending = listener.next(Some(WAIT)).unwrap();
+    let started = Instant::now();
+    assert!(pending.handshake().is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    dribbling.join().unwrap();
+}
+
+#[test]
+fn a_peer_that_goes_silent_is_noticed_and_a_live_one_is_not() {
+    let idle = Duration::from_millis(200);
+    let limits = Limits::default().with_idle(idle);
+    // Two live drivers answer each other's pings, so silence between messages ends nothing.
+    let listener = websocket::Listener::bind(loopback(), None)
+        .unwrap()
+        .with_limits(limits);
+    let url = plain_ws_url(listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let channel = listener.accept(Some(WAIT)).unwrap();
+        echo_once(&channel);
+        channel
+    });
+    let client = websocket::Dialer::new()
+        .with_limits(limits)
+        .dial(Kind::WebSocket, &url, WAIT)
+        .unwrap();
+    thread::sleep(idle * 4);
+    client.send(b"still here").unwrap();
+    assert_eq!(client.receive(Some(WAIT)).unwrap().unwrap(), b"still here");
+    let held = server.join().unwrap();
+
+    // A socket that opened and then says nothing, and answers no ping, is gone.
+    let raw = std::net::TcpListener::bind(loopback()).unwrap();
+    let url = plain_ws_url(raw.local_addr().unwrap());
+    let silent = thread::spawn(move || {
+        let (tcp, _) = raw.accept().unwrap();
+        let socket = tungstenite::accept(tcp).unwrap();
+        thread::sleep(Duration::from_secs(3));
+        drop(socket);
+    });
+    let client = websocket::Dialer::new()
+        .with_limits(limits)
+        .dial(Kind::WebSocket, &url, WAIT)
+        .unwrap();
+    assert_eq!(client.receive(Some(WAIT)), Err(Failure::NoProgress));
+    silent.join().unwrap();
+    drop(held);
+}
+
+#[test]
+fn a_peer_that_stops_reading_ends_the_channel_with_no_progress() {
+    let limits = Limits::default()
+        .with_send(Duration::from_millis(300))
+        .with_max_message(1024 * 1024);
+    let listener = websocket::Listener::bind(loopback(), None)
+        .unwrap()
+        .with_limits(limits);
+    let url = plain_ws_url(listener.local_addr().unwrap());
+    let raw = thread::spawn(move || {
+        let tcp = std::net::TcpStream::connect(url.socket_addrs(|| None).unwrap()[0]).unwrap();
+        let (socket, _) = tungstenite::client(url.as_str(), tcp).unwrap();
+        thread::sleep(Duration::from_secs(8));
+        drop(socket);
+    });
+    let channel = listener.accept(Some(WAIT)).unwrap();
+    let big = vec![b'x'; 1024 * 1024];
+    let started = Instant::now();
+    let ended = loop {
+        assert!(started.elapsed() < Duration::from_secs(7), "it kept going");
+        match channel.send(&big) {
+            Ok(()) => {}
+            Err(Failure::NoProgress) => thread::sleep(Duration::from_millis(50)),
+            // The worker has gone; why is in the inbox.
+            Err(_) => break channel.receive(Some(WAIT)),
+        }
+        match channel.receive(Some(Duration::from_millis(1))) {
+            Err(Failure::Timeout) => {}
+            other => break other,
+        }
+    };
+    assert_eq!(ended, Err(Failure::NoProgress));
+    raw.join().unwrap();
+}
+
+#[test]
+fn a_raised_limit_takes_effect_both_ways_and_a_lowered_one_refuses() {
+    let limits = Limits::default().with_max_message(16);
+    let listener = websocket::Listener::bind(loopback(), None)
+        .unwrap()
+        .with_limits(limits);
+    let url = plain_ws_url(listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let channel = listener.accept(Some(WAIT)).unwrap();
+        assert_eq!(channel.send(&[b'x'; 32]), Err(Failure::Protocol));
+        channel.set_max_message(64);
+        channel.send(b"raised").unwrap();
+        let got = channel.receive(Some(WAIT)).unwrap().unwrap();
+        assert_eq!(got.len(), 32);
+        channel.set_max_message(16);
+        channel.send(b"lowered").unwrap();
+        channel.receive(Some(WAIT))
+    });
+    let client = websocket::Dialer::new()
+        .dial(Kind::WebSocket, &url, WAIT)
+        .unwrap();
+    assert_eq!(client.receive(Some(WAIT)).unwrap().unwrap(), b"raised");
+    client.send(&[b'x'; 32]).unwrap();
+    assert_eq!(client.receive(Some(WAIT)).unwrap().unwrap(), b"lowered");
+    client.send(&[b'x'; 32]).unwrap();
+    assert!(server.join().unwrap().is_err(), "over the lowered limit");
+}
+
+#[test]
+fn queued_bytes_over_the_budget_are_refused_rather_than_held() {
+    let limits = Limits::default().with_queued_bytes(8);
+    let listener = websocket::Listener::bind(loopback(), None).unwrap();
+    let url = plain_ws_url(listener.local_addr().unwrap());
+    let _server = thread::spawn(move || listener.accept(Some(WAIT)).map(|_| ()));
+    let client = websocket::Dialer::new()
+        .with_limits(limits)
+        .dial(Kind::WebSocket, &url, WAIT)
+        .unwrap();
+    assert_eq!(client.send(&[b'x'; 64]), Err(Failure::NoProgress));
+}
+
+#[test]
 fn a_receive_timeout_leaves_the_channel_usable() {
     let listener = websocket::Listener::bind(loopback(), None).unwrap();
     let url = plain_ws_url(listener.local_addr().unwrap());

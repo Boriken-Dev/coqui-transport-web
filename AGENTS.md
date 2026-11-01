@@ -31,6 +31,7 @@ pub trait Channel: Send + Sync {
     fn send(&self, message: &[u8]) -> Result<(), Failure>;
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure>;
     fn close(&self);
+    fn set_max_message(&self, _bytes: usize) {}   // both ways, from the next read; a peer's answer to anything sent after this call meets it; default ignores it
 }
 ```
 
@@ -200,13 +201,16 @@ Methods for the `Decoder` struct.
 ## Limits (crate root, with a driver feature)
 
 ```rust
-pub struct Limits { pub max_message: usize, pub pending: usize, pub handshake: Duration }
+pub struct Limits { pub max_message: usize, pub pending: usize, pub handshake: Duration, pub queued_bytes: usize, pub send: Duration, pub idle: Duration }
 pub const fn with_max_message(self, bytes: usize) -> Self
 pub const fn with_pending(self, messages: usize) -> Self
 pub const fn with_handshake(self, limit: Duration) -> Self
+pub const fn with_queued_bytes(self, bytes: usize) -> Self
+pub const fn with_send(self, limit: Duration) -> Self
+pub const fn with_idle(self, limit: Duration) -> Self
 ```
 
-`#[non_exhaustive]`. Defaults: 1 MiB, 64 messages, 10 s. A message over `max_message` ends the channel with `Failure::Protocol`. When `pending`
+`#[non_exhaustive]`. Defaults: 1 MiB, 64 messages, 10 s in total for a handshake, 64 MiB queued to send, 30 s for one send, a ping after 60 s of silence and `Failure::NoProgress` after 120 s. A message over `max_message` ends the channel with `Failure::Protocol`. When `pending`
 messages wait for a slow reader, the driver stops reading from the peer.
 
 ## WebSocket (`coqui_web::websocket`, feature `websocket`)
@@ -225,10 +229,12 @@ pub const fn Listener::with_frames(self, frames: Frames) -> Self
 pub fn Listener::with_origins(self, origins: impl IntoIterator<Item = String>) -> Self
 pub fn Listener::with_admission(self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self
 pub fn Listener::local_addr(&self) -> Result<SocketAddr, Failure>
+pub fn Listener::next(&self, timeout: Option<Duration>) -> Result<Pending, Failure>
+pub fn Pending::handshake(self) -> Result<Channel, Failure>
 pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Failure>
 ```
 
-`bind` with no TLS on a non-loopback address is `Failure::Permission`. `accept` runs one handshake at a time, each bounded by `Limits::handshake`.
+`bind` with no TLS on a non-loopback address is `Failure::Permission`. `accept` runs one handshake, bounded in total by `Limits::handshake`. `Listener::next` returns a `Pending` before its handshake, for a server that runs `Pending::handshake` on threads of its own so one slow peer cannot hold up others. A dialer refuses `ws://` beyond loopback with `Failure::Permission`. `close` returns once what was queued has gone. `Failure::Certificate` means a certificate was rejected, by this side or the peer's; any other TLS error is `Failure::Protocol`, since one forged record can cause it.
 
 ## WebTransport (`coqui_web::webtransport`, feature `webtransport`)
 
@@ -242,10 +248,12 @@ pub const fn Listener::with_limits(self, limits: Limits) -> Self
 pub fn Listener::with_origins(self, origins: impl IntoIterator<Item = String>) -> Self
 pub fn Listener::with_admission(self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self
 pub const fn Listener::local_addr(&self) -> SocketAddr
+pub fn Listener::next(&self, timeout: Option<Duration>) -> Result<Pending, Failure>
+pub fn Pending::handshake(self) -> Result<Channel, Failure>
 pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Failure>
 ```
 
-Each dialer and listener runs its own runtime, and its calls block. Inside an async runtime, call them from its blocking pool.
+`Listener::next` sends a source to retry first, since UDP sources are forgeable, then judges it by admission, and `Pending::handshake` completes it. Each dialer and listener runs its own runtime, and its calls block. Inside an async runtime, call them from its blocking pool.
 
 ## Gotchas
 
