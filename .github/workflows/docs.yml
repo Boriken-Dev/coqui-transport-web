@@ -1,0 +1,105 @@
+name: Docs
+
+# The only workflow that deploys Pages, so the site can be rebuilt without cutting a
+# release: on a push to main that touches a docs source, and on demand for any ref.
+# A release made with the workflow's own GITHUB_TOKEN starts no workflow, so a release
+# workflow dispatches this one at its tag rather than this one listening for releases.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "CHANGELOG.md"
+      - "src/**/*.rs"
+      - "Cargo.toml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      deploy:
+        description: "Deploy the built site, or only prove it builds"
+        type: boolean
+        required: false
+        default: true
+      ref:
+        description: "Git ref to build"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-deploy
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the documentation site
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # configure-pages needs this to turn Pages on by itself, so a fresh clone or fork
+      # does not depend on a setting somebody clicked.
+      pages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - name: Build the Rust API reference
+        # Strict, so a broken intra-doc link fails here rather than shipping.
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Install the narrative docs tooling
+        run: pip install mkdocs mkdocs-material pymdown-extensions
+      - name: Build the narrative site
+        run: mkdocs build --strict
+        env:
+          # Material's upstream MkDocs 2.0 banner is not a site diagnostic; keep
+          # strict mode focused on broken links and actual build warnings.
+          NO_MKDOCS_2_WARNING: "1"
+      - name: Add the Rust reference under /rust/
+        # Cargo doc writes no root index; send the reference's front door to the crate.
+        run: |
+          mkdir -p site/rust
+          cp -r target/doc/. site/rust/
+          printf '%s' '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=coqui_web/index.html"><title>coqui-web Rust API</title><a href="coqui_web/index.html">coqui-web Rust API</a>' > site/rust/index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    # Absent outside a call, so a push or a dispatch deploys; a caller passing
+    # `deploy: false` only proves the site builds. Compared as text: Actions' `!=`
+    # coerces an absent input and `false` to the same 0.
+    if: ${{ format('{0}', inputs.deploy) != 'false' }}
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,19 @@
+site_name: coqui-web
+site_description: Reliable message channels a browser can open natively, and their native peers.
+site_url: https://boriken-dev.github.io/coqui-web/
+repo_url: https://github.com/Boriken-Dev/coqui-web
+repo_name: Boriken-Dev/coqui-web
+edit_uri: edit/main/docs/
+
+# Constrained to docs/ so a strict build does not scan the repository's own markdown.
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - Choosing a transport: fallback.md

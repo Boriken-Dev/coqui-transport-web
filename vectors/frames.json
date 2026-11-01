@@ -1,0 +1,26 @@
+{
+  "profile": "little-endian u32 body length, then the body; a body is non-empty and at most `max` bytes",
+  "encode": [
+    {"name": "a short body", "max": 10, "text": "hello", "hex": "0500000068656c6c6f"},
+    {"name": "exactly the limit", "max": 5, "text": "hello", "hex": "0500000068656c6c6f"},
+    {"name": "a JSON-RPC message", "max": 1048576, "text": "{\"jsonrpc\":\"2.0\",\"id\":1}", "hex": "180000007b226a736f6e727063223a22322e30222c226964223a317d"},
+    {"name": "multi-byte text counts bytes", "max": 10, "text": "café", "hex": "05000000636166c3a9"},
+    {"name": "an empty body", "max": 10, "text": "", "error": true},
+    {"name": "one byte over the limit", "max": 4, "text": "hello", "error": true}
+  ],
+  "decode": [
+    {"name": "one frame whole", "max": 10, "chunks": ["0500000068656c6c6f"], "messages": ["hello"]},
+    {"name": "split inside the prefix", "max": 10, "chunks": ["0500", "000068656c6c6f"], "messages": ["hello"]},
+    {"name": "split inside the body", "max": 10, "chunks": ["0500000068", "656c6c6f"], "messages": ["hello"]},
+    {"name": "one byte at a time", "max": 10, "chunks": ["05", "00", "00", "00", "68", "65", "6c", "6c", "6f"], "messages": ["hello"]},
+    {"name": "two frames coalesced", "max": 10, "chunks": ["0500000068656c6c6f05000000776f726c64"], "messages": ["hello", "world"]},
+    {"name": "coalesced then split", "max": 10, "chunks": ["0500000068656c6c6f0500", "0000776f726c64"], "messages": ["hello", "world"]},
+    {"name": "an incomplete frame waits", "max": 10, "chunks": ["0500000068"], "messages": []},
+    {"name": "an oversized header", "max": 10, "chunks": ["0b000000"], "messages": [], "error": true},
+    {"name": "a huge header, the high bit set", "max": 10, "chunks": ["ffffffff"], "messages": [], "error": true},
+    {"name": "an empty frame", "max": 10, "chunks": ["00000000"], "messages": [], "error": true},
+    {"name": "a good frame before a bad header", "max": 10, "chunks": ["0500000068656c6c6f0b000000"], "messages": ["hello"], "error": true},
+    {"name": "a good frame before a bad header, later chunk", "max": 10, "chunks": ["0500000068656c6c6f", "0b000000"], "messages": ["hello"], "error": true},
+    {"name": "invalid UTF-8 fails only a text decoder", "max": 10, "chunks": ["01000000ff"], "binary": ["ff"], "messages": [], "text_error": true}
+  ]
+}
