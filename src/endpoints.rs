@@ -73,6 +73,8 @@ pub enum EndpointError {
     HostMismatch,
     /// A pin is not `sha256:<64 hex digits>`, or was given with no WebTransport endpoint.
     Pin,
+    /// An address is not `https://`, or came with a separate endpoint.
+    Address,
 }
 
 impl fmt::Display for EndpointError {
@@ -85,6 +87,7 @@ impl fmt::Display for EndpointError {
             Self::NotPlain => "an endpoint url must hold no credentials, query or fragment",
             Self::HostMismatch => "webtransport and websocket endpoints must share a host",
             Self::Pin => "a certificate pin must be sha256 hex and needs a webtransport endpoint",
+            Self::Address => "an address must be https and is given instead of separate endpoints",
         })
     }
 }
@@ -129,6 +132,7 @@ impl Endpoints {
 #[derive(Clone, Debug, Default)]
 #[must_use]
 pub struct EndpointsBuilder {
+    address: Option<String>,
     webtransport: Option<String>,
     websocket: Option<String>,
     certificate_pins: Vec<CertificatePin>,
@@ -136,6 +140,13 @@ pub struct EndpointsBuilder {
 }
 
 impl EndpointsBuilder {
+    /// One `https://host/path`, or with a port, for both: WebTransport on that UDP port and WebSocket on that TCP port, which
+    /// can be the same number on the same name. Without a port that is 443.
+    pub fn address(mut self, url: impl AsRef<str>) -> Self {
+        self.address = Some(url.as_ref().to_string());
+        self
+    }
+
     /// The `https://host:port/path` a WebTransport session opens.
     pub fn webtransport(mut self, url: impl AsRef<str>) -> Self {
         self.webtransport = Some(url.as_ref().to_string());
@@ -167,13 +178,27 @@ impl EndpointsBuilder {
     ///
     /// [`EndpointError`] naming the first rule broken.
     pub fn build(self) -> Result<Endpoints, EndpointError> {
-        let webtransport = self.webtransport.as_deref().map(parse).transpose()?;
-        let websocket = self.websocket.as_deref().map(parse).transpose()?;
+        let mut webtransport = self.webtransport.as_deref().map(parse).transpose()?;
+        let mut websocket = self.websocket.as_deref().map(parse).transpose()?;
+        let mut port_required = true;
+        if let Some(address) = &self.address {
+            if webtransport.is_some() || websocket.is_some() {
+                return Err(EndpointError::Address);
+            }
+            let url = parse(address)?;
+            let mut other = url.clone();
+            if url.scheme() != "https" || other.set_scheme("wss").is_err() {
+                return Err(EndpointError::Address);
+            }
+            webtransport = Some(url);
+            websocket = Some(other);
+            port_required = false;
+        }
         if webtransport.is_none() && websocket.is_none() {
             return Err(EndpointError::Empty);
         }
         if let Some(url) = &webtransport
-            && (url.scheme() != "https" || url.port().is_none())
+            && (url.scheme() != "https" || (port_required && url.port().is_none()))
         {
             return Err(EndpointError::WebTransport);
         }
@@ -241,6 +266,37 @@ mod tests {
             .unwrap();
         assert_eq!(both.webtransport().unwrap().as_str(), WT);
         assert_eq!(both.websocket().unwrap().as_str(), WS);
+    }
+
+    #[test]
+    fn one_address_gives_both_on_the_same_host_port_and_path() {
+        for (given, port) in [
+            ("https://peer.example/channel", None),
+            ("https://peer.example:4433/channel", Some(4433)),
+        ] {
+            let endpoints = Endpoints::builder().address(given).build().unwrap();
+            let (first, second) = (
+                endpoints.webtransport().unwrap(),
+                endpoints.websocket().unwrap(),
+            );
+            assert_eq!((first.scheme(), second.scheme()), ("https", "wss"));
+            assert_eq!(first.host(), second.host());
+            assert_eq!((first.port(), second.port()), (port, port));
+            assert_eq!(first.path(), second.path());
+        }
+    }
+
+    #[test]
+    fn an_address_is_https_and_stands_alone() {
+        for url in ["wss://peer.example/channel", "http://peer.example/channel"] {
+            refused(Endpoints::builder().address(url), EndpointError::Address);
+        }
+        refused(
+            Endpoints::builder()
+                .address("https://peer.example/channel")
+                .websocket("wss://peer.example/channel"),
+            EndpointError::Address,
+        );
     }
 
     #[test]

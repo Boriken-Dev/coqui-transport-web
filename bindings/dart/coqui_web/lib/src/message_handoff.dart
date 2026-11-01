@@ -90,15 +90,17 @@ final class MessageHandoff<T> {
   }
 
   Future<void> send(T message) {
-    if (_closed || _failure != null)
+    if (_closed || _failure != null) {
       throw StateError('Message channel is closed');
+    }
     return _send(message);
   }
 
   /// Throws unless this channel may still send: for a sender that goes round [send].
   void checkOpen() {
-    if (_closed || _failure != null)
+    if (_closed || _failure != null) {
       throw StateError('Message channel is closed');
+    }
   }
 
   Future<void> close() async {

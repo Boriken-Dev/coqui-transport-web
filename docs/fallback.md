@@ -3,7 +3,10 @@
 1. Dial the explicitly advertised `https://` WebTransport endpoint.
 2. On unsupported WebTransport, a timeout or a lost path, use the *explicitly advertised* `wss://` endpoint. A fallback host is never
    synthesized, and peer identity is never inferred from DNS.
-3. A certificate, identity, protocol or permission failure is not a path problem and never falls back. An endpoint with pinned
+3. While opening, whatever says WebTransport is not working there tries that endpoint too: a server that does not offer it, or an
+   opening that breaks the wire format. The other transport must still prove the same peer, so nothing is given up.
+4. A certificate, identity or permission failure never falls back, since each may be someone in the way. Once a channel is open, a
+   protocol failure never falls back either: a proven peer, or someone on the path, broke the format. An endpoint with pinned
    certificates never falls back at all, since a browser cannot always tell its failures apart.
 4. If an established channel stops making progress, an application may open WebSocket, but must prove the **same** peer before
    delivering any message, and reconcile its own session. An operation of unknown outcome is never replayed automatically.

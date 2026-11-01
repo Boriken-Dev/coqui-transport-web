@@ -14,9 +14,10 @@ typedef WebDialer =
 /// Opens a reliable, ordered message channel. This does not authenticate a peer,
 /// start an application protocol, or authorize anything.
 ///
-/// Prefer browser WebTransport, falling back to an EXPLICIT WSS endpoint
-/// only on unavailable transport. Never fall back after authentication,
-/// protocol, or a pinned-certificate failure. The caller must bind both
+/// Prefer browser WebTransport, falling back to an EXPLICIT WSS endpoint when the
+/// transport is unavailable or an opening breaks the wire format, since the same
+/// peer must still prove itself there. Never fall back after an authentication or
+/// a pinned-certificate failure. The caller must bind both
 /// endpoints to one verified peer before processing application messages.
 Future<WebChannel> connectWebChannel(
   WebEndpoints endpoints, {
@@ -34,6 +35,8 @@ Future<WebChannel> connectWebChannel(
         endpoints.certificatePins,
       );
     } on TransportUnavailable {
+      if (ws == null) rethrow;
+    } on TransportProtocolFailure {
       if (ws == null) rethrow;
     }
   }

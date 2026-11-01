@@ -49,12 +49,15 @@ final class WebEndpoints {
     this.webSocket,
     this.certificatePins = const [],
     this.allowLocalPlainWebSocket = false,
+    bool impliedPort = false,
   }) {
     if (webTransport == null && webSocket == null) {
       throw ArgumentError('At least one endpoint is required');
     }
     if (webTransport case final url?) {
-      if (url.scheme != 'https' || !url.hasPort || !_plainUrl(url)) {
+      if (url.scheme != 'https' ||
+          !(url.hasPort || impliedPort) ||
+          !_plainUrl(url)) {
         throw ArgumentError.value(
           url,
           'webTransport',
@@ -95,6 +98,23 @@ final class WebEndpoints {
         );
       }
     }
+  }
+
+  /// One `https://host/path`, or with a port, for both: WebTransport on that UDP port and WebSocket on that TCP port, which
+  /// can be the same number on the same name. Without a port that is 443.
+  factory WebEndpoints.address(
+    Uri url, {
+    List<String> certificatePins = const [],
+  }) {
+    if (url.scheme != 'https') {
+      throw ArgumentError.value(url, 'url', 'An address uses HTTPS');
+    }
+    return WebEndpoints(
+      webTransport: url,
+      webSocket: url.replace(scheme: 'wss'),
+      certificatePins: certificatePins,
+      impliedPort: true,
+    );
   }
 
   final Uri? webTransport;

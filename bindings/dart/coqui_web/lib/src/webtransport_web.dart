@@ -144,10 +144,11 @@ final class _WebTransportConnection implements ByteWebChannel {
         final read = await _reader.read().toDart;
         if (read.done) break;
         final bytes = read.value?.toDart;
-        if (bytes == null)
+        if (bytes == null) {
           throw const TransportProtocolFailure(
             'Null WebTransport stream chunk',
           );
+        }
         _decoder.push(bytes);
         for (
           var body = _decoder.nextBytes();
@@ -180,8 +181,9 @@ final class _WebTransportConnection implements ByteWebChannel {
       _write(encodeBytesFrame(message));
 
   Future<void> _write(Uint8List frame) async {
-    if (_ended)
+    if (_ended) {
       throw const TransportUnavailable('WebTransport connection closed');
+    }
     try {
       await _writer.write(frame.toJS).toDart;
     } catch (e) {

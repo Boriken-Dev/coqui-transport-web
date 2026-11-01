@@ -51,10 +51,14 @@ impl Failure {
     ///
     /// `has_websocket` means the peer explicitly advertised a WebSocket endpoint: one is never
     /// derived from the WebTransport URL. A confirmed certificate or key rejection is never
-    /// treated as path loss, so it can never cause a downgrade.
+    /// treated as path loss, so it can never cause a downgrade. While opening, a peer that breaks
+    /// the wire format may simply not offer this transport, and the same peer must still prove
+    /// itself on the other. Once open, it is a proven peer or someone on the path breaking it.
     #[must_use]
     pub const fn recovery(self, failed: Kind, phase: Phase, has_websocket: bool) -> Recovery {
-        if !has_websocket || !matches!(failed, Kind::WebTransport) || !self.is_path() {
+        let worth_trying =
+            self.is_path() || (matches!(self, Self::Protocol) && matches!(phase, Phase::Opening));
+        if !has_websocket || !matches!(failed, Kind::WebTransport) || !worth_trying {
             return Recovery::Deny;
         }
         match phase {
@@ -116,10 +120,9 @@ mod tests {
         Failure::NoProgress,
         Failure::SuspectedMtu,
     ];
-    const PEER: [Failure; 5] = [
+    const PEER: [Failure; 4] = [
         Failure::Certificate,
         Failure::PeerProof,
-        Failure::Protocol,
         Failure::Permission,
         Failure::Cancelled,
     ];
@@ -136,6 +139,22 @@ mod tests {
                 Recovery::VerifyAndReconcile
             );
         }
+    }
+
+    #[test]
+    fn a_protocol_failure_falls_back_only_while_opening() {
+        assert_eq!(
+            Failure::Protocol.recovery(Kind::WebTransport, Phase::Opening, true),
+            Recovery::VerifyFallback
+        );
+        assert_eq!(
+            Failure::Protocol.recovery(Kind::WebTransport, Phase::Active, true),
+            Recovery::Deny
+        );
+        assert_eq!(
+            Failure::Protocol.recovery(Kind::WebTransport, Phase::Opening, false),
+            Recovery::Deny
+        );
     }
 
     #[test]

@@ -55,17 +55,40 @@ async fn bounded<F: Future>(
 fn connecting_failure(error: &ConnectingError) -> Failure {
     match error {
         ConnectingError::DnsLookup(_) | ConnectingError::DnsNotFound => Failure::PathLost,
-        ConnectingError::SessionRejected => Failure::Permission,
+        // HTTP/3 with no WebTransport at this URL looks the same as a refusal, and a real refusal is refused again on the
+        // other transport, which must prove the same peer anyway.
+        ConnectingError::SessionRejected => Failure::Unsupported,
         ConnectingError::ConnectionError(error) => connection_failure(error),
         ConnectingError::InvalidUrl(_) | ConnectingError::InvalidServerName(_) => Failure::Protocol,
         _ => Failure::Unsupported,
     }
 }
 
+/// What a QUIC close says, from the code `QuicProtoError` shows only in its text. A TLS alert is 0x100 plus its number (RFC 9001
+/// section 4.8): one about a certificate must never read as anything else, and another means this peer does not offer this
+/// transport, such as a QUIC server with no HTTP/3.
+fn quic_failure(code: Option<u64>) -> Failure {
+    match code {
+        // bad_certificate to certificate_unknown, unknown_ca, access_denied, certificate_required.
+        Some(0x12a..=0x12e | 0x130 | 0x131 | 0x174) => Failure::Certificate,
+        Some(0x100..=0x1ff) => Failure::Unsupported,
+        _ => Failure::Protocol,
+    }
+}
+
+fn quic_code(text: &str) -> Option<u64> {
+    let (_, code) = text.rsplit_once("(code: ")?;
+    let code = code.strip_suffix(')')?;
+    match code.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => code.parse().ok(),
+    }
+}
+
 fn connection_failure(error: &ConnectionError) -> Failure {
     match error {
         ConnectionError::TimedOut => Failure::Timeout,
-        ConnectionError::QuicProto(_) => Failure::Certificate,
+        ConnectionError::QuicProto(proto) => quic_failure(quic_code(&proto.to_string())),
         ConnectionError::LocallyClosed => Failure::Cancelled,
         _ => Failure::PathLost,
     }
@@ -512,5 +535,37 @@ impl Pending {
         }));
         let (connection, send, recv) = opened.map_err(|_| Failure::Timeout)??;
         Ok(Channel::start(connection, send, recv, limits, runtime))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_certificate_alert_reads_as_one_and_no_other_alert_does() {
+        for alert in [42_u64, 43, 44, 45, 46, 48, 49, 116] {
+            assert_eq!(
+                quic_failure(Some(0x100 + alert)),
+                Failure::Certificate,
+                "{alert}"
+            );
+        }
+        for alert in [40_u64, 70, 80, 120] {
+            assert_eq!(
+                quic_failure(Some(0x100 + alert)),
+                Failure::Unsupported,
+                "{alert}"
+            );
+        }
+        assert_eq!(quic_failure(Some(0xa)), Failure::Protocol);
+        assert_eq!(quic_failure(None), Failure::Protocol);
+    }
+
+    #[test]
+    fn the_code_is_read_from_the_text() {
+        assert_eq!(quic_code("no application protocol (code: 376)"), Some(376));
+        assert_eq!(quic_code("x (code: 0x178)"), Some(0x178));
+        assert_eq!(quic_code("no code here"), None);
     }
 }

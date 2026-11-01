@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use coqui_web::websocket::{self, Frames};
 use coqui_web::{
-    CertificatePin, Channel, Dialer, Endpoints, Failure, Kind, Limits, NoPreflight, webtransport,
+    CertificatePin, Channel, Dialer, Endpoints, Failure, Kind, Limits, NoPreflight, Phase,
+    Recovery, webtransport,
 };
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use url::Url;
@@ -541,6 +542,102 @@ fn webtransport_carries_ordered_messages_with_a_pinned_certificate() {
     round_trip(&client);
     client.close();
     drop(server.join().unwrap());
+}
+
+#[test]
+fn webtransport_and_websocket_serve_one_port_number_on_one_address() {
+    let id = identity();
+    let tcp = websocket::Listener::bind(loopback(), Some(server_tls(&id))).unwrap();
+    let port = tcp.local_addr().unwrap().port();
+    let udp = webtransport::Listener::bind(SocketAddr::new(loopback().ip(), port), server_tls(&id))
+        .unwrap();
+    assert_eq!(udp.local_addr().port(), port);
+    let endpoints = Endpoints::builder()
+        .address(format!("https://127.0.0.1:{port}/channel"))
+        .build()
+        .unwrap();
+    let serve_tcp = thread::spawn(move || {
+        let channel = tcp.accept(Some(WAIT)).unwrap();
+        echo_once(&channel);
+        echo_once(&channel);
+        channel
+    });
+    let serve_udp = thread::spawn(move || {
+        let channel = udp.accept(Some(WAIT)).unwrap();
+        echo_once(&channel);
+        echo_once(&channel);
+        channel
+    });
+    let quic = webtransport::Dialer::pinned(&[pin(&id)])
+        .unwrap()
+        .dial(Kind::WebTransport, endpoints.webtransport().unwrap(), WAIT)
+        .unwrap();
+    round_trip(&quic);
+    quic.close();
+    // The certificate names `localhost`, which only WebSocket's check looks at.
+    let mut named = endpoints.websocket().unwrap().clone();
+    named.set_host(Some("localhost")).unwrap();
+    let socket = websocket::Dialer::new()
+        .with_tls(client_tls(&id))
+        .dial(Kind::WebSocket, &named, WAIT)
+        .unwrap();
+    round_trip(&socket);
+    socket.close();
+    drop(serve_udp.join().unwrap());
+    drop(serve_tcp.join().unwrap());
+}
+
+/// A QUIC server that is not what a WebTransport client wants, kept running by the returned runtime.
+fn other_quic_server(
+    id: &Identity,
+    alpn: &[u8],
+    answer_not_found: bool,
+) -> (tokio::runtime::Runtime, u16) {
+    let mut tls = rustls::ServerConfig::clone(&server_tls(id));
+    tls.alpn_protocols = vec![alpn.to_vec()];
+    let config = wtransport::ServerConfig::builder()
+        .with_bind_address(loopback())
+        .with_custom_tls(tls)
+        .build();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let endpoint = {
+        let _inside = runtime.enter();
+        wtransport::Endpoint::server(config).unwrap()
+    };
+    let port = endpoint.local_addr().unwrap().port();
+    runtime.spawn(async move {
+        loop {
+            let incoming = endpoint.accept().await;
+            if let Ok(request) = incoming.await
+                && answer_not_found
+            {
+                request.not_found().await;
+            }
+        }
+    });
+    (runtime, port)
+}
+
+#[test]
+fn a_server_that_does_not_offer_webtransport_is_a_reason_to_try_websocket() {
+    let id = identity();
+    for (alpn, not_found) in [(&b"something-else"[..], false), (&b"h3"[..], true)] {
+        let (_running, port) = other_quic_server(&id, alpn, not_found);
+        let url = Url::parse(&format!("https://127.0.0.1:{port}/channel")).unwrap();
+        let failure = webtransport::Dialer::pinned(&[pin(&id)])
+            .unwrap()
+            .dial(Kind::WebTransport, &url, WAIT)
+            .unwrap_err();
+        assert_eq!(
+            failure.recovery(Kind::WebTransport, Phase::Opening, true),
+            Recovery::VerifyFallback,
+            "{alpn:?} gave {failure:?}"
+        );
+    }
 }
 
 #[test]

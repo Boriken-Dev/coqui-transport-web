@@ -14,7 +14,7 @@ proves nothing about who the peer is: identity is a separate step, on the channe
 ## Features
 
 - A `Channel` of whole, ordered messages, readable and writable from different threads.
-- `connect`: WebTransport first, WebSocket on a path failure. A certificate, proof or protocol failure never falls back, and a
+- `connect`: WebTransport first, WebSocket when the path fails or the server does not offer it. A certificate, proof or permission failure never falls back, and a
   pinned endpoint never downgrades.
 - Validated `Endpoints`: explicit URLs, one host, no credentials or query, plain WebSocket only on loopback by opt-in.
 - Blocking drivers for WebTransport and WebSocket, with a bound on every size and handshake.
@@ -40,9 +40,9 @@ The Dart package is in `bindings/dart/coqui_web`.
 ```rust
 use coqui_web::{Endpoints, Failure, Kind, Phase, Recovery};
 
+// One address: WebTransport on its UDP port and WebSocket on its TCP port, the same number.
 let endpoints = Endpoints::builder()
-    .webtransport("https://peer.example:4433/channel")
-    .websocket("wss://peer.example/channel")
+    .address("https://peer.example/channel")
     .build()?;
 assert!(endpoints.webtransport().is_some());
 
