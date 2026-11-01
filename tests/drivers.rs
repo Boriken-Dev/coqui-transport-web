@@ -1,6 +1,10 @@
 //! The drivers against each other, over real sockets on loopback. Each binds port 0.
 #![cfg(all(feature = "websocket", feature = "webtransport"))]
-#![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
+#![allow(
+    clippy::std_instead_of_core,
+    clippy::std_instead_of_alloc,
+    clippy::result_large_err
+)]
 
 use std::net::SocketAddr;
 use std::sync::Arc;
