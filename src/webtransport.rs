@@ -26,7 +26,7 @@ use wtransport::error::{ConnectingError, ConnectionError, SendDatagramError};
 use wtransport::tls::{Sha256Digest, WEBTRANSPORT_ALPN};
 use wtransport::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 
-use crate::channel::{self, Datagrams, Kind};
+use crate::channel::{self, Datagrams, Delivery, Kind};
 use crate::endpoints::CertificatePin;
 use crate::failure::Failure;
 use crate::frame::{self, Decoder};
@@ -213,6 +213,10 @@ impl Datagrams for QuicDatagrams {
 
     fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    fn delivery(&self) -> Delivery {
+        Delivery::Unreliable
     }
 }
 

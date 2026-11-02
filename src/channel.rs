@@ -46,14 +46,25 @@ pub trait Channel: Send + Sync {
     /// to a small limit and raise it once the peer is proven. A channel with no limit of its own ignores it.
     fn set_max_message(&self, _bytes: usize) {}
 
-    /// This channel's raw datagrams, or `None` if it has none, as a WebSocket does not. There is deliberately no datagram call on the
-    /// channel itself, so a caller on a fallback finds out here rather than quietly getting a stream instead.
+    /// This channel's raw datagrams, or `None` if it has none, as a WebSocket has none unless both ends agreed. There is deliberately
+    /// no datagram call on the channel itself, so a caller finds out here. [`Datagrams::delivery`] says what they then are.
     fn datagrams(&self) -> Option<&dyn Datagrams> {
         None
     }
 }
 
-/// Raw datagrams beside a channel's messages: lost, reordered or repeated without notice, and delivered whole or not at all.
+/// How a channel's datagrams actually travel, which decides what a caller can do with them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Delivery {
+    /// On the network as datagrams: lost, reordered or repeated without notice, and never held up by anything lost before them.
+    Unreliable,
+    /// Inside the channel's own ordered stream: in order and late rather than lost on the way, so one lost packet holds up everything
+    /// behind it. One is lost only where a queue at either end is full, which [`Datagrams::dropped`] counts.
+    OverStream,
+}
+
+/// Raw datagrams beside a channel's messages: delivered whole or not at all, and with no promise of arriving.
 ///
 /// They are outside any identity proof run on the channel's messages, so a peer proof says nothing about them and TLS is all that
 /// protects them. Anything that must know who sent a datagram has to establish that itself. A channel wrapping another, such as one
@@ -78,8 +89,12 @@ pub trait Datagrams: Send + Sync {
     /// [`Failure::Timeout`] when none arrived within `timeout`; `None` waits without limit.
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure>;
 
-    /// How many arrived and were discarded here because the reader was behind. What the network lost cannot be seen from this side.
+    /// How many this side discarded: arriving for a reader behind, or, for [`Delivery::OverStream`], waiting to be sent on a link
+    /// that is behind. What the network lost cannot be seen from this side.
     fn dropped(&self) -> u64;
+
+    /// How these travel.
+    fn delivery(&self) -> Delivery;
 }
 
 impl Channel for alloc::boxed::Box<dyn Channel> {

@@ -19,11 +19,15 @@ typedef WebDialer =
 /// peer must still prove itself there. Never fall back after an authentication or
 /// a pinned-certificate failure. The caller must bind both
 /// endpoints to one verified peer before processing application messages.
+///
+/// [webSocketDatagrams] asks a WebSocket's server to agree to datagrams, up to [maxWebSocketDatagram]. WebTransport has its own either way.
 Future<WebChannel> connectWebChannel(
   WebEndpoints endpoints, {
   Duration timeout = const Duration(seconds: 10),
   WebDialer? webTransportDialer,
   WebDialer? webSocketDialer,
+  bool webSocketDatagrams = false,
+  int maxWebSocketDatagram = defaultWebSocketDatagram,
 }) async {
   final wt = endpoints.webTransport;
   final ws = endpoints.webSocket;
@@ -41,7 +45,15 @@ Future<WebChannel> connectWebChannel(
     }
   }
   if (ws != null) {
-    return (webSocketDialer ?? openWebSocketChannel)(ws, timeout, const []);
+    final dial = webSocketDialer;
+    if (dial != null) return dial(ws, timeout, const []);
+    return openWebSocketChannel(
+      ws,
+      timeout,
+      const [],
+      datagrams: webSocketDatagrams,
+      maxDatagram: maxWebSocketDatagram,
+    );
   }
   throw const TransportUnavailable('No usable endpoint');
 }

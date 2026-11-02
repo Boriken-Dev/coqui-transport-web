@@ -20,29 +20,51 @@ abstract interface class ByteWebChannel implements WebChannel {
   Future<void> sendBytes(Uint8List message);
 }
 
-/// Raw datagrams beside a channel's messages: lost, reordered or repeated without notice, and whole or not at all. They are outside
-/// any identity proof run on the messages, so TLS is all that protects them.
+/// How a channel's datagrams actually travel, which decides what a caller can do with them.
+enum WebDatagramDelivery {
+  /// On the network as datagrams: lost, reordered or repeated without notice, and never held up by anything lost before them.
+  unreliable,
+
+  /// Inside the channel's own ordered stream: in order and late rather than lost on the way, so one lost packet holds up everything
+  /// behind it.
+  overStream,
+}
+
+/// Raw datagrams beside a channel's messages, whole or not at all. They are outside any identity proof run on the messages, so TLS is
+/// all that protects them.
 abstract interface class WebDatagrams {
-  /// The largest that fits one datagram now, which can change as the path does.
+  /// The largest one now. On WebTransport it can change as the path does. On a WebSocket it is a setting.
   int? get maxSize;
 
-  /// Each one that arrives. A browser keeps a small queue of its own, and what it discards there it does not report.
+  WebDatagramDelivery get delivery;
+
+  /// Each one that arrives. On WebTransport a browser keeps a small queue of its own, and what it discards there it does not report.
   Stream<Uint8List> get incoming;
+
+  /// How many this side discarded: on a WebSocket, those too large, and those arriving with nobody listening.
+  int get dropped;
 
   /// Hands one to the transport, which does not report whether it arrived. Throws [TransportProtocolFailure] for one over [maxSize],
   /// which a browser would otherwise drop without a word, and the channel goes on.
   Future<void> send(Uint8List datagram);
 }
 
-/// A channel that also has datagrams. Use [datagramsOf], which also answers for a channel that has none.
+/// A channel that may have datagrams. Use [datagramsOf].
 abstract interface class DatagramWebChannel implements ByteWebChannel {
-  WebDatagrams get datagrams;
+  WebDatagrams? get datagrams;
 }
 
-/// [channel]'s datagrams, or null if it has none, as a WebSocket does not: a caller on a fallback finds out here rather than quietly
-/// getting a stream instead. A channel wrapping another, such as one sealing its messages, has none unless it says so.
+/// [channel]'s datagrams, or null if it has none: a WebSocket that was not asked for them, or whose server did not agree, so a caller
+/// finds out here rather than quietly getting a stream. A channel wrapping another, such as one sealing its messages, has none unless
+/// it says so. [WebDatagrams.delivery] says what they are.
 WebDatagrams? datagramsOf(WebChannel channel) =>
     channel is DatagramWebChannel ? channel.datagrams : null;
+
+/// The WebSocket subprotocol that says both ends tag binary messages: 0 and a message, or 1 and a datagram.
+const webSocketDatagramsProtocol = 'coqui-web-datagrams.1';
+
+/// The largest datagram over a WebSocket unless a caller chooses otherwise. There is no packet to fit there.
+const defaultWebSocketDatagram = 64 * 1024;
 
 class TransportUnavailable implements Exception {
   const TransportUnavailable(this.reason);

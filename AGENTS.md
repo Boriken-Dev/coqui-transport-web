@@ -43,11 +43,13 @@ pub trait Datagrams: Send + Sync {
     fn max_size(&self) -> Option<usize>;                                          // what fits now; it can change; None: the peer takes none
     fn send(&self, payload: &[u8]) -> Result<(), Failure>;                        // Protocol if too large, and the channel goes on; Unsupported; PathLost
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure>;   // None once the connection ended; Timeout
-    fn dropped(&self) -> u64;                                                     // discarded here for a reader behind; network loss cannot be seen
+    fn dropped(&self) -> u64;                                                     // discarded here: a reader behind, or on a WebSocket a link behind; network loss cannot be seen
+    fn delivery(&self) -> Delivery;
 }
+pub enum Delivery { Unreliable, OverStream }   // non_exhaustive
 ```
 
-Raw datagrams beside the messages: lost, reordered or repeated without notice, whole or not at all, and with no framing of this library's. **Outside any identity proof run on the messages**, so TLS is all that protects them. Read only once `datagrams()` is first called; the transport's bounded buffer holds them until then.
+Raw datagrams beside the messages, whole or not at all. `Unreliable` (WebTransport): lost, reordered or repeated without notice. `OverStream` (a WebSocket whose client asked with `websocket::Dialer::with_datagrams` and whose server agreed, which a `Listener` always does): in order and late rather than lost on the way, as tagged binary messages. **Outside any identity proof run on the messages**, so TLS is all that protects them. Read only once `datagrams()` is first called. Until then WebTransport's transport holds them in its bounded buffer, and a WebSocket discards and counts them.
 
 ```rust
 pub trait Dialer {
@@ -213,7 +215,7 @@ Methods for the `Decoder` struct.
 ## Limits (crate root, with a driver feature)
 
 ```rust
-pub struct Limits { pub max_message: usize, pub pending: usize, pub handshake: Duration, pub queued_bytes: usize, pub send: Duration, pub idle: Duration, pub pending_datagrams: usize }
+pub struct Limits { pub max_message: usize, pub pending: usize, pub handshake: Duration, pub queued_bytes: usize, pub send: Duration, pub idle: Duration, pub pending_datagrams: usize, pub websocket_datagram: usize }
 pub const fn with_max_message(self, bytes: usize) -> Self
 pub const fn with_pending(self, messages: usize) -> Self
 pub const fn with_handshake(self, limit: Duration) -> Self

@@ -25,7 +25,11 @@ pub struct Limits {
     /// Silence after which a WebSocket peer is pinged, and twice this after which it is gone: `Failure::NoProgress`.
     pub idle: Duration,
     /// Datagrams held for a slow reader, past which new ones are discarded and counted. Unlike a message, a datagram slows nobody.
+    /// Over a WebSocket it also bounds those waiting to be sent.
     pub pending_datagrams: usize,
+    /// The largest datagram over a WebSocket, in bytes, whichever way it goes. There is no packet to fit there, so it is a choice,
+    /// and one over it is refused here and discarded from a peer. WebTransport's comes from the path.
+    pub websocket_datagram: usize,
 }
 
 impl Limits {
@@ -77,6 +81,13 @@ impl Limits {
         self.pending_datagrams = datagrams;
         self
     }
+
+    /// Sets the largest datagram over a WebSocket.
+    #[must_use]
+    pub const fn with_websocket_datagram(mut self, bytes: usize) -> Self {
+        self.websocket_datagram = bytes;
+        self
+    }
 }
 
 impl Default for Limits {
@@ -89,6 +100,7 @@ impl Default for Limits {
             send: Duration::from_secs(30),
             idle: Duration::from_secs(60),
             pending_datagrams: 256,
+            websocket_datagram: 64 * 1024,
         }
     }
 }

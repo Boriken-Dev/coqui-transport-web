@@ -575,6 +575,7 @@ fn webtransport_datagrams_go_both_ways_beside_the_messages() {
     let (client, server) = webtransport_pair(coqui_web::Limits::default());
     let (near, far) = (client.datagrams().unwrap(), server.datagrams().unwrap());
     assert!(near.max_size().unwrap() > 1000, "{:?}", near.max_size());
+    assert_eq!(near.delivery(), coqui_web::Delivery::Unreliable);
     // Sent until one arrives: losing one is what they may do, even here.
     let until = std::time::Instant::now() + WAIT;
     let arrived = loop {
@@ -645,23 +646,219 @@ fn datagrams_end_with_the_channel() {
     assert_eq!(near.send(b"late"), Err(Failure::PathLost));
 }
 
-#[test]
-fn a_websocket_has_no_datagrams_and_says_so() {
-    let listener = websocket::Listener::bind(loopback(), None).unwrap();
+/// A connected WebSocket pair, with each end's dialer as `dialer` makes it.
+fn websocket_pair(
+    limits: coqui_web::Limits,
+    frames: Frames,
+    dialer: impl FnOnce(websocket::Dialer) -> websocket::Dialer,
+) -> (websocket::Channel, websocket::Channel) {
+    let listener = websocket::Listener::bind(loopback(), None)
+        .unwrap()
+        .with_limits(limits)
+        .with_frames(frames);
     let port = listener.local_addr().unwrap().port();
     let accepted = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
-    let client = websocket::Dialer::new()
+    let client = dialer(
+        websocket::Dialer::new()
+            .with_limits(limits)
+            .with_frames(frames),
+    )
+    .dial(
+        Kind::WebSocket,
+        &Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap(),
+        WAIT,
+    )
+    .unwrap();
+    (client, accepted.join().unwrap())
+}
+
+#[test]
+fn a_websocket_has_no_datagrams_unless_asked_and_its_wire_is_unchanged() {
+    let (client, server) = websocket_pair(coqui_web::Limits::default(), Frames::Binary, |dialer| {
+        dialer
+    });
+    assert!(client.datagrams().is_none());
+    assert!(server.datagrams().is_none());
+    let boxed: Box<dyn Channel> = Box::new(client);
+    assert!(boxed.datagrams().is_none());
+
+    // A peer that knows nothing of tags sees a body as it was, and is seen as it was.
+    let listener = websocket::Listener::bind(loopback(), None)
+        .unwrap()
+        .with_frames(Frames::Binary);
+    let port = listener.local_addr().unwrap().port();
+    let accepted = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
+    let (mut raw, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}/")).unwrap();
+    let server = accepted.join().unwrap();
+    server.send(&[0, 1, 2]).unwrap();
+    assert_eq!(raw.read().unwrap().into_data().as_ref(), [0, 1, 2]);
+    raw.send(tungstenite::Message::binary(vec![1, 2, 3]))
+        .unwrap();
+    assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), [1, 2, 3]);
+}
+
+#[test]
+fn websocket_datagrams_go_both_ways_beside_the_messages_in_either_frame_kind() {
+    for frames in [Frames::Binary, Frames::Text] {
+        let (client, server) = websocket_pair(
+            coqui_web::Limits::default(),
+            frames,
+            websocket::Dialer::with_datagrams,
+        );
+        let (near, far) = (client.datagrams().unwrap(), server.datagrams().unwrap());
+        assert_eq!(near.delivery(), coqui_web::Delivery::OverStream);
+        assert_eq!(near.max_size(), Some(64 * 1024));
+        client.send(b"a message").unwrap();
+        near.send(b"\xff\x00raw").unwrap();
+        near.send(b"").unwrap();
+        assert_eq!(far.receive(Some(WAIT)).unwrap().unwrap(), b"\xff\x00raw");
+        assert_eq!(far.receive(Some(WAIT)).unwrap().unwrap(), b"");
+        assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), b"a message");
+        far.send(b"back").unwrap();
+        server.send(b"a reply").unwrap();
+        assert_eq!(near.receive(Some(WAIT)).unwrap().unwrap(), b"back");
+        assert_eq!(client.receive(Some(WAIT)).unwrap().unwrap(), b"a reply");
+    }
+}
+
+#[test]
+fn a_websocket_message_at_its_limit_still_fits_with_the_tag() {
+    let limits = coqui_web::Limits::default().with_max_message(5);
+    let (client, server) =
+        websocket_pair(limits, Frames::Binary, websocket::Dialer::with_datagrams);
+    client.send(b"12345").unwrap();
+    assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), b"12345");
+    assert_eq!(client.send(b"123456"), Err(Failure::Protocol));
+}
+
+#[test]
+fn a_websocket_datagram_size_is_a_setting_with_no_floor_and_it_binds_both_ways() {
+    let limits = coqui_web::Limits::default().with_websocket_datagram(4);
+    let (client, server) =
+        websocket_pair(limits, Frames::Binary, websocket::Dialer::with_datagrams);
+    let (near, far) = (client.datagrams().unwrap(), server.datagrams().unwrap());
+    assert_eq!(near.max_size(), Some(4));
+    assert_eq!(near.send(b"12345"), Err(Failure::Protocol));
+    client.send(b"still here").unwrap();
+    assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), b"still here");
+
+    // A peer whose own setting is larger: the extra is discarded and counted, and nothing else is harmed.
+    let wide = coqui_web::Limits::default();
+    let listener = websocket::Listener::bind(loopback(), None)
+        .unwrap()
+        .with_limits(limits)
+        .with_frames(Frames::Binary);
+    let port = listener.local_addr().unwrap().port();
+    let accepted = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
+    let wider = websocket::Dialer::new()
+        .with_limits(wide)
+        .with_frames(Frames::Binary)
+        .with_datagrams()
         .dial(
             Kind::WebSocket,
             &Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap(),
             WAIT,
         )
         .unwrap();
+    let narrow = accepted.join().unwrap();
+    let there = narrow.datagrams().unwrap();
+    wider.datagrams().unwrap().send(b"far too long").unwrap();
+    wider.datagrams().unwrap().send(b"fits").unwrap();
+    assert_eq!(there.receive(Some(WAIT)).unwrap().unwrap(), b"fits");
+    assert_eq!(there.dropped(), 1);
+    assert_eq!(far.dropped(), 0);
+
+    let none = coqui_web::Limits::default().with_websocket_datagram(0);
+    let (client, _server) = websocket_pair(none, Frames::Binary, websocket::Dialer::with_datagrams);
+    let datagrams = client.datagrams().unwrap();
+    assert_eq!(datagrams.send(b"x"), Err(Failure::Protocol));
+    datagrams.send(b"").unwrap();
+}
+
+#[test]
+fn websocket_datagrams_nobody_asked_for_are_not_held() {
+    let (client, server) = websocket_pair(
+        coqui_web::Limits::default().with_pending_datagrams(1),
+        Frames::Binary,
+        websocket::Dialer::with_datagrams,
+    );
+    let near = client.datagrams().unwrap();
+    near.send(b"one").unwrap();
+    client.send(b"then this").unwrap();
+    assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), b"then this");
+    let far = server.datagrams().unwrap();
+    assert_eq!(far.dropped(), 1, "it came before anyone asked");
+    assert!(matches!(
+        far.receive(Some(Duration::from_millis(50))),
+        Err(Failure::Timeout)
+    ));
+    // Asked for, a reader behind loses the ones past its queue, and messages are not held up by it.
+    near.send(b"kept").unwrap();
+    client.send(b"sync").unwrap();
+    assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), b"sync");
+    near.send(b"past the queue").unwrap();
+    client.send(b"sync").unwrap();
+    assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), b"sync");
+    assert_eq!(far.receive(Some(WAIT)).unwrap().unwrap(), b"kept");
+    assert_eq!(far.dropped(), 2);
+}
+
+#[test]
+fn a_datagram_from_a_peer_cannot_arrive_as_a_message_or_break_the_channel() {
+    let listener = websocket::Listener::bind(loopback(), None)
+        .unwrap()
+        .with_frames(Frames::Binary);
+    let port = listener.local_addr().unwrap().port();
+    let accepted = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
+    let mut request = tungstenite::client::IntoClientRequest::into_client_request(format!(
+        "ws://127.0.0.1:{port}/"
+    ))
+    .unwrap();
+    request.headers_mut().insert(
+        "sec-websocket-protocol",
+        tungstenite::http::HeaderValue::from_static(coqui_web::frame::WS_DATAGRAMS_PROTOCOL),
+    );
+    let (mut raw, _) = tungstenite::connect(request).unwrap();
     let server = accepted.join().unwrap();
-    assert!(client.datagrams().is_none());
-    assert!(server.datagrams().is_none());
-    let boxed: Box<dyn Channel> = Box::new(client);
-    assert!(boxed.datagrams().is_none());
+    let far = server.datagrams().unwrap();
+    raw.send(tungstenite::Message::binary(vec![1, 9])).unwrap();
+    raw.send(tungstenite::Message::binary(vec![0, 7])).unwrap();
+    assert_eq!(far.receive(Some(WAIT)).unwrap().unwrap(), [9]);
+    assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), [7]);
+    // A tag this does not know ends it, rather than being guessed at.
+    raw.send(tungstenite::Message::binary(vec![2, 9])).unwrap();
+    assert_eq!(server.receive(Some(WAIT)), Err(Failure::Protocol));
+}
+
+#[test]
+fn a_server_that_does_not_agree_is_a_failure_a_caller_can_read() {
+    // A WebSocket server that knows nothing of this, as anyone else's would be.
+    let server = std::net::TcpListener::bind(loopback()).unwrap();
+    let port = server.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let (stream, _) = server.accept().unwrap();
+        let _ = tungstenite::accept(stream);
+    });
+    let refused = websocket::Dialer::new().with_datagrams().dial(
+        Kind::WebSocket,
+        &Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap(),
+        WAIT,
+    );
+    assert_eq!(refused.err(), Some(Failure::Unsupported));
+}
+
+#[test]
+fn websocket_datagrams_end_with_the_channel() {
+    let (client, server) = websocket_pair(
+        coqui_web::Limits::default(),
+        Frames::Binary,
+        websocket::Dialer::with_datagrams,
+    );
+    let far = server.datagrams().unwrap();
+    client.close();
+    assert_eq!(far.receive(Some(WAIT)), Ok(None));
+    server.close();
+    assert_eq!(far.send(b"late"), Err(Failure::PathLost));
 }
 
 #[test]

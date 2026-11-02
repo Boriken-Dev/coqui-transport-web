@@ -126,6 +126,13 @@ final class _Datagrams implements WebDatagrams {
   int? get maxSize => _duplex.maxDatagramSize;
 
   @override
+  WebDatagramDelivery get delivery => WebDatagramDelivery.unreliable;
+
+  // A browser says nothing of what it discards.
+  @override
+  int get dropped => 0;
+
+  @override
   Stream<Uint8List> get incoming => _incoming.stream;
 
   Future<void> _read() async {

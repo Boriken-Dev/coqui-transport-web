@@ -6,32 +6,90 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'contracts.dart';
 
+/// [datagrams] asks the server to agree to them. One that does not still connects, and has none: see [datagramsOf].
 Future<WebChannel> openWebSocketChannel(
   Uri uri,
   Duration timeout,
-  List<String> certificatePins,
-) async {
-  final channel = WebSocketChannel.connect(uri);
+  List<String> certificatePins, {
+  bool datagrams = false,
+  int maxDatagram = defaultWebSocketDatagram,
+}) async {
+  final channel = WebSocketChannel.connect(
+    uri,
+    protocols: datagrams ? const [webSocketDatagramsProtocol] : null,
+  );
   try {
     await channel.ready.timeout(timeout);
   } catch (e) {
     unawaited(channel.sink.close());
     throw TransportUnavailable('WebSocket could not connect: $e');
   }
-  return _WebSocketConnection(channel);
+  return _WebSocketConnection(
+    channel,
+    tagged: datagrams && channel.protocol == webSocketDatagramsProtocol,
+    maxDatagram: maxDatagram,
+  );
 }
 
-final class _WebSocketConnection implements ByteWebChannel {
-  _WebSocketConnection(this._channel) {
+const _messageTag = 0;
+const _datagramTag = 1;
+
+final class _WebSocketDatagrams implements WebDatagrams {
+  _WebSocketDatagrams(this._connection, this.maxSize);
+  final _WebSocketConnection _connection;
+  final StreamController<Uint8List> _arrived =
+      StreamController<Uint8List>.broadcast();
+
+  @override
+  final int maxSize;
+
+  @override
+  WebDatagramDelivery get delivery => WebDatagramDelivery.overStream;
+
+  @override
+  Stream<Uint8List> get incoming => _arrived.stream;
+
+  @override
+  int dropped = 0;
+
+  void arrive(Uint8List body) {
+    if (body.length > maxSize || !_arrived.hasListener) {
+      dropped += 1;
+    } else {
+      _arrived.add(body);
+    }
+  }
+
+  @override
+  Future<void> send(Uint8List datagram) async {
+    if (datagram.length > maxSize) {
+      throw const TransportProtocolFailure(
+        'A datagram larger than this channel takes',
+      );
+    }
+    _connection._sendTagged(_datagramTag, datagram);
+  }
+
+  void end() => unawaited(_arrived.close());
+}
+
+final class _WebSocketConnection implements DatagramWebChannel {
+  _WebSocketConnection(
+    this._channel, {
+    bool tagged = false,
+    int maxDatagram = defaultWebSocketDatagram,
+  }) {
+    if (tagged) _datagrams = _WebSocketDatagrams(this, maxDatagram);
     _subscription = _channel.stream.listen(
       (dynamic message) {
         if (_ended) return;
         final Uint8List? bytes = switch (message) {
           final String text => utf8.encode(text),
-          final Uint8List binary => binary,
-          final List<int> binary => Uint8List.fromList(binary),
+          final Uint8List binary => _opened(binary),
+          final List<int> binary => _opened(Uint8List.fromList(binary)),
           _ => null,
         };
+        if (identical(bytes, _taken)) return;
         if (bytes == null || bytes.length > defaultMaxMessage) {
           _end(
             const TransportProtocolFailure(
@@ -54,6 +112,36 @@ final class _WebSocketConnection implements ByteWebChannel {
       cancelOnError: true,
     );
   }
+
+  /// A binary message that was a datagram, and so is no message at all.
+  static final Uint8List _taken = Uint8List(0);
+
+  _WebSocketDatagrams? _datagrams;
+
+  @override
+  WebDatagrams? get datagrams => _datagrams;
+
+  /// A binary message's body, or null for what no peer may send. An unknown tag is not guessed at.
+  Uint8List? _opened(Uint8List binary) {
+    final datagrams = _datagrams;
+    if (datagrams == null) return binary;
+    if (binary.isEmpty) return null;
+    final body = Uint8List.sublistView(binary, 1);
+    if (binary[0] == _datagramTag) {
+      datagrams.arrive(body);
+      return _taken;
+    }
+    return binary[0] == _messageTag && body.isNotEmpty ? body : null;
+  }
+
+  void _sendTagged(int tag, Uint8List body) {
+    if (_ended) throw const TransportUnavailable('WebSocket connection closed');
+    final tagged = Uint8List(body.length + 1);
+    tagged[0] = tag;
+    tagged.setRange(1, tagged.length, body);
+    _channel.sink.add(tagged);
+  }
+
   final WebSocketChannel _channel;
   final StreamController<Uint8List> _incoming = StreamController<Uint8List>();
   late final StreamSubscription<dynamic> _subscription;
@@ -72,6 +160,7 @@ final class _WebSocketConnection implements ByteWebChannel {
     _ended = true;
     if (error != null) _incoming.addError(error);
     unawaited(_incoming.close());
+    _datagrams?.end();
   }
 
   @override
@@ -93,7 +182,11 @@ final class _WebSocketConnection implements ByteWebChannel {
         'WebSocket message exceeds limits or is empty',
       );
     }
-    _channel.sink.add(message);
+    if (_datagrams != null) {
+      _sendTagged(_messageTag, message);
+    } else {
+      _channel.sink.add(message);
+    }
   }
 
   @override

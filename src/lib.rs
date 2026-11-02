@@ -17,7 +17,9 @@ pub mod websocket;
 #[cfg_attr(docsrs, doc(cfg(feature = "webtransport")))]
 pub mod webtransport;
 
-pub use channel::{Channel, Datagrams, Dialer, Kind, NoPreflight, Preflight, Unverified, connect};
+pub use channel::{
+    Channel, Datagrams, Delivery, Dialer, Kind, NoPreflight, Preflight, Unverified, connect,
+};
 pub use endpoints::{CertificatePin, EndpointError, Endpoints, EndpointsBuilder};
 pub use failure::{Failure, Phase, Recovery};
 #[cfg(any(feature = "websocket", feature = "webtransport"))]

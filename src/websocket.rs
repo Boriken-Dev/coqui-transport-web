@@ -9,7 +9,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 use core::net::SocketAddr;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -27,8 +27,9 @@ use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{HandshakeError, Message, WebSocket};
 use url::Url;
 
-use crate::channel::{self, Kind};
+use crate::channel::{self, Datagrams, Delivery, Kind};
 use crate::failure::Failure;
+use crate::frame::{self, WS_DATAGRAMS_PROTOCOL, WsPart};
 use crate::pump::{Admission, Inbox, Limits, Received};
 
 /// How long a worker waits on a silent socket before it looks for something to send.
@@ -142,6 +143,10 @@ fn ws_failure(error: &tungstenite::Error) -> Failure {
             Failure::PathLost
         }
         tungstenite::Error::Http(_) => Failure::Permission,
+        // It was asked for datagrams and did not agree, which is a peer that does not offer them.
+        tungstenite::Error::Protocol(
+            tungstenite::error::ProtocolError::SecWebSocketSubProtocolError(_),
+        ) => Failure::Unsupported,
         _ => Failure::Protocol,
     }
 }
@@ -161,7 +166,74 @@ pub struct Channel {
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     frames: Frames,
     max_message: Arc<AtomicUsize>,
+    datagrams: Option<WsDatagrams>,
 }
+
+/// Datagrams as tagged messages on the socket, for a channel whose ends agreed to them.
+struct WsDatagrams {
+    outgoing: SyncSender<Vec<u8>>,
+    inbox: Inbox,
+    dropped: Arc<AtomicU64>,
+    wanted: Arc<AtomicBool>,
+    max_size: usize,
+}
+
+impl Datagrams for WsDatagrams {
+    fn max_size(&self) -> Option<usize> {
+        Some(self.max_size)
+    }
+
+    fn send(&self, payload: &[u8]) -> Result<(), Failure> {
+        if payload.len() > self.max_size {
+            return Err(Failure::Protocol);
+        }
+        match self.outgoing.try_send(payload.to_vec()) {
+            Ok(()) => Ok(()),
+            // A datagram holds up nothing, so it waits for no room: this is what may happen to one.
+            Err(TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(TrySendError::Disconnected(_)) => Err(Failure::PathLost),
+        }
+    }
+
+    fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
+        self.inbox.receive(timeout)
+    }
+
+    fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    fn delivery(&self) -> Delivery {
+        Delivery::OverStream
+    }
+}
+
+/// The worker's end of [`WsDatagrams`].
+struct WorkerDatagrams {
+    outgoing: mpsc::Receiver<Vec<u8>>,
+    inbox: SyncSender<Received>,
+    dropped: Arc<AtomicU64>,
+    wanted: Arc<AtomicBool>,
+    max_size: usize,
+}
+
+impl WorkerDatagrams {
+    /// Holds one only once someone has asked for them: a peer that has proved nothing must not be able to fill memory that way.
+    fn arrived(&self, body: &[u8]) {
+        let kept = self.wanted.load(Ordering::SeqCst)
+            && body.len() <= self.max_size
+            && self.inbox.try_send(Ok(body.to_vec())).is_ok();
+        if !kept {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// As many sent in one turn of the worker, so they cannot keep it from a channel's messages.
+const DATAGRAMS_PER_TURN: usize = 16;
 
 impl fmt::Debug for Channel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -173,7 +245,12 @@ impl fmt::Debug for Channel {
 }
 
 impl Channel {
-    fn start(socket: WebSocket<Stream>, limits: Limits, frames: Frames) -> Result<Self, Failure> {
+    fn start(
+        socket: WebSocket<Stream>,
+        limits: Limits,
+        frames: Frames,
+        tagged: bool,
+    ) -> Result<Self, Failure> {
         socket
             .get_ref()
             .tcp()
@@ -195,11 +272,43 @@ impl Channel {
         let draining = Arc::clone(&queued);
         let max_message = Arc::new(AtomicUsize::new(limits.max_message));
         let current = Arc::clone(&max_message);
+        let (datagrams, for_worker) = if tagged {
+            let pending = limits.pending_datagrams.max(1);
+            let (send, to_send) = mpsc::sync_channel(pending);
+            let (arrived, inbox) = mpsc::sync_channel(pending);
+            let dropped = Arc::new(AtomicU64::new(0));
+            let wanted = Arc::new(AtomicBool::new(false));
+            (
+                Some(WsDatagrams {
+                    outgoing: send,
+                    inbox: Inbox::new(inbox),
+                    dropped: Arc::clone(&dropped),
+                    wanted: Arc::clone(&wanted),
+                    max_size: limits.websocket_datagram,
+                }),
+                Some(WorkerDatagrams {
+                    outgoing: to_send,
+                    inbox: arrived,
+                    dropped,
+                    wanted,
+                    max_size: limits.websocket_datagram,
+                }),
+            )
+        } else {
+            (None, None)
+        };
         let worker = thread::Builder::new()
             .name("coqui-web-websocket".into())
             .spawn(move || {
                 worker(
-                    socket, &to_reader, &outgoing, frames, &draining, limits, &current,
+                    socket,
+                    &to_reader,
+                    &outgoing,
+                    frames,
+                    &draining,
+                    limits,
+                    &current,
+                    for_worker.as_ref(),
                 )
             })
             .map_err(|_| Failure::Unsupported)?;
@@ -211,6 +320,7 @@ impl Channel {
             worker: Mutex::new(Some(worker)),
             frames,
             max_message,
+            datagrams,
         })
     }
 }
@@ -253,6 +363,12 @@ impl channel::Channel for Channel {
         self.max_message.store(bytes, Ordering::SeqCst);
     }
 
+    fn datagrams(&self) -> Option<&dyn Datagrams> {
+        let datagrams = self.datagrams.as_ref()?;
+        datagrams.wanted.store(true, Ordering::SeqCst);
+        Some(datagrams)
+    }
+
     fn close(&self) {
         // The worker sends what is queued, then the close frame, then releases the socket. Waiting for it means a
         // process that closes and exits has not lost what it sent.
@@ -292,6 +408,7 @@ fn ended(error: &tungstenite::Error) -> Failure {
 
 /// Owns the socket: writes what is queued, reads what arrived, pings a silent peer, and stops reading while the reader
 /// is behind, which is the back-pressure a peer feels.
+#[allow(clippy::too_many_arguments)]
 fn worker(
     mut socket: WebSocket<Stream>,
     inbox: &SyncSender<Received>,
@@ -300,9 +417,18 @@ fn worker(
     queued: &AtomicUsize,
     limits: Limits,
     max_message: &AtomicUsize,
+    datagrams: Option<&WorkerDatagrams>,
 ) {
+    // Agreeing to datagrams adds a tag to every binary message, which a limit on what it holds does not count.
+    let tag = usize::from(datagrams.is_some());
     // What the socket was built with: the shared value may already have moved on.
     let mut applied = limits.max_message;
+    if tag > 0 {
+        socket.set_config(|config| {
+            config.max_message_size = Some(applied + tag);
+            config.max_frame_size = Some(applied + tag);
+        });
+    }
     let idle = limits.idle;
     let mut waiting: Option<Received> = None;
     let mut heard = Instant::now();
@@ -317,6 +443,7 @@ fn worker(
                             Ok(text) => Message::text(text.to_string()),
                             Err(_) => continue,
                         },
+                        Frames::Binary if tag > 0 => Message::binary(frame::ws_message(&message)),
                         Frames::Binary => Message::binary(message),
                     };
                     match socket.write(framed) {
@@ -335,6 +462,24 @@ fn worker(
                 Err(mpsc::TryRecvError::Disconnected) => {
                     finish(&mut socket);
                     return;
+                }
+            }
+        }
+        if let Some(datagrams) = datagrams {
+            for _ in 0..DATAGRAMS_PER_TURN {
+                let Ok(datagram) = datagrams.outgoing.try_recv() else {
+                    break;
+                };
+                match socket.write(Message::binary(frame::ws_datagram(&datagram))) {
+                    Ok(()) => {}
+                    Err(tungstenite::Error::Io(error)) if interrupted(&error) => {
+                        let _ = inbox.send(Err(Failure::NoProgress));
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = inbox.send(Err(ended(&error)));
+                        return;
+                    }
                 }
             }
         }
@@ -374,8 +519,8 @@ fn worker(
         if wanted != applied {
             applied = wanted;
             socket.set_config(|config| {
-                config.max_message_size = Some(wanted);
-                config.max_frame_size = Some(wanted);
+                config.max_message_size = Some(wanted + tag);
+                config.max_frame_size = Some(wanted + tag);
             });
         }
         match socket.read() {
@@ -384,6 +529,21 @@ fn worker(
                 pinged = false;
                 match message {
                     Message::Text(text) => waiting = Some(Ok(text.as_bytes().to_vec())),
+                    Message::Binary(body) if datagrams.is_some() => match frame::ws_part(&body) {
+                        Ok(WsPart::Datagram(datagram)) => {
+                            if let Some(datagrams) = datagrams {
+                                datagrams.arrived(datagram);
+                            }
+                        }
+                        Ok(WsPart::Message(message)) if frames == Frames::Binary => {
+                            waiting = Some(Ok(message.to_vec()));
+                        }
+                        _ => {
+                            let _ = inbox.send(Err(Failure::Protocol));
+                            finish(&mut socket);
+                            return;
+                        }
+                    },
                     Message::Binary(body) if frames == Frames::Binary => {
                         waiting = Some(Ok(body.to_vec()))
                     }
@@ -443,6 +603,7 @@ pub struct Dialer {
     tls: Option<Arc<ClientConfig>>,
     limits: Limits,
     frames: Frames,
+    datagrams: bool,
 }
 
 impl fmt::Debug for Dialer {
@@ -481,6 +642,15 @@ impl Dialer {
     #[must_use]
     pub const fn with_frames(mut self, frames: Frames) -> Self {
         self.frames = frames;
+        self
+    }
+
+    /// Asks the listener to agree to datagrams on this channel, so [`Channel::datagrams`](channel::Channel::datagrams) answers. A
+    /// server that does not agree makes the dial fail with [`Failure::Unsupported`], so try again without this for one that may
+    /// not offer them.
+    #[must_use]
+    pub const fn with_datagrams(mut self) -> Self {
+        self.datagrams = true;
         self
     }
 
@@ -559,13 +729,19 @@ impl channel::Dialer for Dialer {
             let value = HeaderValue::try_from(value.as_str()).map_err(|_| Failure::Protocol)?;
             request.headers_mut().append(name, value);
         }
+        if self.datagrams {
+            request.headers_mut().insert(
+                "sec-websocket-protocol",
+                HeaderValue::from_static(WS_DATAGRAMS_PROTOCOL),
+            );
+        }
         let (socket, _) =
             tungstenite::client::client_with_config(request, stream, Some(config(self.limits)))
                 .map_err(|error| match error {
                     HandshakeError::Interrupted(_) => Failure::Timeout,
                     HandshakeError::Failure(error) => ws_failure(&error),
                 })?;
-        Channel::start(socket, self.limits, self.frames)
+        Channel::start(socket, self.limits, self.frames, self.datagrams)
     }
 }
 
@@ -762,8 +938,24 @@ impl Pending {
                 Stream::Server(Box::new(StreamOwned::new(session, tcp)))
             }
         };
+        let agreed = Arc::new(AtomicBool::new(false));
+        let agreeing = Arc::clone(&agreed);
         let check =
-            move |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
+            move |request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
+                let asked = request
+                    .headers()
+                    .get_all("sec-websocket-protocol")
+                    .iter()
+                    .filter_map(|value| value.to_str().ok())
+                    .flat_map(|value| value.split(','))
+                    .any(|name| name.trim() == WS_DATAGRAMS_PROTOCOL);
+                if asked {
+                    agreeing.store(true, Ordering::SeqCst);
+                    response.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        HeaderValue::from_static(WS_DATAGRAMS_PROTOCOL),
+                    );
+                }
                 let origin = request.headers().get("origin").map(HeaderValue::to_str);
                 let allowed = origins.is_empty()
                     || match origin {
@@ -788,7 +980,7 @@ impl Pending {
             HandshakeError::Failure(_) if started.elapsed() >= limits.handshake => Failure::Timeout,
             HandshakeError::Failure(error) => ws_failure(&error),
         })?;
-        Channel::start(socket, limits, frames)
+        Channel::start(socket, limits, frames, agreed.load(Ordering::SeqCst))
     }
 }
 

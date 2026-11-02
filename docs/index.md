@@ -21,10 +21,20 @@ proves no peer. In Dart, `StagedChannel` holds early messages for that step.
 
 ## Raw datagrams
 
-A WebTransport channel also carries the session's own datagrams, with no framing of this library's: `channel.datagrams()` in Rust and `datagramsOf(channel)` in Dart. They can be lost, reordered or repeated. A WebSocket has none, so on a fallback those calls answer nothing rather than quietly using a stream, and a caller decides there what to do without them.
+A channel can carry raw datagrams beside its messages: `channel.datagrams()` in Rust and `datagramsOf(channel)` in Dart. They answer nothing on a channel that has none, and `delivery` says what the ones it has really are, since a caller that wants a lost packet to hold up nothing cannot get that over TCP.
 
-- **Size:** `max_size` says what fits now, and it can change with the path. Larger is refused, and leaves the channel usable.
-- **Loss:** nothing reports what the network lost, so a caller that needs to know numbers its own. A reader that falls behind loses them too: Rust counts those in `dropped`, and a browser keeps its own small queue and does not say.
+| | WebTransport | WebSocket |
+| --- | --- | --- |
+| Has them | Always: they are the session's own | When the client asked and the server agreed |
+| `delivery` | `unreliable`: lost, reordered or repeated without notice | `overStream`: in order and late rather than lost on the way, held up by anything before them |
+| `max_size` | What fits a packet now, which can change with the path | A setting, 64 KiB by default, with no floor |
+| Lost | On the network, unseen, or by a reader behind | Only where a queue at either end is full |
+
+**On a WebSocket** a client asks with the subprotocol `coqui-web-datagrams.1`, and a server that agrees echoes it. Every binary message on that connection then starts with a tag: `0` and a non-empty message, or `1` and a datagram, which may be empty. Any other tag ends the channel. Text messages are unchanged. Nobody is sent a tag they did not ask for. A Rust dialer that asks a server that does not agree fails with `Failure::Unsupported`; a browser connects anyway, and `datagramsOf` then answers nothing.
+
+- **Size:** one larger than `max_size` is refused, and leaves the channel usable. On a WebSocket one arriving larger than this side's setting is discarded and counted.
+- **Loss:** nothing reports what the network lost, so a caller that needs to know numbers its own. Rust counts what it discards in `dropped`. A browser keeps its own small queue for WebTransport and does not say, and it offers no bound on what a WebSocket has waiting to send, so there only Rust discards on sending.
+- **Memory:** over a WebSocket none are held until `datagrams()` is first asked for, so a peer that has proved nothing cannot fill memory that way.
 - **Identity:** a peer proof covers messages. Datagrams are outside it, so TLS is all that protects them, and a channel that seals its messages has no datagrams unless it says how it seals them.
 
 [Choosing a transport](fallback.md) explains when another transport may be tried.

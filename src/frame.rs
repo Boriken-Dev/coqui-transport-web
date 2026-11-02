@@ -1,7 +1,7 @@
 //! The stream wire format: a little-endian `u32` body length, then the body.
 //!
 //! WebTransport bidirectional streams use it. A WebSocket message is already whole and carries no
-//! prefix. This module does no I/O.
+//! prefix, unless both ends agreed to datagrams, which tags it. This module does no I/O.
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -18,11 +18,16 @@ const PREFIX: usize = 4;
 pub enum FrameError {
     /// The body is empty or over the limit. Fatal on a stream: the framing cannot resynchronize.
     Size,
+    /// A tag this does not know.
+    Tag,
 }
 
 impl fmt::Display for FrameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a frame is empty or over the size limit")
+        f.write_str(match self {
+            Self::Size => "a frame is empty or over the size limit",
+            Self::Tag => "a message has a tag this does not know",
+        })
     }
 }
 
@@ -109,6 +114,55 @@ impl Decoder {
         }
         self.buffered.drain(..PREFIX);
         Ok(Some(self.buffered.drain(..size).collect()))
+    }
+}
+
+/// What a binary message on a WebSocket is, once both ends agreed to datagrams with [`WS_DATAGRAMS_PROTOCOL`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WsPart<'a> {
+    /// One of the channel's messages.
+    Message(&'a [u8]),
+    /// A datagram, which may be empty.
+    Datagram(&'a [u8]),
+}
+
+/// The WebSocket subprotocol that says both ends tag binary messages. Agreed in the handshake, so a peer that never asked for it is
+/// sent what it always was.
+pub const WS_DATAGRAMS_PROTOCOL: &str = "coqui-web-datagrams.1";
+const WS_MESSAGE: u8 = 0;
+const WS_DATAGRAM: u8 = 1;
+
+/// A message as a tagged binary message.
+#[must_use]
+pub fn ws_message(body: &[u8]) -> Vec<u8> {
+    ws_tagged(WS_MESSAGE, body)
+}
+
+/// A datagram as a tagged binary message.
+#[must_use]
+pub fn ws_datagram(body: &[u8]) -> Vec<u8> {
+    ws_tagged(WS_DATAGRAM, body)
+}
+
+fn ws_tagged(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut tagged = Vec::with_capacity(body.len() + 1);
+    tagged.push(tag);
+    tagged.extend_from_slice(body);
+    tagged
+}
+
+/// Reads a tagged binary message.
+///
+/// # Errors
+///
+/// [`FrameError::Size`] for an empty message or an empty channel message, which no peer may send; [`FrameError::Tag`] for a tag this
+/// does not know, which a later version would have agreed under another subprotocol.
+pub fn ws_part(tagged: &[u8]) -> Result<WsPart<'_>, FrameError> {
+    match tagged.split_first() {
+        Some((&WS_MESSAGE, body)) if !body.is_empty() => Ok(WsPart::Message(body)),
+        Some((&WS_DATAGRAM, body)) => Ok(WsPart::Datagram(body)),
+        Some((&WS_MESSAGE, _)) | None => Err(FrameError::Size),
+        Some(_) => Err(FrameError::Tag),
     }
 }
 
