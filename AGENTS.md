@@ -4,7 +4,7 @@ Header-file-style reference for the `coqui-web` crate: every public item with it
 
 | Feature | Adds | Default |
 | --- | --- | --- |
-| `websocket` | `websocket::{Channel, Dialer, Frames, Listener}`, on `tungstenite` and `rustls` | off |
+| `websocket` | `websocket::{Channel, Dialer, Frames, Listener}`, on `tungstenite`, `rustls` and `mio` | off |
 | `webtransport` | `webtransport::{Channel, Dialer, Listener}`, on `wtransport`, with a small runtime inside | off |
 
 MSRV Rust 1.89. A default build depends on `url` alone. Version `0.0.0-alpha.0`, not published; the API may change in any
@@ -224,7 +224,7 @@ pub const fn with_send(self, limit: Duration) -> Self
 pub const fn with_idle(self, limit: Duration) -> Self
 ```
 
-`#[non_exhaustive]`. Defaults: 1 MiB, 64 messages, 10 s in total for a handshake, 64 MiB queued to send, 30 s for one send, a ping after 60 s of silence and `Failure::NoProgress` after 120 s. A message over `max_message` ends the channel with `Failure::Protocol`. When `pending`
+`#[non_exhaustive]`. Defaults: 1 MiB, 64 messages, 10 s in total for a handshake, 64 MiB queued to send, 30 s for a WebSocket peer to take nothing while there is something to send, which ends the channel with `Failure::NoProgress`, a ping after 60 s of silence and `Failure::NoProgress` after 120 s. A message over `max_message` ends the channel with `Failure::Protocol`. When `pending`
 messages wait for a slow reader, the driver stops reading from the peer.
 
 ## WebSocket (`coqui_web::websocket`, feature `websocket`)
@@ -248,7 +248,7 @@ pub fn Pending::handshake(self) -> Result<Channel, Failure>
 pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Failure>
 ```
 
-`bind` with no TLS on a non-loopback address is `Failure::Permission`. `accept` runs one handshake, bounded in total by `Limits::handshake`. `Listener::next` returns a `Pending` before its handshake, for a server that runs `Pending::handshake` on threads of its own so one slow peer cannot hold up others. A dialer refuses `ws://` beyond loopback with `Failure::Permission`. `close` returns once what was queued has gone. `Failure::Certificate` means a certificate was rejected, by this side or the peer's; any other TLS error is `Failure::Protocol`, since one forged record can cause it.
+`bind` with no TLS on a non-loopback address is `Failure::Permission`. `accept` runs one handshake, bounded in total by `Limits::handshake`. `Listener::next` returns a `Pending` before its handshake, for a server that runs `Pending::handshake` on threads of its own so one slow peer cannot hold up others. A dialer refuses `ws://` beyond loopback with `Failure::Permission`. `close` returns once what was queued has gone, or the peer has taken nothing for `Limits::send`. Each channel has a worker thread that sleeps on its socket and on its callers, so an idle channel takes no CPU and a message goes as soon as it is sent; the wait holds up to two file handles beside the socket. `Failure::Certificate` means a certificate was rejected, by this side or the peer's; any other TLS error is `Failure::Protocol`, since one forged record can cause it.
 
 ## WebTransport (`coqui_web::webtransport`, feature `webtransport`)
 

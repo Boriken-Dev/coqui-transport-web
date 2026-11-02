@@ -30,7 +30,7 @@ cargo add coqui-web --features websocket
 
 | Feature | Adds | Default |
 | --- | --- | --- |
-| `websocket` | `websocket::{Dialer, Listener}`, on `tungstenite` and `rustls` | off |
+| `websocket` | `websocket::{Dialer, Listener}`, on `tungstenite`, `rustls` and `mio` | off |
 | `webtransport` | `webtransport::{Dialer, Listener}`, on `wtransport`, with a small runtime inside the driver | off |
 
 The Dart package is in `bindings/dart/coqui_web`.

@@ -1,23 +1,26 @@
 //! A blocking WebSocket dialer and listener.
 //!
 //! A worker thread owns each socket, so the channel can be read and written from different
-//! threads. TLS comes from the caller's `rustls` configuration: this crate holds no trust roots
-//! and decides nothing about identity. A plain socket is refused beyond loopback.
+//! threads, and sleeps until the socket is ready or a caller wakes it. TLS comes from the caller's
+//! `rustls` configuration: this crate holds no trust roots and decides nothing about identity. A
+//! plain socket is refused beyond loopback.
 
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
+use core::mem;
 use core::net::SocketAddr;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
-use std::io::{self, Read, Write};
+use std::io::{self, IoSlice, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::Instant;
 
+use mio::{Events, Interest, Poll, Registry, Token, Waker};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, ServerConfig, ServerConnection, StreamOwned};
 use tungstenite::client::IntoClientRequest;
@@ -32,8 +35,11 @@ use crate::failure::Failure;
 use crate::frame::{self, WS_DATAGRAMS_PROTOCOL, WsPart};
 use crate::pump::{Admission, Inbox, Limits, Received};
 
-/// How long a worker waits on a silent socket before it looks for something to send.
+/// How often a listener looks for a connection, and a worker for room in a full inbox if a reader taking one has not said.
 const POLL: Duration = Duration::from_millis(10);
+/// What wakes a worker: its socket, or a caller with something for it.
+const SOCKET: Token = Token(0);
+const CALLER: Token = Token(1);
 /// Messages queued for sending, after which `send` reports the channel as not progressing.
 const OUTGOING: usize = 256;
 
@@ -49,19 +55,147 @@ pub enum Frames {
     Binary,
 }
 
+/// The TCP socket under a stream, and when a byte last left through it.
+///
+/// It blocks through the handshake, which has a deadline and ends if that passes. A worker then reads
+/// it only when it is ready and never with `SO_RCVTIMEO`: Windows says a connection is in an
+/// indeterminate state after that timeout, and bytes can be lost to it
+/// (<https://learn.microsoft.com/en-us/windows/win32/winsock/sol-socket-socket-options>).
+struct Transport {
+    socket: Socket,
+    wrote: Instant,
+}
+
+enum Socket {
+    Blocking(TcpStream),
+    Ready(mio::net::TcpStream),
+    Closed,
+}
+
+impl Transport {
+    fn new(tcp: TcpStream) -> Self {
+        Self {
+            socket: Socket::Blocking(tcp),
+            wrote: Instant::now(),
+        }
+    }
+
+    /// Hands the socket to `registry`: from here on it never blocks.
+    fn register(&mut self, registry: &Registry) -> io::Result<()> {
+        let Socket::Blocking(tcp) = mem::replace(&mut self.socket, Socket::Closed) else {
+            return Err(io::ErrorKind::NotConnected.into());
+        };
+        tcp.set_read_timeout(None)?;
+        tcp.set_write_timeout(None)?;
+        tcp.set_nodelay(true)?;
+        tcp.set_nonblocking(true)?;
+        let mut tcp = mio::net::TcpStream::from_std(tcp);
+        registry.register(&mut tcp, SOCKET, Interest::READABLE)?;
+        self.socket = Socket::Ready(tcp);
+        self.wrote = Instant::now();
+        Ok(())
+    }
+
+    /// Asks to hear about room to write only while something waits for it. Asked for all the time, Windows reports a
+    /// writable socket again after every read that would block, and an idle worker would never sleep.
+    fn watch(&mut self, registry: &Registry, writing: bool) -> io::Result<()> {
+        let interest = if writing {
+            Interest::READABLE | Interest::WRITABLE
+        } else {
+            Interest::READABLE
+        };
+        match &mut self.socket {
+            Socket::Ready(tcp) => registry.reregister(tcp, SOCKET, interest),
+            _ => Err(io::ErrorKind::NotConnected.into()),
+        }
+    }
+
+    fn noted(&mut self, written: io::Result<usize>) -> io::Result<usize> {
+        if written.as_ref().is_ok_and(|bytes| *bytes > 0) {
+            self.wrote = Instant::now();
+        }
+        written
+    }
+}
+
+impl Read for Transport {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match &mut self.socket {
+            Socket::Blocking(tcp) => tcp.read(buffer),
+            Socket::Ready(tcp) => tcp.read(buffer),
+            Socket::Closed => Err(io::ErrorKind::NotConnected.into()),
+        }
+    }
+}
+
+impl Write for Transport {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        let written = match &mut self.socket {
+            Socket::Blocking(tcp) => tcp.write(data),
+            Socket::Ready(tcp) => tcp.write(data),
+            Socket::Closed => Err(io::ErrorKind::NotConnected.into()),
+        };
+        self.noted(written)
+    }
+
+    fn write_vectored(&mut self, parts: &[IoSlice<'_>]) -> io::Result<usize> {
+        let written = match &mut self.socket {
+            Socket::Blocking(tcp) => tcp.write_vectored(parts),
+            Socket::Ready(tcp) => tcp.write_vectored(parts),
+            Socket::Closed => Err(io::ErrorKind::NotConnected.into()),
+        };
+        self.noted(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut self.socket {
+            Socket::Blocking(tcp) => tcp.flush(),
+            Socket::Ready(tcp) => tcp.flush(),
+            Socket::Closed => Err(io::ErrorKind::NotConnected.into()),
+        }
+    }
+}
+
 /// Either stream a socket can run over.
 enum Stream {
-    Plain(TcpStream),
-    Client(Box<StreamOwned<ClientConnection, TcpStream>>),
-    Server(Box<StreamOwned<ServerConnection, TcpStream>>),
+    Plain(Transport),
+    Client(Box<StreamOwned<ClientConnection, Transport>>),
+    Server(Box<StreamOwned<ServerConnection, Transport>>),
 }
 
 impl Stream {
-    fn tcp(&self) -> &TcpStream {
+    fn transport(&self) -> &Transport {
         match self {
-            Self::Plain(stream) => stream,
+            Self::Plain(transport) => transport,
             Self::Client(stream) => &stream.sock,
             Self::Server(stream) => &stream.sock,
+        }
+    }
+
+    fn transport_mut(&mut self) -> &mut Transport {
+        match self {
+            Self::Plain(transport) => transport,
+            Self::Client(stream) => &mut stream.sock,
+            Self::Server(stream) => &mut stream.sock,
+        }
+    }
+
+    /// Bytes TLS has accepted and the socket has not.
+    fn holds_unsent(&self) -> bool {
+        match self {
+            Self::Plain(_) => false,
+            Self::Client(stream) => stream.conn.wants_write(),
+            Self::Server(stream) => stream.conn.wants_write(),
+        }
+    }
+
+    /// Whether TLS read something off the socket that nobody has read from it. It reads while it waits to write, and
+    /// the socket has nothing more to say about those bytes.
+    fn holds_unread(&self) -> bool {
+        match self {
+            Self::Plain(_) => false,
+            Self::Client(stream) => !stream.conn.wants_read(),
+            Self::Server(stream) => !stream.conn.wants_read(),
         }
     }
 }
@@ -78,11 +212,16 @@ impl Read for Stream {
 
 impl Write for Stream {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        match self {
-            Self::Plain(stream) => stream.write(data),
-            Self::Client(stream) => stream.write(data),
-            Self::Server(stream) => stream.write(data),
+        let written = match self {
+            Self::Plain(stream) => return stream.write(data),
+            Self::Client(stream) => stream.write(data)?,
+            Self::Server(stream) => stream.write(data)?,
+        };
+        // A TLS buffer that is full takes nothing, which tungstenite would read as a reset connection.
+        if written == 0 && !data.is_empty() {
+            return Err(io::ErrorKind::WouldBlock.into());
         }
+        Ok(written)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -163,6 +302,9 @@ pub struct Channel {
     outgoing: Mutex<Option<SyncSender<Vec<u8>>>>,
     queued: Arc<AtomicUsize>,
     queued_limit: usize,
+    waker: Arc<Waker>,
+    // Set by a worker that found the inbox full.
+    behind: Arc<AtomicBool>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     frames: Frames,
     max_message: Arc<AtomicUsize>,
@@ -172,6 +314,7 @@ pub struct Channel {
 /// Datagrams as tagged messages on the socket, for a channel whose ends agreed to them.
 struct WsDatagrams {
     outgoing: SyncSender<Vec<u8>>,
+    waker: Arc<Waker>,
     inbox: Inbox,
     dropped: Arc<AtomicU64>,
     wanted: Arc<AtomicBool>,
@@ -188,7 +331,10 @@ impl Datagrams for WsDatagrams {
             return Err(Failure::Protocol);
         }
         match self.outgoing.try_send(payload.to_vec()) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                let _ = self.waker.wake();
+                Ok(())
+            }
             // A datagram holds up nothing, so it waits for no room: this is what may happen to one.
             Err(TrySendError::Full(_)) => {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
@@ -246,30 +392,24 @@ impl fmt::Debug for Channel {
 
 impl Channel {
     fn start(
-        socket: WebSocket<Stream>,
+        mut socket: WebSocket<Stream>,
         limits: Limits,
         frames: Frames,
         tagged: bool,
     ) -> Result<Self, Failure> {
+        let poll = Poll::new().map_err(|e| io_failure(&e))?;
         socket
-            .get_ref()
-            .tcp()
-            .set_read_timeout(Some(POLL))
+            .get_mut()
+            .transport_mut()
+            .register(poll.registry())
             .map_err(|e| io_failure(&e))?;
-        socket
-            .get_ref()
-            .tcp()
-            .set_write_timeout(Some(limits.send))
-            .map_err(|e| io_failure(&e))?;
-        socket
-            .get_ref()
-            .tcp()
-            .set_nodelay(true)
-            .map_err(|e| io_failure(&e))?;
+        let waker = Arc::new(Waker::new(poll.registry(), CALLER).map_err(|e| io_failure(&e))?);
         let (to_reader, inbox) = mpsc::sync_channel::<Received>(limits.pending.max(1));
         let (to_worker, outgoing) = mpsc::sync_channel::<Vec<u8>>(OUTGOING);
         let queued = Arc::new(AtomicUsize::new(0));
         let draining = Arc::clone(&queued);
+        let behind = Arc::new(AtomicBool::new(false));
+        let noting = Arc::clone(&behind);
         let max_message = Arc::new(AtomicUsize::new(limits.max_message));
         let current = Arc::clone(&max_message);
         let (datagrams, for_worker) = if tagged {
@@ -281,6 +421,7 @@ impl Channel {
             (
                 Some(WsDatagrams {
                     outgoing: send,
+                    waker: Arc::clone(&waker),
                     inbox: Inbox::new(inbox),
                     dropped: Arc::clone(&dropped),
                     wanted: Arc::clone(&wanted),
@@ -300,16 +441,26 @@ impl Channel {
         let worker = thread::Builder::new()
             .name("coqui-web-websocket".into())
             .spawn(move || {
-                worker(
+                Worker {
                     socket,
-                    &to_reader,
-                    &outgoing,
+                    poll,
+                    events: Events::with_capacity(8),
+                    inbox: to_reader,
+                    behind: noting,
+                    outgoing,
                     frames,
-                    &draining,
+                    queued: draining,
                     limits,
-                    &current,
-                    for_worker.as_ref(),
-                )
+                    max_message: current,
+                    applied: limits.max_message,
+                    datagrams: for_worker,
+                    waiting: None,
+                    heard: Instant::now(),
+                    pinged: false,
+                    unsent: None,
+                    watching_writes: false,
+                }
+                .run();
             })
             .map_err(|_| Failure::Unsupported)?;
         Ok(Self {
@@ -317,6 +468,8 @@ impl Channel {
             outgoing: Mutex::new(Some(to_worker)),
             queued,
             queued_limit: limits.queued_bytes,
+            waker,
+            behind,
             worker: Mutex::new(Some(worker)),
             frames,
             max_message,
@@ -352,11 +505,17 @@ impl channel::Channel for Channel {
                 TrySendError::Full(_) => Failure::NoProgress,
                 TrySendError::Disconnected(_) => Failure::PathLost,
             }
-        })
+        })?;
+        let _ = self.waker.wake();
+        Ok(())
     }
 
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
-        self.inbox.receive(timeout)
+        let next = self.inbox.receive(timeout);
+        if self.behind.swap(false, Ordering::SeqCst) {
+            let _ = self.waker.wake();
+        }
+        next
     }
 
     fn set_max_message(&self, bytes: usize) {
@@ -378,6 +537,7 @@ impl channel::Channel for Channel {
                 .unwrap_or_else(PoisonError::into_inner)
                 .take(),
         );
+        let _ = self.waker.wake();
         let worker = self
             .worker
             .lock()
@@ -397,8 +557,8 @@ impl Drop for Channel {
     }
 }
 
-/// A write that times out has not gone anywhere: the peer has stopped reading, which ends the channel. Reported as
-/// such, since a caller treats `Failure::Timeout` from `receive` as a quiet moment.
+/// The system giving up on a peer ends the channel. Reported as such, since a caller treats `Failure::Timeout` from
+/// `receive` as a quiet moment.
 fn ended(error: &tungstenite::Error) -> Failure {
     match ws_failure(error) {
         Failure::Timeout => Failure::NoProgress,
@@ -406,183 +566,346 @@ fn ended(error: &tungstenite::Error) -> Failure {
     }
 }
 
-/// Owns the socket: writes what is queued, reads what arrived, pings a silent peer, and stops reading while the reader
-/// is behind, which is the back-pressure a peer feels.
-#[allow(clippy::too_many_arguments)]
-fn worker(
-    mut socket: WebSocket<Stream>,
-    inbox: &SyncSender<Received>,
-    outgoing: &mpsc::Receiver<Vec<u8>>,
-    frames: Frames,
-    queued: &AtomicUsize,
-    limits: Limits,
-    max_message: &AtomicUsize,
-    datagrams: Option<&WorkerDatagrams>,
-) {
-    // Agreeing to datagrams adds a tag to every binary message, which a limit on what it holds does not count.
-    let tag = usize::from(datagrams.is_some());
-    // What the socket was built with: the shared value may already have moved on.
-    let mut applied = limits.max_message;
-    if tag > 0 {
-        socket.set_config(|config| {
-            config.max_message_size = Some(applied + tag);
-            config.max_frame_size = Some(applied + tag);
-        });
-    }
-    let idle = limits.idle;
-    let mut waiting: Option<Received> = None;
-    let mut heard = Instant::now();
-    let mut pinged = false;
-    loop {
-        loop {
-            match outgoing.try_recv() {
-                Ok(message) => {
-                    queued.fetch_sub(message.len(), Ordering::SeqCst);
-                    let framed = match frames {
-                        Frames::Text => match core::str::from_utf8(&message) {
-                            Ok(text) => Message::text(text.to_string()),
-                            Err(_) => continue,
-                        },
-                        Frames::Binary if tag > 0 => Message::binary(frame::ws_message(&message)),
-                        Frames::Binary => Message::binary(message),
-                    };
-                    match socket.write(framed) {
-                        Ok(()) => {}
-                        Err(tungstenite::Error::Io(error)) if interrupted(&error) => {
-                            let _ = inbox.send(Err(Failure::NoProgress));
-                            return;
-                        }
-                        Err(error) => {
-                            let _ = inbox.send(Err(ended(&error)));
-                            return;
-                        }
-                    }
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    finish(&mut socket);
-                    return;
-                }
-            }
-        }
-        if let Some(datagrams) = datagrams {
-            for _ in 0..DATAGRAMS_PER_TURN {
-                let Ok(datagram) = datagrams.outgoing.try_recv() else {
-                    break;
-                };
-                match socket.write(Message::binary(frame::ws_datagram(&datagram))) {
-                    Ok(()) => {}
-                    Err(tungstenite::Error::Io(error)) if interrupted(&error) => {
-                        let _ = inbox.send(Err(Failure::NoProgress));
-                        return;
-                    }
-                    Err(error) => {
-                        let _ = inbox.send(Err(ended(&error)));
-                        return;
-                    }
-                }
-            }
-        }
-        if heard.elapsed() >= idle.saturating_mul(2) {
-            let _ = inbox.send(Err(Failure::NoProgress));
-            return;
-        }
-        if heard.elapsed() >= idle && !pinged {
-            pinged = true;
-            let _ = socket.write(Message::Ping(Vec::new().into()));
-        }
-        match socket.flush() {
-            Ok(()) => {}
-            Err(tungstenite::Error::Io(error)) if interrupted(&error) => {}
-            Err(tungstenite::Error::ConnectionClosed) => return,
-            Err(error) => {
-                let _ = inbox.send(Err(ended(&error)));
-                return;
-            }
-        }
-        if let Some(held) = waiting.take() {
-            match inbox.try_send(held) {
-                Ok(()) => {}
-                Err(TrySendError::Full(held)) => {
-                    waiting = Some(held);
-                    thread::sleep(POLL);
-                    continue;
-                }
-                Err(TrySendError::Disconnected(_)) => {
-                    finish(&mut socket);
-                    return;
-                }
-            }
-        }
-        // Looked at after this turn's writes: a peer answering one of them meets the limit its sender had set.
-        let wanted = max_message.load(Ordering::SeqCst);
-        if wanted != applied {
-            applied = wanted;
-            socket.set_config(|config| {
-                config.max_message_size = Some(wanted + tag);
-                config.max_frame_size = Some(wanted + tag);
-            });
-        }
-        match socket.read() {
-            Ok(message) => {
-                heard = Instant::now();
-                pinged = false;
-                match message {
-                    Message::Text(text) => waiting = Some(Ok(text.as_bytes().to_vec())),
-                    Message::Binary(body) if datagrams.is_some() => match frame::ws_part(&body) {
-                        Ok(WsPart::Datagram(datagram)) => {
-                            if let Some(datagrams) = datagrams {
-                                datagrams.arrived(datagram);
-                            }
-                        }
-                        Ok(WsPart::Message(message)) if frames == Frames::Binary => {
-                            waiting = Some(Ok(message.to_vec()));
-                        }
-                        _ => {
-                            let _ = inbox.send(Err(Failure::Protocol));
-                            finish(&mut socket);
-                            return;
-                        }
-                    },
-                    Message::Binary(body) if frames == Frames::Binary => {
-                        waiting = Some(Ok(body.to_vec()))
-                    }
-                    Message::Binary(_) => {
-                        let _ = inbox.send(Err(Failure::Protocol));
-                        finish(&mut socket);
-                        return;
-                    }
-                    Message::Close(_) => {
-                        // An orderly close: the reader sees the end when this sender drops.
-                        let _ = socket.flush();
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-            Err(tungstenite::Error::ConnectionClosed) => {
-                let _ = socket.flush();
-                return;
-            }
-            Err(tungstenite::Error::Io(error)) if interrupted(&error) => {}
-            Err(error) => {
-                let _ = inbox.send(Err(ended(&error)));
-                finish(&mut socket);
-                return;
-            }
-        }
-    }
+fn would_block(error: &tungstenite::Error) -> bool {
+    matches!(error, tungstenite::Error::Io(error) if error.kind() == io::ErrorKind::WouldBlock)
 }
 
-/// Starts the closing handshake and leaves it a moment to finish, then the socket drops anyway.
-fn finish(socket: &mut WebSocket<Stream>) {
-    let _ = socket.close(None);
-    let until = Instant::now() + Duration::from_millis(500);
-    while Instant::now() < until {
-        match socket.read() {
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(error)) if interrupted(&error) => {}
-            Err(_) => return,
+/// How a worker stops.
+enum Stop {
+    /// Reports this and drops the socket.
+    Failed(Failure),
+    /// Reports this, then closes in order.
+    FailedClosing(Failure),
+    /// Nobody will send any more: closes in order.
+    Closing,
+    /// The peer closed, and what is left to send ends with the reply.
+    Replying,
+    /// The socket is finished with.
+    Gone,
+}
+
+/// Owns the socket: writes what is queued, reads what arrived, pings a silent peer, and stops reading while the reader
+/// is behind, which is the back-pressure a peer feels.
+///
+/// Readiness only says that something changed, so each turn tries everything, and a worker sleeps only once reading has
+/// said it would block. A frame `WebSocket::write` was given stays in its buffer when that write says it would block,
+/// and `flush` picks it up: never written again here, and nothing more is taken from the queue until it has gone.
+struct Worker {
+    socket: WebSocket<Stream>,
+    poll: Poll,
+    events: Events,
+    inbox: SyncSender<Received>,
+    behind: Arc<AtomicBool>,
+    outgoing: mpsc::Receiver<Vec<u8>>,
+    frames: Frames,
+    queued: Arc<AtomicUsize>,
+    limits: Limits,
+    max_message: Arc<AtomicUsize>,
+    // What the socket was built with: the shared value may already have moved on.
+    applied: usize,
+    datagrams: Option<WorkerDatagrams>,
+    waiting: Option<Received>,
+    heard: Instant,
+    pinged: bool,
+    // When the socket stopped taking what there is to send.
+    unsent: Option<Instant>,
+    watching_writes: bool,
+}
+
+impl Worker {
+    /// Agreeing to datagrams adds a tag to every binary message, which a limit on what it holds does not count.
+    fn tag(&self) -> usize {
+        usize::from(self.datagrams.is_some())
+    }
+
+    fn run(mut self) {
+        let tag = self.tag();
+        if tag > 0 {
+            let limit = self.applied + tag;
+            self.socket.set_config(|config| {
+                config.max_message_size = Some(limit);
+                config.max_frame_size = Some(limit);
+            });
+        }
+        let stop = loop {
+            if let Err(stop) = self.turn() {
+                break stop;
+            }
+        };
+        match stop {
+            Stop::Failed(failure) => self.report(failure),
+            Stop::FailedClosing(failure) => {
+                self.report(failure);
+                self.finish();
+            }
+            Stop::Closing => self.finish(),
+            Stop::Replying => {
+                let _ = self.drained();
+            }
+            Stop::Gone => {}
+        }
+    }
+
+    fn turn(&mut self) -> Result<(), Stop> {
+        let more = self.write_queued()?;
+        self.keep_alive()?;
+        // Writing stops when the socket is full, and if that has passed, nothing will say so.
+        let was_unsent = self.unsent.is_some();
+        let behind = self.deliver()?;
+        let read = !behind && self.read_one()?;
+        let retry = self.flush()?;
+        let room = was_unsent && self.unsent.is_none();
+        if more || read || retry || room || (!behind && self.socket.get_ref().holds_unread()) {
+            return Ok(());
+        }
+        self.wait(behind)
+    }
+
+    fn write(&mut self, message: Message) -> Result<(), Stop> {
+        match self.socket.write(message) {
+            Ok(()) => Ok(()),
+            Err(error) if would_block(&error) => {
+                self.unsent.get_or_insert_with(Instant::now);
+                Ok(())
+            }
+            Err(error) => Err(Stop::Failed(ended(&error))),
+        }
+    }
+
+    /// Takes nothing while the socket is full, so what waits stays counted against the caller's bounds. Takes a bounded
+    /// number otherwise, so a busy sender cannot keep this from reading, and answers whether more may be waiting: nothing
+    /// will wake this for what is already queued. Datagrams go first: a few at most, and a message sent after one follows it.
+    fn write_queued(&mut self) -> Result<bool, Stop> {
+        let mut more = false;
+        if self.datagrams.is_some() {
+            more = true;
+            for _ in 0..DATAGRAMS_PER_TURN {
+                if self.unsent.is_some() {
+                    return Ok(false);
+                }
+                let Some(Ok(datagram)) = self.datagrams.as_ref().map(|d| d.outgoing.try_recv())
+                else {
+                    more = false;
+                    break;
+                };
+                self.write(Message::binary(frame::ws_datagram(&datagram)))?;
+            }
+        }
+        for _ in 0..OUTGOING {
+            if self.unsent.is_some() {
+                return Ok(false);
+            }
+            let message = match self.outgoing.try_recv() {
+                Ok(message) => message,
+                Err(mpsc::TryRecvError::Empty) => return Ok(more),
+                Err(mpsc::TryRecvError::Disconnected) => return Err(Stop::Closing),
+            };
+            self.queued.fetch_sub(message.len(), Ordering::SeqCst);
+            let framed = match self.frames {
+                Frames::Text => match core::str::from_utf8(&message) {
+                    Ok(text) => Message::text(text.to_string()),
+                    Err(_) => continue,
+                },
+                Frames::Binary if self.tag() > 0 => Message::binary(frame::ws_message(&message)),
+                Frames::Binary => Message::binary(message),
+            };
+            self.write(framed)?;
+        }
+        Ok(true)
+    }
+
+    fn keep_alive(&mut self) -> Result<(), Stop> {
+        let silent = self.heard.elapsed();
+        if silent >= self.limits.idle.saturating_mul(2) {
+            return Err(Stop::Failed(Failure::NoProgress));
+        }
+        if silent >= self.limits.idle && !self.pinged {
+            self.pinged = true;
+            let _ = self.socket.write(Message::Ping(Vec::new().into()));
+        }
+        Ok(())
+    }
+
+    /// Whether the reader is still behind, and the message it has not taken still waits here.
+    fn deliver(&mut self) -> Result<bool, Stop> {
+        let Some(held) = self.waiting.take() else {
+            return Ok(false);
+        };
+        match self.inbox.try_send(held) {
+            Ok(()) => Ok(false),
+            Err(TrySendError::Full(held)) => {
+                self.waiting = Some(held);
+                self.behind.store(true, Ordering::SeqCst);
+                Ok(true)
+            }
+            Err(TrySendError::Disconnected(_)) => Err(Stop::Closing),
+        }
+    }
+
+    /// Whether a message came in, in which case there may be another.
+    fn read_one(&mut self) -> Result<bool, Stop> {
+        // Looked at after this turn's writes: a peer answering one of them meets the limit its sender had set.
+        let wanted = self.max_message.load(Ordering::SeqCst);
+        if wanted != self.applied {
+            self.applied = wanted;
+            let limit = wanted + self.tag();
+            self.socket.set_config(|config| {
+                config.max_message_size = Some(limit);
+                config.max_frame_size = Some(limit);
+            });
+        }
+        let message = match self.socket.read() {
+            Ok(message) => message,
+            Err(tungstenite::Error::ConnectionClosed) => return Err(Stop::Replying),
+            Err(error) if would_block(&error) => return Ok(false),
+            Err(error) => return Err(Stop::FailedClosing(ended(&error))),
+        };
+        self.heard = Instant::now();
+        self.pinged = false;
+        match message {
+            Message::Text(text) => self.waiting = Some(Ok(text.as_bytes().to_vec())),
+            Message::Binary(body) if self.datagrams.is_some() => match frame::ws_part(&body) {
+                Ok(WsPart::Datagram(datagram)) => {
+                    if let Some(datagrams) = &self.datagrams {
+                        datagrams.arrived(datagram);
+                    }
+                }
+                Ok(WsPart::Message(message)) if self.frames == Frames::Binary => {
+                    self.waiting = Some(Ok(message.to_vec()));
+                }
+                _ => return Err(Stop::FailedClosing(Failure::Protocol)),
+            },
+            Message::Binary(body) if self.frames == Frames::Binary => {
+                self.waiting = Some(Ok(body.to_vec()));
+            }
+            Message::Binary(_) => return Err(Stop::FailedClosing(Failure::Protocol)),
+            // An orderly close: the reader sees the end when this sender drops.
+            Message::Close(_) => return Err(Stop::Replying),
+            _ => {}
+        }
+        Ok(true)
+    }
+
+    /// Sends what it can. A peer that takes nothing for `Limits::send` while there is something to send ends the channel.
+    /// Answers whether to look again at once: TLS can still hold bytes after a flush that returned early.
+    fn flush(&mut self) -> Result<bool, Stop> {
+        let retry = match self.socket.flush() {
+            Ok(()) if !self.socket.get_ref().holds_unsent() => {
+                self.unsent = None;
+                return Ok(false);
+            }
+            Ok(()) => true,
+            Err(error) if would_block(&error) => false,
+            Err(tungstenite::Error::ConnectionClosed) => return Err(Stop::Gone),
+            Err(error) => return Err(Stop::Failed(ended(&error))),
+        };
+        self.unsent.get_or_insert_with(Instant::now);
+        if self.send_left().is_some_and(|left| left.is_zero()) {
+            return Err(Stop::Failed(Failure::NoProgress));
+        }
+        Ok(retry)
+    }
+
+    /// How long the peer has left to take something, if there is anything for it to take.
+    fn send_left(&self) -> Option<Duration> {
+        let since = self.unsent?.max(self.socket.get_ref().transport().wrote);
+        Some(self.limits.send.saturating_sub(since.elapsed()))
+    }
+
+    /// Sleeps until the socket or a caller has something, or until the next thing that is due.
+    fn wait(&mut self, behind: bool) -> Result<(), Stop> {
+        let silence = if self.pinged {
+            self.limits.idle.saturating_mul(2)
+        } else {
+            self.limits.idle
+        };
+        let mut limit = silence.saturating_sub(self.heard.elapsed());
+        if let Some(left) = self.send_left() {
+            limit = limit.min(left);
+        }
+        if behind {
+            limit = limit.min(POLL);
+        }
+        self.sleep(Some(limit))
+            .map_err(|_| Stop::Failed(Failure::PathLost))
+    }
+
+    fn sleep(&mut self, limit: Option<Duration>) -> io::Result<()> {
+        let writing = self.unsent.is_some();
+        if writing != self.watching_writes {
+            self.socket
+                .get_mut()
+                .transport_mut()
+                .watch(self.poll.registry(), writing)?;
+            self.watching_writes = writing;
+        }
+        match self.poll.poll(&mut self.events, limit) {
+            Err(error) if error.kind() != io::ErrorKind::Interrupted => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    /// What came in before the failure, then the failure, for a reader that may be behind. A channel being closed has
+    /// no reader left to wait for.
+    fn report(&mut self, failure: Failure) {
+        let held = self.waiting.take();
+        for item in held.into_iter().chain([Err(failure)]) {
+            let mut item = item;
+            while let Err(TrySendError::Full(back)) = self.inbox.try_send(item) {
+                item = back;
+                loop {
+                    match self.outgoing.try_recv() {
+                        Ok(_) => {}
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => return,
+                    }
+                }
+                if self.sleep(Some(POLL)).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Whether everything got to the socket, for as long as the peer keeps taking it.
+    fn drained(&mut self) -> bool {
+        loop {
+            match self.flush() {
+                Ok(true) => {}
+                Ok(false) if self.unsent.is_none() => return true,
+                Ok(false) => {
+                    let left = self.send_left();
+                    if self.sleep(left).is_err() {
+                        return false;
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+    }
+
+    /// Starts the closing handshake and leaves it a moment to finish, then the socket drops anyway.
+    fn finish(&mut self) {
+        // The close frame is queued whatever this returns, and `drained` sends it.
+        let _ = self.socket.close(None);
+        if !self.drained() {
+            return;
+        }
+        let until = Instant::now() + Duration::from_millis(500);
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            match self.socket.read() {
+                Ok(_) => {}
+                Err(error) if would_block(&error) => {
+                    if self.sleep(Some(left)).is_err() {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            }
         }
     }
 }
@@ -704,7 +1027,7 @@ impl channel::Dialer for Dialer {
         tcp.set_write_timeout(Some(timeout))
             .map_err(|e| io_failure(&e))?;
         let stream = match endpoint.scheme() {
-            "ws" if endpoint_is_loopback(endpoint) => Stream::Plain(tcp),
+            "ws" if endpoint_is_loopback(endpoint) => Stream::Plain(Transport::new(tcp)),
             "ws" => return Err(Failure::Permission),
             "wss" => {
                 let tls = self.tls.clone().ok_or(Failure::Certificate)?;
@@ -716,7 +1039,7 @@ impl channel::Dialer for Dialer {
                 )
                 .map_err(|_| Failure::Protocol)?;
                 let session = ClientConnection::new(tls, name).map_err(|_| Failure::Protocol)?;
-                Stream::Client(Box::new(StreamOwned::new(session, tcp)))
+                Stream::Client(Box::new(StreamOwned::new(session, Transport::new(tcp))))
             }
             _ => return Err(Failure::Unsupported),
         };
@@ -931,11 +1254,11 @@ impl Pending {
             })
             .map_err(|_| Failure::Unsupported)?;
         let stream = match &tls {
-            None => Stream::Plain(tcp),
+            None => Stream::Plain(Transport::new(tcp)),
             Some(tls) => {
                 let session =
                     ServerConnection::new(Arc::clone(tls)).map_err(|_| Failure::Protocol)?;
-                Stream::Server(Box::new(StreamOwned::new(session, tcp)))
+                Stream::Server(Box::new(StreamOwned::new(session, Transport::new(tcp))))
             }
         };
         let agreed = Arc::new(AtomicBool::new(false));

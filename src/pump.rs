@@ -20,7 +20,8 @@ pub struct Limits {
     pub handshake: Duration,
     /// Bytes queued to send, past which `send` answers `Failure::NoProgress` rather than growing.
     pub queued_bytes: usize,
-    /// How long one send may wait on a peer that is not reading, where a driver waits at all.
+    /// How long a peer may take nothing while there is something to send, where a driver waits at all. It ends the channel
+    /// with `Failure::NoProgress`.
     pub send: Duration,
     /// Silence after which a WebSocket peer is pinged, and twice this after which it is gone: `Failure::NoProgress`.
     pub idle: Duration,
