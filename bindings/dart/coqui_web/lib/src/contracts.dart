@@ -20,6 +20,30 @@ abstract interface class ByteWebChannel implements WebChannel {
   Future<void> sendBytes(Uint8List message);
 }
 
+/// Raw datagrams beside a channel's messages: lost, reordered or repeated without notice, and whole or not at all. They are outside
+/// any identity proof run on the messages, so TLS is all that protects them.
+abstract interface class WebDatagrams {
+  /// The largest that fits one datagram now, which can change as the path does.
+  int? get maxSize;
+
+  /// Each one that arrives. A browser keeps a small queue of its own, and what it discards there it does not report.
+  Stream<Uint8List> get incoming;
+
+  /// Hands one to the transport, which does not report whether it arrived. Throws [TransportProtocolFailure] for one over [maxSize],
+  /// which a browser would otherwise drop without a word, and the channel goes on.
+  Future<void> send(Uint8List datagram);
+}
+
+/// A channel that also has datagrams. Use [datagramsOf], which also answers for a channel that has none.
+abstract interface class DatagramWebChannel implements ByteWebChannel {
+  WebDatagrams get datagrams;
+}
+
+/// [channel]'s datagrams, or null if it has none, as a WebSocket does not: a caller on a fallback finds out here rather than quietly
+/// getting a stream instead. A channel wrapping another, such as one sealing its messages, has none unless it says so.
+WebDatagrams? datagramsOf(WebChannel channel) =>
+    channel is DatagramWebChannel ? channel.datagrams : null;
+
 class TransportUnavailable implements Exception {
   const TransportUnavailable(this.reason);
   final String reason;

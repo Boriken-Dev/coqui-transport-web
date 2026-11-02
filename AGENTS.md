@@ -32,10 +32,22 @@ pub trait Channel: Send + Sync {
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure>;
     fn close(&self);
     fn set_max_message(&self, _bytes: usize) {}   // both ways, from the next read; a peer's answer to anything sent after this call meets it; default ignores it
+    fn datagrams(&self) -> Option<&dyn Datagrams> { None }   // Some on WebTransport; a WebSocket, or a channel wrapping another, has none
 }
 ```
 
 A reliable, ordered channel of whole messages.
+
+```rust
+pub trait Datagrams: Send + Sync {
+    fn max_size(&self) -> Option<usize>;                                          // what fits now; it can change; None: the peer takes none
+    fn send(&self, payload: &[u8]) -> Result<(), Failure>;                        // Protocol if too large, and the channel goes on; Unsupported; PathLost
+    fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure>;   // None once the connection ended; Timeout
+    fn dropped(&self) -> u64;                                                     // discarded here for a reader behind; network loss cannot be seen
+}
+```
+
+Raw datagrams beside the messages: lost, reordered or repeated without notice, whole or not at all, and with no framing of this library's. **Outside any identity proof run on the messages**, so TLS is all that protects them. Read only once `datagrams()` is first called; the transport's bounded buffer holds them until then.
 
 ```rust
 pub trait Dialer {
@@ -201,7 +213,7 @@ Methods for the `Decoder` struct.
 ## Limits (crate root, with a driver feature)
 
 ```rust
-pub struct Limits { pub max_message: usize, pub pending: usize, pub handshake: Duration, pub queued_bytes: usize, pub send: Duration, pub idle: Duration }
+pub struct Limits { pub max_message: usize, pub pending: usize, pub handshake: Duration, pub queued_bytes: usize, pub send: Duration, pub idle: Duration, pub pending_datagrams: usize }
 pub const fn with_max_message(self, bytes: usize) -> Self
 pub const fn with_pending(self, messages: usize) -> Self
 pub const fn with_handshake(self, limit: Duration) -> Self

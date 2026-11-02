@@ -2,6 +2,7 @@
 @Timeout(Duration(minutes: 8))
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -68,6 +69,60 @@ void main() {
       await roundTrip(channel);
     },
   );
+
+  test(
+    'a browser WebTransport channel sends datagrams to the Rust listener and gets them back',
+    () async {
+      final channel = await connectWebChannel(
+        WebEndpoints(
+          webTransport: Uri.parse(
+            'https://127.0.0.1:${peer['webtransport']}/channel',
+          ),
+          certificatePins: [peer['pin'] as String],
+        ),
+      );
+      final datagrams = datagramsOf(channel)!;
+      expect(datagrams.maxSize, greaterThan(1000));
+      final payload = Uint8List.fromList([0xff, 0x00, 0xfe]);
+      final received = datagrams.incoming.first;
+      // The Rust side starts reading when the stream opens, so the first can go nowhere: sent until one comes back, as anything
+      // using datagrams has to.
+      await channel.send('open');
+      var sent = true;
+      unawaited(
+        received
+            .whenComplete(() => sent = false)
+            .catchError((Object _) => payload),
+      );
+      while (sent) {
+        await datagrams.send(payload);
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      expect(await received.timeout(const Duration(seconds: 20)), payload);
+      await expectLater(
+        datagrams.send(Uint8List(datagrams.maxSize! + 1)),
+        throwsA(isA<TransportProtocolFailure>()),
+      );
+      final messages = channel.messages.take(2).toList();
+      await channel.send('still here');
+      expect(await messages.timeout(const Duration(seconds: 20)), [
+        'open',
+        'still here',
+      ]);
+      await channel.close();
+    },
+  );
+
+  test('a browser WebSocket channel has no datagrams, and says so', () async {
+    final channel = await connectWebChannel(
+      WebEndpoints(
+        webSocket: Uri.parse('ws://127.0.0.1:${peer['websocket']}/channel'),
+        allowLocalPlainWebSocket: true,
+      ),
+    );
+    expect(datagramsOf(channel), isNull);
+    await channel.close();
+  });
 
   test('a browser WebSocket channel reaches the Rust listener', () async {
     final channel = await connectWebChannel(

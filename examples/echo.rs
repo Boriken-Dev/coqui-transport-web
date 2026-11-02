@@ -1,5 +1,5 @@
 //! An echo peer on loopback for interoperability tests: prints its ports and certificate pin as one JSON line, then echoes
-//! every message on both a WebSocket and a WebTransport listener until killed.
+//! every message on both a WebSocket and a WebTransport listener until killed, and every WebTransport datagram.
 //!
 //! `cargo run --all-features --example echo`
 
@@ -14,12 +14,21 @@ use coqui_web::{CertificatePin, Channel, webtransport};
 use rustls::pki_types::PrivatePkcs8KeyDer;
 
 fn echo<C: Channel>(channel: &C) {
-    while let Ok(Some(message)) = channel.receive(None) {
-        if channel.send(&message).is_err() {
-            break;
+    thread::scope(|scope| {
+        if let Some(datagrams) = channel.datagrams() {
+            scope.spawn(move || {
+                while let Ok(Some(datagram)) = datagrams.receive(None) {
+                    let _ = datagrams.send(&datagram);
+                }
+            });
         }
-    }
-    channel.close();
+        while let Ok(Some(message)) = channel.receive(None) {
+            if channel.send(&message).is_err() {
+                break;
+            }
+        }
+        channel.close();
+    });
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

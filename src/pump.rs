@@ -24,6 +24,8 @@ pub struct Limits {
     pub send: Duration,
     /// Silence after which a WebSocket peer is pinged, and twice this after which it is gone: `Failure::NoProgress`.
     pub idle: Duration,
+    /// Datagrams held for a slow reader, past which new ones are discarded and counted. Unlike a message, a datagram slows nobody.
+    pub pending_datagrams: usize,
 }
 
 impl Limits {
@@ -68,6 +70,13 @@ impl Limits {
         self.idle = limit;
         self
     }
+
+    /// Sets how many datagrams wait for a slow reader.
+    #[must_use]
+    pub const fn with_pending_datagrams(mut self, datagrams: usize) -> Self {
+        self.pending_datagrams = datagrams;
+        self
+    }
 }
 
 impl Default for Limits {
@@ -79,6 +88,7 @@ impl Default for Limits {
             queued_bytes: 64 * 1024 * 1024,
             send: Duration::from_secs(30),
             idle: Duration::from_secs(60),
+            pending_datagrams: 256,
         }
     }
 }

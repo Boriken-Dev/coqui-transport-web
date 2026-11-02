@@ -547,6 +547,123 @@ fn webtransport_carries_ordered_messages_with_a_pinned_certificate() {
     drop(server.join().unwrap());
 }
 
+/// A connected WebTransport pair with `limits` on the listening side.
+fn webtransport_pair(limits: coqui_web::Limits) -> (webtransport::Channel, webtransport::Channel) {
+    let id = identity();
+    let listener = webtransport::Listener::bind(loopback(), server_tls(&id))
+        .unwrap()
+        .with_limits(limits);
+    let port = listener.local_addr().port();
+    let accepted = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
+    let client = webtransport::Dialer::pinned(&[pin(&id)])
+        .unwrap()
+        .dial(
+            Kind::WebTransport,
+            &Url::parse(&format!("https://127.0.0.1:{port}/channel")).unwrap(),
+            WAIT,
+        )
+        .unwrap();
+    // A client has nothing to accept until its stream carries something.
+    client.send(b"open").unwrap();
+    let server = accepted.join().unwrap();
+    assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), b"open");
+    (client, server)
+}
+
+#[test]
+fn webtransport_datagrams_go_both_ways_beside_the_messages() {
+    let (client, server) = webtransport_pair(coqui_web::Limits::default());
+    let (near, far) = (client.datagrams().unwrap(), server.datagrams().unwrap());
+    assert!(near.max_size().unwrap() > 1000, "{:?}", near.max_size());
+    // Sent until one arrives: losing one is what they may do, even here.
+    let until = std::time::Instant::now() + WAIT;
+    let arrived = loop {
+        near.send(b"\xff\x00raw").unwrap();
+        match far.receive(Some(Duration::from_millis(100))) {
+            Ok(Some(datagram)) => break datagram,
+            Err(Failure::Timeout) => assert!(std::time::Instant::now() < until, "none arrived"),
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(arrived, b"\xff\x00raw");
+    far.send(b"back").unwrap();
+    assert_eq!(near.receive(Some(WAIT)).unwrap().unwrap(), b"back");
+    client.send(b"a message").unwrap();
+    assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), b"a message");
+}
+
+#[test]
+fn a_datagram_too_large_is_refused_and_the_channel_goes_on() {
+    let (client, server) = webtransport_pair(coqui_web::Limits::default());
+    let datagrams = client.datagrams().unwrap();
+    let largest = datagrams.max_size().unwrap();
+    assert_eq!(
+        datagrams.send(&vec![1; largest + 1]),
+        Err(Failure::Protocol)
+    );
+    datagrams.send(&vec![1; largest]).unwrap();
+    client.send(b"still here").unwrap();
+    assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), b"still here");
+}
+
+#[test]
+fn a_reader_behind_loses_datagrams_and_can_see_how_many() {
+    let (client, server) =
+        webtransport_pair(coqui_web::Limits::default().with_pending_datagrams(2));
+    let (near, far) = (client.datagrams().unwrap(), server.datagrams().unwrap());
+    let until = std::time::Instant::now() + WAIT;
+    while far.dropped() == 0 {
+        assert!(std::time::Instant::now() < until, "nothing was discarded");
+        for _ in 0..16 {
+            let _ = near.send(b"more than it holds");
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        far.receive(Some(WAIT)).unwrap().unwrap(),
+        b"more than it holds"
+    );
+    // The stream never slowed for that.
+    client.send(b"message").unwrap();
+    assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), b"message");
+}
+
+#[test]
+fn datagrams_end_with_the_channel() {
+    let (client, server) = webtransport_pair(coqui_web::Limits::default());
+    let far = server.datagrams().unwrap();
+    client.close();
+    let until = std::time::Instant::now() + WAIT;
+    loop {
+        match far.receive(Some(Duration::from_millis(100))) {
+            Ok(None) => break,
+            Err(Failure::Timeout) => assert!(std::time::Instant::now() < until, "it went on"),
+            other => panic!("{other:?}"),
+        }
+    }
+    let near = client.datagrams().unwrap();
+    assert_eq!(near.send(b"late"), Err(Failure::PathLost));
+}
+
+#[test]
+fn a_websocket_has_no_datagrams_and_says_so() {
+    let listener = websocket::Listener::bind(loopback(), None).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepted = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
+    let client = websocket::Dialer::new()
+        .dial(
+            Kind::WebSocket,
+            &Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap(),
+            WAIT,
+        )
+        .unwrap();
+    let server = accepted.join().unwrap();
+    assert!(client.datagrams().is_none());
+    assert!(server.datagrams().is_none());
+    let boxed: Box<dyn Channel> = Box::new(client);
+    assert!(boxed.datagrams().is_none());
+}
+
 #[test]
 fn webtransport_and_websocket_serve_one_port_number_on_one_address() {
     let id = identity();

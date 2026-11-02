@@ -1,4 +1,4 @@
-//! A WebTransport dialer and listener: one bidirectional stream, framed by [`frame`].
+//! A WebTransport dialer and listener: one bidirectional stream, framed by [`frame`], and raw datagrams beside it.
 //!
 //! QUIC needs an async runtime, so each dialer and listener runs a small one inside. Nothing async
 //! crosses this API and the caller needs no runtime of its own. Its calls block, so a caller already
@@ -9,11 +9,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 use core::net::SocketAddr;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 use std::io;
 use std::sync::mpsc::{self, SyncSender};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use rustls::{ClientConfig, ServerConfig};
 use tokio::runtime::{Builder, Handle, Runtime};
@@ -22,11 +22,11 @@ use tokio::time::timeout as within;
 use url::Url;
 use wtransport::endpoint::IncomingSession;
 use wtransport::endpoint::endpoint_side::{Client, Server};
-use wtransport::error::{ConnectingError, ConnectionError};
+use wtransport::error::{ConnectingError, ConnectionError, SendDatagramError};
 use wtransport::tls::{Sha256Digest, WEBTRANSPORT_ALPN};
 use wtransport::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 
-use crate::channel::{self, Kind};
+use crate::channel::{self, Datagrams, Kind};
 use crate::endpoints::CertificatePin;
 use crate::failure::Failure;
 use crate::frame::{self, Decoder};
@@ -97,12 +97,14 @@ fn connection_failure(error: &ConnectionError) -> Failure {
 /// A WebTransport channel over one bidirectional stream.
 pub struct Channel {
     inbox: Inbox,
-    connection: Connection,
+    connection: Arc<Connection>,
     send: Mutex<Option<SendStream>>,
     reader: AbortHandle,
     handle: Handle,
     max_message: Arc<AtomicUsize>,
     send_limit: Duration,
+    pending_datagrams: usize,
+    datagrams: OnceLock<QuicDatagrams>,
     // Keeps the driver's runtime alive as long as a channel needs it.
     _runtime: Arc<Runtime>,
 }
@@ -132,14 +134,85 @@ impl Channel {
             .abort_handle();
         Self {
             inbox: Inbox::new(inbox),
-            connection,
+            connection: Arc::new(connection),
             send: Mutex::new(Some(send)),
             reader,
             handle,
             max_message,
             send_limit: limits.send,
+            pending_datagrams: limits.pending_datagrams,
+            datagrams: OnceLock::new(),
             _runtime: runtime,
         }
+    }
+}
+
+/// One channel's datagrams. Read only once someone asks for them: until then the transport's own bounded buffer holds them.
+struct QuicDatagrams {
+    connection: Arc<Connection>,
+    inbox: Inbox,
+    dropped: Arc<AtomicU64>,
+    reader: AbortHandle,
+}
+
+impl QuicDatagrams {
+    fn start(connection: &Arc<Connection>, pending: usize, handle: &Handle) -> Self {
+        let (to_reader, inbox) = mpsc::sync_channel::<Received>(pending.max(1));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let reader = handle
+            .spawn(read_datagrams(
+                Arc::clone(connection),
+                to_reader,
+                Arc::clone(&dropped),
+            ))
+            .abort_handle();
+        Self {
+            connection: Arc::clone(connection),
+            inbox: Inbox::new(inbox),
+            dropped,
+            reader,
+        }
+    }
+}
+
+/// Never waits on the reader: a datagram that finds no room is gone, which is what a datagram may be, and is counted.
+async fn read_datagrams(
+    connection: Arc<Connection>,
+    inbox: SyncSender<Received>,
+    dropped: Arc<AtomicU64>,
+) {
+    while let Ok(datagram) = connection.receive_datagram().await {
+        match inbox.try_send(Ok(datagram.payload().to_vec())) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => return,
+        }
+    }
+}
+
+impl Datagrams for QuicDatagrams {
+    fn max_size(&self) -> Option<usize> {
+        self.connection.max_datagram_size()
+    }
+
+    fn send(&self, payload: &[u8]) -> Result<(), Failure> {
+        self.connection
+            .send_datagram(payload)
+            .map_err(|error| match error {
+                SendDatagramError::TooLarge => Failure::Protocol,
+                SendDatagramError::UnsupportedByPeer => Failure::Unsupported,
+                SendDatagramError::NotConnected => Failure::PathLost,
+            })
+    }
+
+    fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
+        self.inbox.receive(timeout)
+    }
+
+    fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 }
 
@@ -220,6 +293,12 @@ impl channel::Channel for Channel {
         self.max_message.store(bytes, Ordering::SeqCst);
     }
 
+    fn datagrams(&self) -> Option<&dyn Datagrams> {
+        Some(self.datagrams.get_or_init(|| {
+            QuicDatagrams::start(&self.connection, self.pending_datagrams, &self.handle)
+        }))
+    }
+
     fn close(&self) {
         let stream = self
             .send
@@ -232,6 +311,9 @@ impl channel::Channel for Channel {
                 .block_on(async { within(Duration::from_secs(2), stream.finish()).await });
         }
         self.reader.abort();
+        if let Some(datagrams) = self.datagrams.get() {
+            datagrams.reader.abort();
+        }
         self.connection.close(VarInt::from_u32(0), b"");
     }
 }

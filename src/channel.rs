@@ -45,6 +45,41 @@ pub trait Channel: Send + Sync {
     /// Changes the largest message this channel takes from now on, both ways, so a server can hold an unproven peer
     /// to a small limit and raise it once the peer is proven. A channel with no limit of its own ignores it.
     fn set_max_message(&self, _bytes: usize) {}
+
+    /// This channel's raw datagrams, or `None` if it has none, as a WebSocket does not. There is deliberately no datagram call on the
+    /// channel itself, so a caller on a fallback finds out here rather than quietly getting a stream instead.
+    fn datagrams(&self) -> Option<&dyn Datagrams> {
+        None
+    }
+}
+
+/// Raw datagrams beside a channel's messages: lost, reordered or repeated without notice, and delivered whole or not at all.
+///
+/// They are outside any identity proof run on the channel's messages, so a peer proof says nothing about them and TLS is all that
+/// protects them. Anything that must know who sent a datagram has to establish that itself. A channel wrapping another, such as one
+/// sealing its messages, has none of these unless it says so.
+pub trait Datagrams: Send + Sync {
+    /// The largest payload that fits one datagram now. It can change as the path does, and `None` means none can be sent, because
+    /// the peer did not agree to them.
+    fn max_size(&self) -> Option<usize>;
+
+    /// Hands one datagram to the transport, which does not wait or report whether it arrived.
+    ///
+    /// # Errors
+    ///
+    /// [`Failure::Protocol`] for one larger than [`Self::max_size`], which leaves the channel usable;
+    /// [`Failure::Unsupported`] when the peer does not take them; [`Failure::PathLost`] when the connection has ended.
+    fn send(&self, payload: &[u8]) -> Result<(), Failure>;
+
+    /// The next datagram, or `None` once the connection has ended.
+    ///
+    /// # Errors
+    ///
+    /// [`Failure::Timeout`] when none arrived within `timeout`; `None` waits without limit.
+    fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure>;
+
+    /// How many arrived and were discarded here because the reader was behind. What the network lost cannot be seen from this side.
+    fn dropped(&self) -> u64;
 }
 
 impl Channel for alloc::boxed::Box<dyn Channel> {
@@ -62,6 +97,10 @@ impl Channel for alloc::boxed::Box<dyn Channel> {
 
     fn set_max_message(&self, bytes: usize) {
         (**self).set_max_message(bytes);
+    }
+
+    fn datagrams(&self) -> Option<&dyn Datagrams> {
+        (**self).datagrams()
     }
 }
 

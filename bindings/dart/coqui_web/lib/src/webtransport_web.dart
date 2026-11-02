@@ -13,7 +13,14 @@ extension type _WebTransport._(JSObject _) implements JSObject {
   external JSPromise<JSAny?> get ready;
   external JSPromise<JSAny?> get closed;
   external JSPromise<_Duplex> createBidirectionalStream();
+  external _DatagramDuplex get datagrams;
   external void close();
+}
+
+extension type _DatagramDuplex._(JSObject _) implements JSObject {
+  external _Readable get readable;
+  external _Writable get writable;
+  external int? get maxDatagramSize;
 }
 
 extension type _Duplex._(JSObject _) implements JSObject {
@@ -107,15 +114,76 @@ Future<WebChannel> openWebTransportChannel(
   }
 }
 
-final class _WebTransportConnection implements ByteWebChannel {
+final class _Datagrams implements WebDatagrams {
+  _Datagrams(this._duplex);
+  final _DatagramDuplex _duplex;
+  _Writer? _writer;
+  _Reader? _reader;
+  late final StreamController<Uint8List> _incoming =
+      StreamController<Uint8List>.broadcast(onListen: () => unawaited(_read()));
+
+  @override
+  int? get maxSize => _duplex.maxDatagramSize;
+
+  @override
+  Stream<Uint8List> get incoming => _incoming.stream;
+
+  Future<void> _read() async {
+    if (_reader != null) return;
+    final reader = _reader = _duplex.readable.getReader();
+    try {
+      for (;;) {
+        final read = await reader.read().toDart;
+        if (read.done) break;
+        final bytes = read.value?.toDart;
+        if (bytes != null) _incoming.add(bytes);
+      }
+    } catch (_) {
+      // The session ended, which the channel itself reports.
+    }
+    unawaited(_incoming.close());
+  }
+
+  @override
+  Future<void> send(Uint8List datagram) async {
+    final limit = maxSize;
+    if (limit != null && datagram.length > limit) {
+      throw const TransportProtocolFailure(
+        'A datagram larger than the path takes',
+      );
+    }
+    final writer = _writer ??= _duplex.writable.getWriter();
+    try {
+      await writer.write(datagram.toJS).toDart;
+    } catch (e) {
+      throw TransportUnavailable('WebTransport datagram failed: $e');
+    }
+  }
+
+  void end() {
+    final reader = _reader;
+    if (reader != null) {
+      unawaited(reader.cancel().toDart.catchError((_) => null));
+    }
+    if (_reader == null && !_incoming.isClosed) {
+      unawaited(_incoming.close());
+    }
+  }
+}
+
+final class _WebTransportConnection implements DatagramWebChannel {
   _WebTransportConnection(this._transport, this._reader, this._writer);
   final _WebTransport _transport;
   final _Reader _reader;
   final _Writer _writer;
   final StreamController<Uint8List> _messages = StreamController<Uint8List>();
   final FrameDecoder _decoder = FrameDecoder();
+  late final _Datagrams _datagrams = _Datagrams(_transport.datagrams);
   bool _ended = false;
   bool _released = false;
+
+  @override
+  WebDatagrams get datagrams => _datagrams;
 
   @override
   WebChannelKind get kind => WebChannelKind.webTransport;
@@ -199,6 +267,7 @@ final class _WebTransportConnection implements ByteWebChannel {
     if (_released) return;
     _released = true;
     _end();
+    _datagrams.end();
     try {
       await _writer.close().toDart.timeout(const Duration(seconds: 2));
     } catch (_) {}
