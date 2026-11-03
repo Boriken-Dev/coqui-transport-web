@@ -22,7 +22,7 @@ use tokio::time::timeout as within;
 use url::Url;
 use wtransport::endpoint::IncomingSession;
 use wtransport::endpoint::endpoint_side::{Client, Server};
-use wtransport::error::{ConnectingError, ConnectionError, SendDatagramError};
+use wtransport::error::{ConnectingError, ConnectionClose, ConnectionError, SendDatagramError};
 use wtransport::tls::{Sha256Digest, WEBTRANSPORT_ALPN};
 use wtransport::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 
@@ -87,8 +87,16 @@ fn quic_code(text: &str) -> Option<u64> {
     }
 }
 
+/// A server refusing a connection before its handshake, as a listener's admission does, closes it with QUIC's CONNECTION_REFUSED
+/// and no reason, which shows only in the close's text. That close travels in an Initial packet, whose keys anyone who saw the
+/// client's first packet can derive (RFC 9001 section 5.2), so it proves no more than a TCP reset does.
+fn refused(close: &ConnectionClose) -> bool {
+    close.to_string() == wtransport::quinn::TransportErrorCode::CONNECTION_REFUSED.to_string()
+}
+
 fn connection_failure(error: &ConnectionError) -> Failure {
     match error {
+        ConnectionError::ConnectionClosed(close) if refused(close) => Failure::Permission,
         ConnectionError::TimedOut => Failure::Timeout,
         ConnectionError::QuicProto(proto) => quic_failure(quic_code(&proto.to_string())),
         ConnectionError::LocallyClosed => Failure::Cancelled,

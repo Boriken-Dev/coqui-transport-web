@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- A WebTransport dialer refused by the server, as a listener's admission refuses a source, fails with `Failure::Permission` rather
+  than `Failure::PathLost`. `connect` therefore no longer falls back to WebSocket after such a refusal. The refusal is QUIC's
+  CONNECTION_REFUSED, which any QUIC server may send and anyone who saw the client's first packet can forge.
 - Breaking for a Dart class that implements these: `WebDatagrams.changes` and `DatagramWebChannel.carriedSignals` are new abstract members.
 
 ### Fixed

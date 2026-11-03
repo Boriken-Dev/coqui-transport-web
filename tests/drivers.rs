@@ -1029,6 +1029,29 @@ fn webtransport_refuses_a_certificate_with_another_hash() {
 }
 
 #[test]
+fn a_source_webtransport_admission_refuses_is_told_so_and_does_not_fall_back() {
+    let id = identity();
+    let listener = webtransport::Listener::bind(loopback(), server_tls(&id))
+        .unwrap()
+        .with_admission(|_| false);
+    let port = listener.local_addr().port();
+    let serving = thread::spawn(move || listener.next(Some(Duration::from_secs(3))).map(|_| ()));
+    let url = Url::parse(&format!("https://127.0.0.1:{port}/channel")).unwrap();
+    let started = Instant::now();
+    let refused = webtransport::Dialer::pinned(&[pin(&id)])
+        .unwrap()
+        .dial(Kind::WebTransport, &url, WAIT)
+        .unwrap_err();
+    assert_eq!(refused, Failure::Permission);
+    assert!(started.elapsed() < Duration::from_secs(3), "it was told");
+    assert_eq!(
+        refused.recovery(Kind::WebTransport, Phase::Opening, true),
+        Recovery::Deny
+    );
+    assert_eq!(serving.join().unwrap(), Err(Failure::Timeout));
+}
+
+#[test]
 fn webtransport_message_over_the_limit_ends_the_channel_as_a_protocol_failure() {
     let id = identity();
     let limits = Limits::default().with_max_message(8);
