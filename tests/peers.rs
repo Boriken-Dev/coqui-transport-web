@@ -3,11 +3,12 @@
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use coqui_web::{CertificatePin, Channel, Dialer, Kind, websocket, webtransport};
+use coqui_web::{CertificatePin, Channel, Dialer, Failure, Kind, websocket, webtransport};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use url::Url;
 
@@ -25,8 +26,14 @@ struct Identity {
 impl Identity {
     fn new() -> Self {
         let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        static MADE: AtomicUsize = AtomicUsize::new(0);
         let names = vec!["localhost".to_owned(), "127.0.0.1".to_owned()];
         let mut params = rcgen::CertificateParams::new(names).unwrap();
+        // A subject of its own, so one identity's certificate never names another as its issuer.
+        params.distinguished_name.push(
+            rcgen::DnType::CommonName,
+            format!("peer {}", MADE.fetch_add(1, Ordering::Relaxed)),
+        );
         // What pinning by hash requires: at most 14 days.
         params.not_before = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
         params.not_after = params.not_before + time::Duration::days(10);
@@ -285,4 +292,50 @@ fn a_pending_session_on_a_port_names_the_client_and_not_its_relay() {
     assert_eq!(*noted.lock().unwrap(), [pending.peer_addr()]);
     drop(pending);
     client.join().unwrap();
+}
+
+/// A server refusing the client's certificate, or the lack of one, fails the dial as a certificate refusal, by the alerts a TLS
+/// WebSocket reads as one.
+#[test]
+fn a_webtransport_client_refused_by_certificate_is_told_so() {
+    let (server, trusted, stranger) = (Identity::new(), Identity::new(), Identity::new());
+    for presented in [Some(&stranger), None] {
+        let listener =
+            webtransport::Listener::bind(loopback(), server_tls(&server, &trusted, Ask::Required))
+                .unwrap();
+        let url = Url::parse(&format!(
+            "https://127.0.0.1:{}/",
+            listener.local_addr().port()
+        ))
+        .unwrap();
+        let accepting = thread::spawn(move || listener.accept(Some(WAIT)).err());
+        let dialed = webtransport::Dialer::with_tls(client_tls(&server, presented))
+            .unwrap()
+            .dial(Kind::WebTransport, &url, WAIT);
+        assert_eq!(
+            dialed.err(),
+            Some(Failure::Certificate),
+            "presented: {}",
+            presented.is_some()
+        );
+        assert!(accepting.join().unwrap().is_some());
+    }
+}
+
+/// Nothing listening at the address is still a path failure, which permits a fallback, and never a certificate refusal. Which
+/// one depends on whether the system reports the unreachable port or the handshake runs out of time.
+#[test]
+fn a_webtransport_dial_nothing_answers_is_a_path_failure() {
+    let server = Identity::new();
+    let port = std::net::UdpSocket::bind(loopback())
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let url = Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
+    let dialed = webtransport::Dialer::with_tls(client_tls(&server, None))
+        .unwrap()
+        .dial(Kind::WebTransport, &url, Duration::from_secs(2));
+    let failure = dialed.err();
+    assert!(failure.is_some_and(Failure::is_path), "{failure:?}");
 }

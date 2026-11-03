@@ -300,6 +300,8 @@ pub fn Pending::handshake(self) -> Result<Channel, Failure>
 pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Failure>
 ```
 
+A dialer whose certificate the server refuses, or which presented none to a server requiring one, fails with `Failure::Certificate`, as a TLS WebSocket reads the same alerts (bad, unsupported, revoked, expired or unknown certificate, unknown CA, access denied, certificate required); another TLS alert is `Failure::Unsupported`.
+
 `Listener::next` sends a source to retry first, since UDP sources are forgeable, then judges it by admission, and `Pending::handshake` completes it. A source admission refuses, or a `Pending` dropped before its handshake, is closed with QUIC's CONNECTION_REFUSED, which its dialer reports as `Failure::Permission` and never falls back from. The client cannot tell that from any QUIC server refusing a connection (quinn also does when it runs out of connection IDs), and anyone who saw its first packet can forge one, as with a TCP reset. Each dialer and listener runs its own runtime, and its calls block. Inside an async runtime, call them from its blocking pool.
 
 `send` waits up to `Limits::send` for the peer's flow control, then ends the stream with `Failure::NoProgress`. `send_timeout(Some(t))` waits `t` instead: `Failure::Timeout` if nothing of the message went, and the channel goes on; `Failure::NoProgress` if part of it went, and the stream ends, since nothing can follow half a frame. Flow control often takes part of a message before it stops, so expect either. `send_timeout(None)` is `send`.

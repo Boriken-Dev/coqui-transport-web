@@ -96,9 +96,26 @@ fn refused(close: &ConnectionClose) -> bool {
     close.to_string() == wtransport::quinn::TransportErrorCode::CONNECTION_REFUSED.to_string()
 }
 
+/// What a peer's close says when it carries a TLS alert, as a server refusing a client's certificate sends one. quinn shows the code
+/// only in the close's text, so each crypto code's own rendering is matched. A close in an Initial packet is forgeable, and the
+/// failure it can be made to read as never permits a fallback.
+fn closed_failure(close: &ConnectionClose) -> Failure {
+    let text = close.to_string();
+    let alert = (0..=u8::MAX).find(|alert| {
+        let code = wtransport::quinn::TransportErrorCode::crypto(*alert).to_string();
+        text.strip_prefix(code.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(": "))
+    });
+    match alert {
+        Some(alert) => quic_failure(Some(0x100 + u64::from(alert))),
+        None => Failure::PathLost,
+    }
+}
+
 fn connection_failure(error: &ConnectionError) -> Failure {
     match error {
         ConnectionError::ConnectionClosed(close) if refused(close) => Failure::Permission,
+        ConnectionError::ConnectionClosed(close) => closed_failure(close),
         ConnectionError::TimedOut => Failure::Timeout,
         ConnectionError::QuicProto(proto) => quic_failure(quic_code(&proto.to_string())),
         ConnectionError::LocallyClosed => Failure::Cancelled,

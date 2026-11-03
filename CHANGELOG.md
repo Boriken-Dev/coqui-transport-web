@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Its worker sleeps until the reader takes a message rather than waking every 10 ms.
 - A busy WebSocket sender reads between every 256 KiB it writes, rather than after as many as 256 queued messages, so a peer's
   close or ping is heard while large messages keep coming.
+- A WebTransport client whose certificate the server refuses, or which presented none to a server requiring one, fails with
+  `Failure::Certificate` rather than `Failure::PathLost`, so `connect` does not fall back to WebSocket after it. The refusal arrives
+  as the server's close of the connection, carrying the TLS alert, which was read only when this side raised it.
 
 ### Added
 
