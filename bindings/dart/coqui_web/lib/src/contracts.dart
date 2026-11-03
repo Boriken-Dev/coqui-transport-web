@@ -33,10 +33,16 @@ enum WebDatagramDelivery {
 /// Raw datagrams beside a channel's messages, whole or not at all. They are outside any identity proof run on the messages, so TLS is
 /// all that protects them.
 abstract interface class WebDatagrams {
-  /// The largest one now. On WebTransport it can change as the path does. On a WebSocket it is a setting.
+  /// The largest one now. On WebTransport it can change as the path does. On a WebSocket it is a setting, and on a data channel what
+  /// fits one packet.
   int? get maxSize;
 
+  /// How these travel now. On a WebSocket that climbs it changes during the connection, which [changes] reports.
   WebDatagramDelivery get delivery;
+
+  /// Each change of path from now on, as the delivery now in force. [maxSize] follows the path, and one over it is refused rather than
+  /// moved to another. Nothing ever arrives here on a channel whose path cannot change.
+  Stream<WebDatagramDelivery> get changes;
 
   /// Each one that arrives. On WebTransport a browser keeps a small queue of its own, and what it discards there it does not report.
   Stream<Uint8List> get incoming;
@@ -52,6 +58,50 @@ abstract interface class WebDatagrams {
 /// A channel that may have datagrams. Use [datagramsOf].
 abstract interface class DatagramWebChannel implements ByteWebChannel {
   WebDatagrams? get datagrams;
+
+  /// The signals a caller carries for it, or null when it carries its own or has none.
+  CarriedSignals? get carriedSignals;
+}
+
+/// The signals [channel] leaves to the caller, or null if it leaves none. Asking for its datagrams starts the attempt.
+CarriedSignals? signalsOf(WebChannel channel) =>
+    channel is DatagramWebChannel ? channel.carriedSignals : null;
+
+/// How a WebSocket channel climbs onto a WebRTC data channel on the same address, when its server agrees.
+final class DataChannelSettings {
+  const DataChannelSettings({
+    this.enabled = true,
+    this.attempt = const Duration(seconds: 5),
+    this.pathMtu = 1280,
+    this.anyCandidate = false,
+    this.carriedSignals = false,
+  });
+
+  /// Whether to try. Off, a channel asks for nothing more than plain datagrams and sends no signal.
+  final bool enabled;
+
+  /// How long a data channel may take to open before the channel stays on the WebSocket for good. Only the attempt is lost.
+  final Duration attempt;
+
+  /// The largest IP packet the path is known to carry. It caps a data channel's datagrams, since a fragmented one is lost whenever any
+  /// fragment is.
+  final int pathMtu;
+
+  /// Lets a candidate name another address than the one dialled, where that was an address at all.
+  final bool anyCandidate;
+
+  /// Leaves the offer and answer to the caller, through [signalsOf]. Carried inside a sealed, proven link, the DTLS fingerprints are
+  /// bound to that proof, so the data channel's datagrams are too. A signal arriving any other way is ignored.
+  final bool carriedSignals;
+}
+
+/// The offer and answer of a channel whose [DataChannelSettings.carriedSignals] leaves them to the caller.
+abstract interface class CarriedSignals {
+  /// What to carry to the peer.
+  Stream<Uint8List> get outgoing;
+
+  /// What the peer sent through the caller.
+  void deliver(Uint8List signal);
 }
 
 /// [channel]'s datagrams, or null if it has none: a WebSocket that was not asked for them, or whose server did not agree, so a caller
@@ -62,6 +112,9 @@ WebDatagrams? datagramsOf(WebChannel channel) =>
 
 /// The WebSocket subprotocol that says both ends tag binary messages: 0 and a message, or 1 and a datagram.
 const webSocketDatagramsProtocol = 'coqui-web-datagrams.1';
+
+/// [webSocketDatagramsProtocol] and one tag more, 2 and a signal, for what opens a data channel on the same address.
+const webSocketLadderProtocol = 'coqui-web-ladder.1';
 
 /// The largest datagram over a WebSocket unless a caller chooses otherwise. There is no packet to fit there.
 const defaultWebSocketDatagram = 64 * 1024;

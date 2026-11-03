@@ -128,6 +128,9 @@ final class _Datagrams implements WebDatagrams {
   @override
   WebDatagramDelivery get delivery => WebDatagramDelivery.unreliable;
 
+  @override
+  Stream<WebDatagramDelivery> get changes => const Stream.empty();
+
   // A browser says nothing of what it discards.
   @override
   int get dropped => 0;
@@ -191,6 +194,9 @@ final class _WebTransportConnection implements DatagramWebChannel {
 
   @override
   WebDatagrams get datagrams => _datagrams;
+
+  @override
+  CarriedSignals? get carriedSignals => null;
 
   @override
   WebChannelKind get kind => WebChannelKind.webTransport;

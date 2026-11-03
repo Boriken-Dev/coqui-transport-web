@@ -21,6 +21,7 @@ typedef WebDialer =
 /// endpoints to one verified peer before processing application messages.
 ///
 /// [webSocketDatagrams] asks a WebSocket's server to agree to datagrams, up to [maxWebSocketDatagram]. WebTransport has its own either way.
+/// [dataChannel] asks for that too, and to climb onto a WebRTC data channel on the same address where the server and this browser can.
 Future<WebChannel> connectWebChannel(
   WebEndpoints endpoints, {
   Duration timeout = const Duration(seconds: 10),
@@ -28,6 +29,7 @@ Future<WebChannel> connectWebChannel(
   WebDialer? webSocketDialer,
   bool webSocketDatagrams = false,
   int maxWebSocketDatagram = defaultWebSocketDatagram,
+  DataChannelSettings? dataChannel,
 }) async {
   final wt = endpoints.webTransport;
   final ws = endpoints.webSocket;
@@ -51,8 +53,9 @@ Future<WebChannel> connectWebChannel(
       ws,
       timeout,
       const [],
-      datagrams: webSocketDatagrams,
+      datagrams: webSocketDatagrams || dataChannel != null,
       maxDatagram: maxWebSocketDatagram,
+      dataChannel: dataChannel,
     );
   }
   throw const TransportUnavailable('No usable endpoint');

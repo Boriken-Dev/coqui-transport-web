@@ -39,8 +39,8 @@ A channel can carry raw datagrams beside its messages: `channel.datagrams()` in 
 
 ## A ladder of datagrams
 
-A browser with no WebTransport, or a path where QUIC is blocked, can still have real unreliable delivery, with the `webrtc` feature, off by
-default:
+A browser with no WebTransport, or a path where QUIC is blocked, can still have real unreliable delivery, with the `webrtc` feature and
+`DataChannelSettings` in Dart, both off by default:
 
 1. WebTransport's own datagrams, when WebTransport opened.
 2. A WebRTC data channel on the same UDP port number.
@@ -65,12 +65,14 @@ The server, ICE-lite with one host candidate, answers once its own caller has as
 is what fits one packet of `path_mtu`, because a fragment lost is the whole datagram lost. If the path later dies they go back to the WebSocket,
 with an event, and nothing tries again. If UDP is blocked only the attempt is lost: 5 s by default, a setting, as is turning it off.
 
-**Identity.** Signals on the WebSocket have what TLS gives them. A caller with a proven, sealed link can carry them itself (`Signaling::ByCaller`). The DTLS fingerprints are then inside the proof, and so are that data channel's datagrams, which WebTransport's and
+**Identity.** Signals on the WebSocket have what TLS gives them. A caller with a proven, sealed link can carry them itself (`Signaling::ByCaller`,
+`carriedSignals` in Dart). The DTLS fingerprints are then inside the proof, and so are that data channel's datagrams, which WebTransport's and
 the WebSocket's are not.
 
 **Addresses.** An offer goes with no candidates, so it names nothing about the client; the server learns it from the first check. A server
 names one candidate: the address the WebSocket arrived at, or `public_address`. Set that behind a proxy or NAT, or the candidate is wrong
-and reveals the address behind it. A candidate naming anywhere else is refused by the Rust client.
+and reveals the address behind it. A candidate naming anywhere else is refused by the Rust client, and by a browser's where it dialled an
+address rather than a name.
 
 **A reverse proxy.** nginx in front of the WebSocket does nothing for UDP. Give the port a `stream` block, or let clients reach the host's own
 port and set `public_address`. Without one the attempt fails and the ladder ends at the WebSocket.
