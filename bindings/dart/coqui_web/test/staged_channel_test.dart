@@ -81,6 +81,43 @@ void main() {
     },
   );
 
+  test(
+    'a binary setup message is given whole as bytes, and sent as bytes before the handoff',
+    () async {
+      final source = ByteSource();
+      final channel = StagedChannel(source);
+      final handshake = Uint8List.fromList([0x00, 0xff, 0xc3, 0x28, 0x80]);
+      source.events.add(handshake);
+      source.events.add(utf8.encode('text'));
+      expect(await channel.nextSetupBytes(), handshake);
+      expect(await channel.nextSetupBytes(), utf8.encode('text'));
+      await channel.sendBytes(Uint8List.fromList([7, 0xfe]));
+      expect(source.sent.single, [7, 0xfe]);
+      channel.allowApplicationMessages();
+      expect(() => channel.nextSetupBytes(), throwsStateError);
+      await channel.close();
+    },
+  );
+
+  test('a setup message that is not UTF-8 is still refused as text', () async {
+    final source = ByteSource();
+    final channel = StagedChannel(source);
+    source.events.add(Uint8List.fromList([0xff]));
+    await expectLater(
+      channel.nextSetupMessage(),
+      throwsA(isA<TransportProtocolFailure>()),
+    );
+    await channel.close();
+  });
+
+  test('a text setup message reads as its UTF-8 bytes', () async {
+    final source = Source();
+    final channel = StagedChannel(source);
+    source.events.add('héllo');
+    expect(await channel.nextSetupBytes(), utf8.encode('héllo'));
+    await channel.close();
+  });
+
   test('a text channel cannot send bytes, and says so', () async {
     final channel = StagedChannel(Source());
     await expectLater(

@@ -38,6 +38,10 @@ final class StagedChannel implements ByteWebChannel {
   Future<String> nextSetupMessage() =>
       _handoff.nextSetupMessage().then(decodeText);
 
+  /// The next setup message as its bytes, for a method whose handshake is binary: a text frame gives its UTF-8.
+  /// Reads the same queue as [nextSetupMessage], one message per call.
+  Future<Uint8List> nextSetupBytes() => _handoff.nextSetupMessage();
+
   void allowApplicationMessages() => _handoff.handoff();
 
   @override
