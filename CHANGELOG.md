@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- A server's WebSocket handshake waits on the socket's readiness rather than in blocking reads, and starts no watchdog thread. Its
+  limit still bounds it in total.
 - A WebTransport dialer refused by the server, as a listener's admission refuses a source, fails with `Failure::Permission` rather
   than `Failure::PathLost`. `connect` therefore no longer falls back to WebSocket after such a refusal. The refusal is QUIC's
   CONNECTION_REFUSED, which any QUIC server may send and anyone who saw the client's first packet can forge.
@@ -36,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   sent and the channel usable, when there was none. On a WebSocket it waits behind `Limits::queued_bytes` with no polling: the worker
   wakes a waiting sender as it takes a message or ends. On WebTransport it replaces `Limits::send` for that call, and a wait that
   ends after part of the message went ends the stream with `Failure::NoProgress`. The default sends at once.
+- `Cancel`, from `websocket::Pending::canceller` and `webtransport::Pending::canceller`: abandons a server's handshake from another
+  thread, before or while `Pending::handshake` runs, which then returns `Failure::Cancelled` and closes the connection. A cancel after
+  the handshake finished does nothing.
 - Plain WebSocket beyond loopback by a deliberate choice: `websocket::Listener::bind_plain`, which binds any address with no TLS, and
   `websocket::Dialer::with_plain_beyond_loopback`. Each reports the choice in `plain_beyond_loopback()` and in its `Debug`.
   `Listener::bind` with no TLS, a dialer without the choice and `Endpoints` still refuse it.

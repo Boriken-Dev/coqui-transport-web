@@ -11,7 +11,7 @@ Header-file-style reference for the `coqui-web` crate: every public item with it
 MSRV Rust 1.89. A default build depends on `url` alone. Version `0.0.0-alpha.0`, not published; the API may change in any
 release before 1.0.
 
-Imports: the crate root holds the channel contract, `connect`, `Endpoints`, `Failure` and, with a driver feature, `Limits`.
+Imports: the crate root holds the channel contract, `connect`, `Endpoints`, `Failure` and, with a driver feature, `Limits` and `Cancel`.
 Public modules: `frame`, `webrtc`, `websocket`, `webtransport`.
 
 No `unsafe` code (`#![forbid(unsafe_code)]`). No process-wide state. A dialer holds no trust roots: TLS is the caller's.
@@ -235,6 +235,15 @@ pub const fn with_idle(self, limit: Duration) -> Self
 `#[non_exhaustive]`. Defaults: 1 MiB, 64 messages, 10 s in total for a handshake, 64 MiB queued to send, 30 s for a WebSocket peer to take nothing while there is something to send, which ends the channel with `Failure::NoProgress`, a ping after 60 s of silence and `Failure::NoProgress` after 120 s. A message over `max_message` ends the channel with `Failure::Protocol`. When `pending`
 messages wait for a slow reader, the driver stops reading from the peer.
 
+## Cancelling a handshake (crate root, with a driver feature)
+
+```rust
+pub struct Cancel                     // Clone; Debug; from websocket::Pending::canceller or webtransport::Pending::canceller
+pub fn cancel(&self) -> bool          // whether this call stopped a handshake that had not finished
+```
+
+A cancel before or during `Pending::handshake`, from any thread, makes it return `Failure::Cancelled` at once and closes the connection: a WebSocket's socket, or a WebTransport session (one not yet accepted is refused, which its dialer reads as `Failure::Permission`). Once the handshake has finished, a cancel does nothing and returns `false`. A server WebSocket handshake waits on the socket's readiness, its deadline and a cancel together, on the caller's thread and no other.
+
 ## WebSocket (`coqui_web::websocket`, feature `websocket`)
 
 ```rust
@@ -260,6 +269,7 @@ pub fn Listener::with_webrtc(self, port: &webrtc::Port) -> Self             // f
 pub fn Listener::local_addr(&self) -> Result<SocketAddr, Failure>
 pub fn Listener::next(&self, timeout: Option<Duration>) -> Result<Pending, Failure>
 pub const fn Pending::peer_addr(&self) -> SocketAddr                         // the source Listener::next admitted
+pub fn Pending::canceller(&self) -> Cancel                                   // abandons the handshake from another thread
 pub fn Pending::handshake(self) -> Result<Channel, Failure>
 pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Failure>
 pub fn Channel::next_signal(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure>  // feature webrtc, Signaling::ByCaller
@@ -283,6 +293,7 @@ pub fn Listener::with_admission(self, admit: impl Fn(SocketAddr) -> bool + Send 
 pub const fn Listener::local_addr(&self) -> SocketAddr
 pub fn Listener::next(&self, timeout: Option<Duration>) -> Result<Pending, Failure>
 pub const fn Pending::peer_addr(&self) -> SocketAddr                         // the source admission judged; on a Port the client's, not its relay's
+pub fn Pending::canceller(&self) -> Cancel                                   // abandons the handshake from another thread
 pub fn Pending::handshake(self) -> Result<Channel, Failure>
 pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Failure>
 ```

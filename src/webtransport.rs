@@ -17,6 +17,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use rustls::{ClientConfig, ServerConfig};
 use tokio::runtime::{Builder, Handle, Runtime};
+use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 use tokio::time::timeout as within;
 use url::Url;
@@ -30,7 +31,7 @@ use crate::channel::{self, Datagrams, Delivery, Kind};
 use crate::endpoints::CertificatePin;
 use crate::failure::Failure;
 use crate::frame::{self, Decoder};
-use crate::pump::{Admission, Inbox, Limits, Received};
+use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, Received};
 #[cfg(feature = "webrtc")]
 use crate::webrtc::Port;
 
@@ -720,6 +721,8 @@ impl Listener {
             return Ok(Pending {
                 incoming,
                 peer: source.unwrap_or(seen),
+                cancel: Arc::default(),
+                stop: Arc::default(),
                 limits: self.limits,
                 origins: self.origins.clone(),
                 runtime: Arc::clone(&self.runtime),
@@ -734,6 +737,8 @@ impl Listener {
 pub struct Pending {
     incoming: IncomingSession,
     peer: SocketAddr,
+    cancel: Arc<Abandon>,
+    stop: Arc<Notify>,
     limits: Limits,
     origins: Vec<alloc::string::String>,
     runtime: Arc<Runtime>,
@@ -757,23 +762,49 @@ impl Pending {
         self.peer
     }
 
+    /// A handle that abandons this handshake from another thread, before or while [`handshake`](Self::handshake) runs: it then
+    /// returns [`Failure::Cancelled`] and the session closes.
+    #[must_use]
+    pub fn canceller(&self) -> Cancel {
+        let stop = Arc::clone(&self.stop);
+        self.cancel.interrupt_with(|| {
+            Some(Box::new(move || {
+                // Kept for a wait that has not started yet.
+                stop.notify_one();
+            }))
+        });
+        self.cancel.handle()
+    }
+
     /// Completes the session and takes its first stream, within the handshake limit in total.
     ///
     /// # Errors
     ///
-    /// [`Failure::Timeout`] past the limit; [`Failure::Permission`] for a refused origin; otherwise why it failed.
+    /// [`Failure::Timeout`] past the limit; [`Failure::Permission`] for a refused origin; [`Failure::Cancelled`] once its
+    /// [`canceller`](Self::canceller) has stopped it; otherwise why it failed.
     pub fn handshake(self) -> Result<Channel, Failure> {
         let Self {
             incoming,
             peer: _,
+            cancel,
+            stop,
             limits,
             origins,
             runtime,
             #[cfg(feature = "webrtc")]
             port,
         } = self;
+        if cancel.cancelled() {
+            return Err(Failure::Cancelled);
+        }
+        let _finishing = cancel.finishing();
         let opened = runtime.block_on(bounded(limits.handshake, async {
-            let request = incoming.await.map_err(|e| connection_failure(&e))?;
+            let stopped = stop.notified();
+            tokio::pin!(stopped);
+            let request = tokio::select! {
+                request = incoming.into_future() => request.map_err(|e| connection_failure(&e))?,
+                () = &mut stopped => return Err(Failure::Cancelled),
+            };
             if let Some(origin) = request.origin()
                 && !origins.is_empty()
                 && !origins.iter().any(|allowed| allowed == origin)
@@ -781,14 +812,31 @@ impl Pending {
                 request.forbidden().await;
                 return Err(Failure::Permission);
             }
-            let connection = request.accept().await.map_err(|e| connection_failure(&e))?;
-            let (send, recv) = connection
-                .accept_bi()
-                .await
-                .map_err(|e| connection_failure(&e))?;
+            let connection = tokio::select! {
+                connection = request.accept() => connection.map_err(|e| connection_failure(&e))?,
+                () = &mut stopped => return Err(Failure::Cancelled),
+            };
+            let streams = tokio::select! {
+                streams = connection.accept_bi() => streams,
+                () = &mut stopped => {
+                    connection.close(VarInt::from_u32(0), b"");
+                    return Err(Failure::Cancelled);
+                }
+            };
+            let (send, recv) = streams.map_err(|e| connection_failure(&e))?;
             Ok((connection, send, recv))
         }));
-        let (connection, send, recv) = opened.map_err(|_| Failure::Timeout)??;
+        let opened = opened
+            .map_err(|_| Failure::Timeout)
+            .and_then(|opened| opened);
+        // A cancel that came before the end wins over what the wait made of it.
+        if let Err(failure) = cancel.finish() {
+            if let Ok((connection, ..)) = &opened {
+                connection.close(VarInt::from_u32(0), b"");
+            }
+            return Err(failure);
+        }
+        let (connection, send, recv) = opened?;
         Ok(Channel::start(
             connection,
             send,

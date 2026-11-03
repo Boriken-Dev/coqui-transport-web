@@ -27,4 +27,4 @@ pub use endpoints::{CertificatePin, EndpointError, Endpoints, EndpointsBuilder};
 pub use failure::{Failure, Phase, Recovery};
 #[cfg(any(feature = "websocket", feature = "webtransport"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "websocket", feature = "webtransport"))))]
-pub use pump::Limits;
+pub use pump::{Cancel, Limits};

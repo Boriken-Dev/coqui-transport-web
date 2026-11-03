@@ -106,6 +106,103 @@ impl Default for Limits {
     }
 }
 
+/// Abandons one pending handshake from another thread, from [`websocket::Pending::canceller`](crate::websocket::Pending::canceller)
+/// or [`webtransport::Pending::canceller`](crate::webtransport::Pending::canceller). Cloning it gives another handle on the same one.
+#[derive(Clone)]
+pub struct Cancel(alloc::sync::Arc<Abandon>);
+
+impl Cancel {
+    /// Stops the handshake if it has not finished: it returns [`Failure::Cancelled`] and its connection closes. Returns whether
+    /// this call stopped it; once a handshake has finished, or was already stopped, it does nothing.
+    pub fn cancel(&self) -> bool {
+        let mut stage = self.0.stage.lock().unwrap_or_else(PoisonError::into_inner);
+        let Stage::Waiting(interrupt) = core::mem::replace(&mut *stage, Stage::Cancelled) else {
+            return false;
+        };
+        drop(stage);
+        if let Some(interrupt) = interrupt {
+            interrupt();
+        }
+        true
+    }
+}
+
+impl core::fmt::Debug for Cancel {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let stage = self.0.stage.lock().unwrap_or_else(PoisonError::into_inner);
+        f.write_str(match *stage {
+            Stage::Waiting(_) => "Cancel(waiting)",
+            Stage::Cancelled => "Cancel(cancelled)",
+            Stage::Finished => "Cancel(finished)",
+        })
+    }
+}
+
+/// What a [`Cancel`] acts on: one handshake, and how to stop it while it waits on the network.
+#[derive(Default)]
+pub(crate) struct Abandon {
+    stage: Mutex<Stage>,
+}
+
+enum Stage {
+    Waiting(Option<alloc::boxed::Box<dyn FnOnce() + Send>>),
+    Cancelled,
+    Finished,
+}
+
+impl Default for Stage {
+    fn default() -> Self {
+        Self::Waiting(None)
+    }
+}
+
+impl Abandon {
+    pub(crate) fn handle(self: &alloc::sync::Arc<Self>) -> Cancel {
+        Cancel(alloc::sync::Arc::clone(self))
+    }
+
+    /// Sets how a cancel interrupts the wait, made only the first time and only while the handshake waits.
+    pub(crate) fn interrupt_with(
+        &self,
+        make: impl FnOnce() -> Option<alloc::boxed::Box<dyn FnOnce() + Send>>,
+    ) {
+        let mut stage = self.stage.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Stage::Waiting(interrupt @ None) = &mut *stage {
+            *interrupt = make();
+        }
+    }
+
+    pub(crate) fn cancelled(&self) -> bool {
+        matches!(
+            *self.stage.lock().unwrap_or_else(PoisonError::into_inner),
+            Stage::Cancelled
+        )
+    }
+
+    /// Ends the wait: a cancel that came first wins, and one that comes later does nothing.
+    pub(crate) fn finish(&self) -> Result<(), Failure> {
+        let mut stage = self.stage.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(*stage, Stage::Cancelled) {
+            return Err(Failure::Cancelled);
+        }
+        *stage = Stage::Finished;
+        Ok(())
+    }
+
+    /// Finishes the wait when dropped, so a handshake that returns early releases what the interrupt holds.
+    pub(crate) const fn finishing(&self) -> Finishing<'_> {
+        Finishing(self)
+    }
+}
+
+pub(crate) struct Finishing<'a>(&'a Abandon);
+
+impl Drop for Finishing<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.finish();
+    }
+}
+
 /// Decides whether a source address may start a handshake.
 #[cfg(any(feature = "websocket", feature = "webtransport"))]
 pub(crate) type Admission = alloc::sync::Arc<dyn Fn(core::net::SocketAddr) -> bool + Send + Sync>;

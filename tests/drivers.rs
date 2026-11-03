@@ -1132,3 +1132,121 @@ fn a_blocked_webtransport_path_falls_back_to_websocket() {
     round_trip(link.channel());
     server.join().unwrap();
 }
+
+/// A handshake limit no test waits out.
+fn patient() -> Limits {
+    Limits::default().with_handshake(Duration::from_secs(30))
+}
+
+/// Whether a socket's peer has closed it: an end, or a reset, and not a read still waiting.
+fn ended(socket: &std::net::TcpStream) -> bool {
+    use std::io::Read;
+    socket.set_read_timeout(Some(WAIT)).unwrap();
+    match (&*socket).read(&mut [0; 1]) {
+        Ok(read) => read == 0,
+        Err(error) => !matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+    }
+}
+
+#[test]
+fn a_websocket_handshake_can_be_abandoned_from_another_thread() {
+    let listener = websocket::Listener::bind(loopback(), None)
+        .unwrap()
+        .with_limits(patient());
+    let address = listener.local_addr().unwrap();
+    // A peer that connects and says nothing.
+    let silent = std::net::TcpStream::connect(address).unwrap();
+    let pending = listener.next(Some(WAIT)).unwrap();
+    let cancel = pending.canceller();
+    let started = Instant::now();
+    let handshaking = thread::spawn(move || pending.handshake().map(|_| ()));
+    thread::sleep(Duration::from_millis(200));
+    assert!(cancel.cancel());
+    assert_eq!(handshaking.join().unwrap(), Err(Failure::Cancelled));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(!cancel.cancel());
+    assert!(ended(&silent));
+    // Cancelled before it starts.
+    let _quiet = std::net::TcpStream::connect(address).unwrap();
+    let pending = listener.next(Some(WAIT)).unwrap();
+    assert!(pending.canceller().cancel());
+    assert_eq!(pending.handshake().map(|_| ()), Err(Failure::Cancelled));
+    // Once it finished, a cancel changes nothing.
+    let url = plain_ws_url(address);
+    let client = thread::spawn(move || websocket::Dialer::new().dial(Kind::WebSocket, &url, WAIT));
+    let pending = listener.next(Some(WAIT)).unwrap();
+    let cancel = pending.canceller();
+    let channel = pending.handshake().unwrap();
+    assert!(!cancel.cancel());
+    client.join().unwrap().unwrap().send(b"still").unwrap();
+    assert_eq!(channel.receive(Some(WAIT)).unwrap().unwrap(), b"still");
+}
+
+#[test]
+fn a_webtransport_handshake_can_be_abandoned_from_another_thread() {
+    let id = identity();
+    let listener = webtransport::Listener::bind(loopback(), server_tls(&id))
+        .unwrap()
+        .with_limits(patient());
+    let url = Url::parse(&format!(
+        "https://127.0.0.1:{}/channel",
+        listener.local_addr().port()
+    ))
+    .unwrap();
+    let dial = |url: Url, pin: CertificatePin| {
+        thread::spawn(move || {
+            webtransport::Dialer::pinned(&[pin])
+                .unwrap()
+                .dial(Kind::WebTransport, &url, WAIT)
+        })
+    };
+    // A client that opens a session and no stream, which the handshake waits for.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let config = wtransport::ClientConfig::builder()
+        .with_bind_default()
+        .with_server_certificate_hashes([wtransport::tls::Sha256Digest::new(*pin(&id).as_bytes())])
+        .build();
+    let endpoint = {
+        let _inside = runtime.enter();
+        wtransport::Endpoint::client(config).unwrap()
+    };
+    let session = url.to_string();
+    let silent = runtime.spawn(async move {
+        let connection = endpoint.connect(session).await.unwrap();
+        tokio::time::timeout(WAIT, connection.closed()).await
+    });
+    let pending = listener.next(Some(WAIT)).unwrap();
+    let cancel = pending.canceller();
+    let started = Instant::now();
+    let handshaking = thread::spawn(move || pending.handshake().map(|_| ()));
+    thread::sleep(Duration::from_millis(500));
+    assert!(cancel.cancel());
+    assert_eq!(handshaking.join().unwrap(), Err(Failure::Cancelled));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(!cancel.cancel());
+    assert!(
+        runtime.block_on(silent).unwrap().is_ok(),
+        "the client's session went on"
+    );
+    // Cancelled before it starts: the session is refused.
+    let client = dial(url.clone(), pin(&id));
+    let pending = listener.next(Some(WAIT)).unwrap();
+    assert!(pending.canceller().cancel());
+    assert_eq!(pending.handshake().map(|_| ()), Err(Failure::Cancelled));
+    assert_eq!(client.join().unwrap().unwrap_err(), Failure::Permission);
+    // Once it finished, a cancel changes nothing.
+    let client = dial(url, pin(&id));
+    let pending = listener.next(Some(WAIT)).unwrap();
+    let cancel = pending.canceller();
+    let channel = pending.handshake().unwrap();
+    assert!(!cancel.cancel());
+    client.join().unwrap().unwrap().send(b"still").unwrap();
+    assert_eq!(channel.receive(Some(WAIT)).unwrap().unwrap(), b"still");
+}

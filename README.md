@@ -18,7 +18,8 @@ proves nothing about who the peer is: identity is a separate step, on the channe
 - `connect`: WebTransport first, WebSocket when the path fails or the server does not offer it. A certificate, proof or permission failure never falls back, and a
   pinned endpoint never downgrades.
 - Validated `Endpoints`: explicit URLs, one host, no credentials or query, plain WebSocket only on loopback by opt-in.
-- Blocking drivers for WebTransport and WebSocket, with a bound on every size and handshake.
+- Blocking drivers for WebTransport and WebSocket, with a bound on every size and handshake, and a server handshake another thread can
+  cancel.
 - The certificate chain TLS accepted from the peer, on either end of a channel, for a peer proof or a pin to decide on.
 - Plain WebSocket beyond loopback only by a deliberate choice, which the listener or dialer reports.
 - Raw datagrams beside the messages, on a ladder: WebTransport's own, a WebRTC data channel on the same UDP port (`webrtc` feature), then

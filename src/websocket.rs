@@ -33,7 +33,7 @@ use url::Url;
 use crate::channel::{self, Datagrams, Delivery, Kind};
 use crate::failure::Failure;
 use crate::frame::{self, WS_DATAGRAMS_PROTOCOL, WsPart};
-use crate::pump::{Admission, Inbox, Limits, Received};
+use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, Received};
 #[cfg(feature = "webrtc")]
 use crate::webrtc::{Climb, Plan, Port, Settings};
 
@@ -66,6 +66,8 @@ pub enum Frames {
 struct Transport {
     socket: Socket,
     wrote: Instant,
+    // Whether the last write found no room: only then is a wait for room to write worth asking for.
+    write_blocked: bool,
 }
 
 enum Socket {
@@ -79,19 +81,24 @@ impl Transport {
         Self {
             socket: Socket::Blocking(tcp),
             wrote: Instant::now(),
+            write_blocked: false,
         }
     }
 
-    /// Hands the socket to `registry`: from here on it never blocks.
+    /// Hands the socket to `registry`: from here on it never blocks. A socket that already waited on readiness must have left
+    /// its last registry first.
     fn register(&mut self, registry: &Registry) -> io::Result<()> {
-        let Socket::Blocking(tcp) = mem::replace(&mut self.socket, Socket::Closed) else {
-            return Err(io::ErrorKind::NotConnected.into());
+        let mut tcp = match mem::replace(&mut self.socket, Socket::Closed) {
+            Socket::Blocking(tcp) => {
+                tcp.set_read_timeout(None)?;
+                tcp.set_write_timeout(None)?;
+                tcp.set_nonblocking(true)?;
+                mio::net::TcpStream::from_std(tcp)
+            }
+            Socket::Ready(tcp) => tcp,
+            Socket::Closed => return Err(io::ErrorKind::NotConnected.into()),
         };
-        tcp.set_read_timeout(None)?;
-        tcp.set_write_timeout(None)?;
         tcp.set_nodelay(true)?;
-        tcp.set_nonblocking(true)?;
-        let mut tcp = mio::net::TcpStream::from_std(tcp);
         registry.register(&mut tcp, SOCKET, Interest::READABLE)?;
         self.socket = Socket::Ready(tcp);
         self.wrote = Instant::now();
@@ -116,7 +123,18 @@ impl Transport {
         if written.as_ref().is_ok_and(|bytes| *bytes > 0) {
             self.wrote = Instant::now();
         }
+        self.write_blocked = written
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock);
         written
+    }
+
+    /// Takes the socket from `registry`, so another can have it.
+    fn deregister(&mut self, registry: &Registry) -> io::Result<()> {
+        match &mut self.socket {
+            Socket::Ready(tcp) => registry.deregister(tcp),
+            _ => Err(io::ErrorKind::NotConnected.into()),
+        }
     }
 }
 
@@ -1563,6 +1581,7 @@ impl Listener {
         Ok(Pending {
             tcp,
             peer,
+            cancel: Arc::default(),
             tls: self.tls.clone(),
             limits: self.limits,
             frames: self.frames,
@@ -1597,6 +1616,7 @@ impl Listener {
 pub struct Pending {
     tcp: TcpStream,
     peer: SocketAddr,
+    cancel: Arc<Abandon>,
     tls: Option<Arc<ServerConfig>>,
     limits: Limits,
     frames: Frames,
@@ -1620,17 +1640,26 @@ impl Pending {
         self.peer
     }
 
+    /// A handle that abandons this handshake from another thread, before or while [`handshake`](Self::handshake) runs: it then
+    /// returns [`Failure::Cancelled`] and the socket closes.
+    #[must_use]
+    pub fn canceller(&self) -> Cancel {
+        self.cancel.handle()
+    }
+
     /// Completes the handshake within the handshake limit in total: a peer sending a byte at a time gets no longer.
     ///
     /// # Errors
     ///
-    /// [`Failure::Timeout`] past the limit; [`Failure::Permission`] for a refused origin; otherwise why it failed.
+    /// [`Failure::Timeout`] past the limit; [`Failure::Permission`] for a refused origin; [`Failure::Cancelled`] once its
+    /// [`canceller`](Self::canceller) has stopped it; otherwise why it failed.
     // tungstenite fixes the callback's error type, and it is large.
     #[allow(clippy::result_large_err)]
     pub fn handshake(self) -> Result<Channel, Failure> {
         let Self {
             tcp,
             peer: _,
+            cancel,
             tls,
             limits,
             frames,
@@ -1638,34 +1667,44 @@ impl Pending {
             #[cfg(feature = "webrtc")]
             webrtc,
         } = self;
+        if cancel.cancelled() {
+            return Err(Failure::Cancelled);
+        }
+        let _finishing = cancel.finishing();
         #[cfg(feature = "webrtc")]
         let arrived_at = tcp
             .local_addr()
             .and_then(|local| Ok((local, tcp.peer_addr()?)));
         #[cfg(feature = "webrtc")]
         let can_climb = webrtc.is_some();
-        tcp.set_nonblocking(false).map_err(|e| io_failure(&e))?;
-        tcp.set_read_timeout(Some(limits.handshake))
+        // It waits on the socket's readiness, its deadline and a cancel at once: on Windows nothing but data, a reset or its
+        // own read timeout ends a blocking read, so neither a deadline nor a cancel could end one from outside.
+        let deadline = Instant::now() + limits.handshake;
+        let mut poll = Poll::new().map_err(|e| io_failure(&e))?;
+        let waker = Waker::new(poll.registry(), CALLER).map_err(|e| io_failure(&e))?;
+        cancel.interrupt_with(|| {
+            Some(Box::new(move || {
+                let _ = waker.wake();
+            }))
+        });
+        if cancel.cancelled() {
+            return Err(Failure::Cancelled);
+        }
+        tcp.set_nonblocking(true).map_err(|e| io_failure(&e))?;
+        let mut transport = Transport {
+            socket: Socket::Ready(mio::net::TcpStream::from_std(tcp)),
+            wrote: Instant::now(),
+            write_blocked: false,
+        };
+        transport
+            .register(poll.registry())
             .map_err(|e| io_failure(&e))?;
-        tcp.set_write_timeout(Some(limits.handshake))
-            .map_err(|e| io_failure(&e))?;
-        // Per-read timeouts alone let a slow peer stretch this: a watchdog ends the socket at the total limit.
-        let watched = tcp.try_clone().map_err(|e| io_failure(&e))?;
-        let (done, finished) = mpsc::channel::<()>();
-        let watchdog = thread::Builder::new()
-            .name("coqui-web-handshake".into())
-            .spawn(move || {
-                if finished.recv_timeout(limits.handshake) == Err(mpsc::RecvTimeoutError::Timeout) {
-                    let _ = watched.shutdown(std::net::Shutdown::Both);
-                }
-            })
-            .map_err(|_| Failure::Unsupported)?;
         let stream = match &tls {
-            None => Stream::Plain(Transport::new(tcp)),
+            None => Stream::Plain(transport),
             Some(tls) => {
                 let session =
                     ServerConnection::new(Arc::clone(tls)).map_err(|_| Failure::Protocol)?;
-                Stream::Server(Box::new(StreamOwned::new(session, Transport::new(tcp))))
+                Stream::Server(Box::new(StreamOwned::new(session, transport)))
             }
         };
         let agreed = Arc::new(AtomicBool::new(false));
@@ -1716,15 +1755,46 @@ impl Pending {
                     Err(refused)
                 }
             };
-        let started = Instant::now();
-        let socket = tungstenite::accept_hdr_with_config(stream, check, Some(config(limits)));
-        drop(done);
-        let _ = watchdog.join();
-        let socket = socket.map_err(|error| match error {
-            HandshakeError::Interrupted(_) => Failure::Timeout,
-            HandshakeError::Failure(_) if started.elapsed() >= limits.handshake => Failure::Timeout,
-            HandshakeError::Failure(error) => ws_failure(&error),
-        })?;
+        let mut events = Events::with_capacity(4);
+        let mut watching_writes = false;
+        let mut attempt = tungstenite::accept_hdr_with_config(stream, check, Some(config(limits)));
+        let socket = loop {
+            let mut mid = match attempt {
+                Ok(socket) => break Ok(socket),
+                Err(HandshakeError::Failure(error)) => break Err(ws_failure(&error)),
+                Err(HandshakeError::Interrupted(mid)) => mid,
+            };
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break Err(Failure::Timeout);
+            }
+            // Asked for only after a write found no room: Windows reports room again after every read that would block.
+            let transport = mid.get_mut().get_mut().transport_mut();
+            if transport.write_blocked != watching_writes {
+                watching_writes = transport.write_blocked;
+                if let Err(error) = transport.watch(poll.registry(), watching_writes) {
+                    break Err(io_failure(&error));
+                }
+            }
+            match poll.poll(&mut events, Some(left)) {
+                Err(error) if error.kind() != io::ErrorKind::Interrupted => {
+                    break Err(io_failure(&error));
+                }
+                _ => {}
+            }
+            if cancel.cancelled() {
+                break Err(Failure::Cancelled);
+            }
+            attempt = mid.handshake();
+        };
+        // A cancel wins over whatever the wait made of it.
+        cancel.finish()?;
+        let mut socket = socket?;
+        socket
+            .get_mut()
+            .transport_mut()
+            .deregister(poll.registry())
+            .map_err(|e| io_failure(&e))?;
         #[cfg(feature = "webrtc")]
         let plan = match (webrtc, arrived_at) {
             (Some(port), Ok((local, peer))) if climbing.load(Ordering::SeqCst) => {
