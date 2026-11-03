@@ -35,12 +35,15 @@ pub trait Channel: Send + Sync {
     fn set_max_message(&self, _bytes: usize) {}   // both ways, from the next read; a peer's answer to anything sent after this call meets it; default ignores it
     fn set_max_receive(&self, _bytes: usize) {}   // what it reads only, as above
     fn set_max_send(&self, _bytes: usize) {}      // what it sends only: a side reading under a small bound can still answer up to the peer's
+    fn send_timeout(&self, message: &[u8], _timeout: Option<Duration>) -> Result<(), Failure> { self.send(message) }   // waits for room
     fn datagrams(&self) -> Option<&dyn Datagrams> { None }   // Some on WebTransport; a WebSocket, or a channel wrapping another, has none
     fn peer_certificates(&self) -> Option<&[Vec<u8>]> { None }   // DER, the peer's own first; Some on a TLS WebSocket and on WebTransport
 }
 ```
 
 A reliable, ordered channel of whole messages. `peer_certificates` is the chain the peer presented and this side's rustls configuration accepted: the server's on a client, the client's on a server whose configuration asked for one. `None` without TLS, or when the peer presented none, as a client does when not asked. It proves what that configuration's verifier checked, and nothing about a channel wrapping this one.
+
+`send_timeout` queues as `send` does but waits up to `timeout` for room rather than refusing; `None` waits as long as the channel lives. `Failure::Timeout` means no room in time: nothing was sent and the channel goes on. Each driver's own terms are in its section.
 
 ```rust
 pub trait Datagrams: Send + Sync {
@@ -263,7 +266,7 @@ pub fn Channel::next_signal(&self, timeout: Option<Duration>) -> Result<Option<V
 pub fn Channel::deliver_signal(&self, signal: &[u8]) -> Result<(), Failure>                        // feature webrtc, Signaling::ByCaller
 ```
 
-`bind` with no TLS on a non-loopback address is `Failure::Permission`; `bind_plain` is the deliberate choice of one. A dialer refuses `ws://` beyond loopback with `Failure::Permission` before connecting, unless `with_plain_beyond_loopback`. A listener or dialer that allows it says so in `plain_beyond_loopback()` and in its `Debug`, for the host to show; neither prints. `Endpoints` still takes `ws://` only on loopback. `accept` runs one handshake, bounded in total by `Limits::handshake`. `Listener::next` returns a `Pending` before its handshake, for a server that runs `Pending::handshake` on threads of its own so one slow peer cannot hold up others. `close` returns once what was queued has gone, or the peer has taken nothing for `Limits::send`. Each channel has a worker thread that sleeps on its socket and on its callers, so an idle channel takes no CPU and a message goes as soon as it is sent; the wait holds up to two file handles beside the socket. `Failure::Certificate` means a certificate was rejected, by this side or the peer's; any other TLS error is `Failure::Protocol`, since one forged record can cause it.
+`bind` with no TLS on a non-loopback address is `Failure::Permission`; `bind_plain` is the deliberate choice of one. A dialer refuses `ws://` beyond loopback with `Failure::Permission` before connecting, unless `with_plain_beyond_loopback`. A listener or dialer that allows it says so in `plain_beyond_loopback()` and in its `Debug`, for the host to show; neither prints. `Endpoints` still takes `ws://` only on loopback. `accept` runs one handshake, bounded in total by `Limits::handshake`. `Listener::next` returns a `Pending` before its handshake, for a server that runs `Pending::handshake` on threads of its own so one slow peer cannot hold up others. `send` answers `Failure::NoProgress` at once while `Limits::queued_bytes`, or 256 messages, wait to be sent; `send_timeout` waits for room instead, woken by the worker only while a sender waits, and answers `Failure::PathLost` once the worker has ended. `close` returns once what was queued has gone, or the peer has taken nothing for `Limits::send`. Each channel has a worker thread that sleeps on its socket and on its callers, so an idle channel takes no CPU and a message goes as soon as it is sent; the wait holds up to two file handles beside the socket. `Failure::Certificate` means a certificate was rejected, by this side or the peer's; any other TLS error is `Failure::Protocol`, since one forged record can cause it.
 
 ## WebTransport (`coqui_web::webtransport`, feature `webtransport`)
 
@@ -285,6 +288,8 @@ pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Fai
 ```
 
 `Listener::next` sends a source to retry first, since UDP sources are forgeable, then judges it by admission, and `Pending::handshake` completes it. Each dialer and listener runs its own runtime, and its calls block. Inside an async runtime, call them from its blocking pool.
+
+`send` waits up to `Limits::send` for the peer's flow control, then ends the stream with `Failure::NoProgress`. `send_timeout(Some(t))` waits `t` instead: `Failure::Timeout` if nothing of the message went, and the channel goes on; `Failure::NoProgress` if part of it went, and the stream ends, since nothing can follow half a frame. Flow control often takes part of a message before it stops, so expect either. `send_timeout(None)` is `send`.
 
 ## The ladder (`coqui_web::webrtc`, feature `webrtc`)
 

@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `close` no longer hangs when a channel's failure cannot reach a reader who is behind.
 - A WebSocket dialer refuses `ws://` beyond loopback before connecting, so the refusal is always `Failure::Permission` and the server
   sees no connection. It used to connect first, and an unreachable address gave `Failure::Timeout` instead.
+- A WebSocket `send` after its worker ended answers `Failure::PathLost`. It answered `Failure::NoProgress` when what the worker left
+  queued still filled `Limits::queued_bytes`, which read the same as a full queue.
 
 ### Added
 
@@ -27,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `webrtc::Port` is the client's rather than its relay's.
 - `Channel::set_max_receive` and `Channel::set_max_send` bound what a channel reads and what it sends apart, so a side reading under
   a small limit can still answer up to its peer's. `set_max_message` still sets both. The defaults ignore them, as it does.
+- `Channel::send_timeout` waits up to a caller's timeout for room rather than refusing, and answers `Failure::Timeout`, with nothing
+  sent and the channel usable, when there was none. On a WebSocket it waits behind `Limits::queued_bytes` with no polling: the worker
+  wakes a waiting sender as it takes a message or ends. On WebTransport it replaces `Limits::send` for that call, and a wait that
+  ends after part of the message went ends the stream with `Failure::NoProgress`. The default sends at once.
 - Plain WebSocket beyond loopback by a deliberate choice: `websocket::Listener::bind_plain`, which binds any address with no TLS, and
   `websocket::Dialer::with_plain_beyond_loopback`. Each reports the choice in `plain_beyond_loopback()` and in its `Debug`.
   `Listener::bind` with no TLS, a dialer without the choice and `Endpoints` still refuse it.

@@ -16,7 +16,7 @@ use core::time::Duration;
 use std::io::{self, IoSlice, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::Instant;
 
@@ -308,12 +308,34 @@ fn config(limits: Limits) -> WebSocketConfig {
         .max_frame_size(Some(limits.max_message))
 }
 
+/// Where a sender waits for room in the queue. The worker wakes it when it takes a message or ends, and only while
+/// someone waits, so an idle channel does no work for it.
+#[derive(Default)]
+struct Room {
+    waiting: AtomicUsize,
+    lock: Mutex<()>,
+    freed: Condvar,
+    // What it left queued still counts against the budget, so this is how a sender learns the worker is gone.
+    ended: AtomicBool,
+}
+
+impl Room {
+    /// Called after room was made: a waiter counts itself before it looks, under the lock this takes, so none misses it.
+    fn made(&self) {
+        if self.waiting.load(Ordering::SeqCst) > 0 {
+            let _held = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+            self.freed.notify_all();
+        }
+    }
+}
+
 /// A WebSocket channel. Reads and writes happen on the worker thread that owns the socket.
 pub struct Channel {
     inbox: Inbox,
     outgoing: Mutex<Option<SyncSender<Vec<u8>>>>,
     queued: Arc<AtomicUsize>,
     queued_limit: usize,
+    room: Arc<Room>,
     waker: Arc<Waker>,
     // Set by a worker that found the inbox full.
     behind: Arc<AtomicBool>,
@@ -471,6 +493,8 @@ impl Channel {
         let (to_worker, outgoing) = mpsc::sync_channel::<Vec<u8>>(OUTGOING);
         let queued = Arc::new(AtomicUsize::new(0));
         let draining = Arc::clone(&queued);
+        let room = Arc::new(Room::default());
+        let making_room = Arc::clone(&room);
         let behind = Arc::new(AtomicBool::new(false));
         let noting = Arc::clone(&behind);
         let max_message = Arc::new(AtomicUsize::new(limits.max_message));
@@ -543,6 +567,7 @@ impl Channel {
                     outgoing,
                     frames,
                     queued: draining,
+                    room: Arc::clone(&making_room),
                     limits,
                     max_message: current,
                     applied: limits.max_message,
@@ -554,6 +579,9 @@ impl Channel {
                     watching_writes: false,
                 }
                 .run();
+                // The queue is gone with the worker: a sender still waiting finds that out now.
+                making_room.ended.store(true, Ordering::SeqCst);
+                making_room.made();
             })
             .map_err(|_| Failure::Unsupported)?;
         Ok(Self {
@@ -561,6 +589,7 @@ impl Channel {
             outgoing: Mutex::new(Some(to_worker)),
             queued,
             queued_limit: limits.queued_bytes,
+            room,
             waker,
             behind,
             worker: Mutex::new(Some(worker)),
@@ -573,36 +602,96 @@ impl Channel {
     }
 }
 
-impl channel::Channel for Channel {
-    fn send(&self, message: &[u8]) -> Result<(), Failure> {
+impl Channel {
+    fn check(&self, message: &[u8]) -> Result<(), Failure> {
         if message.is_empty() || message.len() > self.max_send.load(Ordering::SeqCst) {
             return Err(Failure::Protocol);
         }
         if self.frames == Frames::Text && core::str::from_utf8(message).is_err() {
             return Err(Failure::Protocol);
         }
+        Ok(())
+    }
+
+    /// Queues a checked message, or answers that there is no room for it now.
+    fn queue(&self, message: &[u8]) -> Result<bool, Failure> {
         let outgoing = self.outgoing.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(queue) = outgoing.as_ref() else {
             return Err(Failure::Cancelled);
         };
+        if self.room.ended.load(Ordering::SeqCst) {
+            return Err(Failure::PathLost);
+        }
         if self
             .queued
             .load(Ordering::SeqCst)
             .saturating_add(message.len())
             > self.queued_limit
         {
-            return Err(Failure::NoProgress);
+            return Ok(false);
         }
         self.queued.fetch_add(message.len(), Ordering::SeqCst);
-        queue.try_send(message.to_vec()).map_err(|error| {
+        if let Err(error) = queue.try_send(message.to_vec()) {
             self.queued.fetch_sub(message.len(), Ordering::SeqCst);
-            match error {
-                TrySendError::Full(_) => Failure::NoProgress,
-                TrySendError::Disconnected(_) => Failure::PathLost,
-            }
-        })?;
+            return match error {
+                TrySendError::Full(_) => Ok(false),
+                TrySendError::Disconnected(_) => Err(Failure::PathLost),
+            };
+        }
         let _ = self.waker.wake();
-        Ok(())
+        Ok(true)
+    }
+}
+
+impl channel::Channel for Channel {
+    fn send(&self, message: &[u8]) -> Result<(), Failure> {
+        self.check(message)?;
+        match self.queue(message)? {
+            true => Ok(()),
+            false => Err(Failure::NoProgress),
+        }
+    }
+
+    fn send_timeout(&self, message: &[u8], timeout: Option<Duration>) -> Result<(), Failure> {
+        self.check(message)?;
+        // Room for more than the whole budget never comes.
+        if message.len() > self.queued_limit {
+            return Err(Failure::NoProgress);
+        }
+        let deadline = timeout.map(|limit| Instant::now() + limit);
+        let mut held = self
+            .room
+            .lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.room.waiting.fetch_add(1, Ordering::SeqCst);
+        let sent = loop {
+            match self.queue(message) {
+                Ok(true) => break Ok(()),
+                Ok(false) => {}
+                Err(failure) => break Err(failure),
+            }
+            held = match deadline {
+                None => self
+                    .room
+                    .freed
+                    .wait(held)
+                    .unwrap_or_else(PoisonError::into_inner),
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break Err(Failure::Timeout);
+                    }
+                    self.room
+                        .freed
+                        .wait_timeout(held, left)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+            };
+        };
+        self.room.waiting.fetch_sub(1, Ordering::SeqCst);
+        sent
     }
 
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
@@ -745,6 +834,7 @@ struct Worker {
     outgoing: mpsc::Receiver<Vec<u8>>,
     frames: Frames,
     queued: Arc<AtomicUsize>,
+    room: Arc<Room>,
     limits: Limits,
     max_message: Arc<AtomicUsize>,
     // What the socket was built with: the shared value may already have moved on.
@@ -866,6 +956,7 @@ impl Worker {
                 Err(mpsc::TryRecvError::Disconnected) => return Err(Stop::Closing),
             };
             self.queued.fetch_sub(message.len(), Ordering::SeqCst);
+            self.room.made();
             let framed = match self.frames {
                 Frames::Text => match core::str::from_utf8(&message) {
                     Ok(text) => Message::text(text.to_string()),

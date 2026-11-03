@@ -311,26 +311,49 @@ async fn deliver(inbox: &SyncSender<Received>, mut item: Received) -> bool {
     }
 }
 
-impl channel::Channel for Channel {
-    fn send(&self, message: &[u8]) -> Result<(), Failure> {
+impl Channel {
+    /// Writes one frame, waiting at most `limit` for the peer's flow control. Past it, a caller's own wait whose frame had not
+    /// started leaves the stream as it was; otherwise part of a frame may have gone, so nothing more can follow it.
+    fn write(&self, message: &[u8], limit: Duration, callers_wait: bool) -> Result<(), Failure> {
         let framed = frame::encode(message, self.max_send.load(Ordering::SeqCst))
             .map_err(|_| Failure::Protocol)?;
         let mut guard = self.send.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(stream) = guard.as_mut() else {
             return Err(Failure::Cancelled);
         };
-        match self
-            .handle
-            .block_on(bounded(self.send_limit, stream.write_all(&framed)))
-        {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(_)) => Err(Failure::PathLost),
-            // A peer's flow control can hold a send for ever: past the limit it has stopped reading. Part of a frame may
-            // have gone, so nothing more can follow it on this stream.
+        let mut written = 0;
+        let writing = async {
+            while written < framed.len() {
+                written += stream
+                    .write(&framed[written..])
+                    .await
+                    .map_err(|_| Failure::PathLost)?;
+            }
+            Ok(())
+        };
+        match self.handle.block_on(bounded(limit, writing)) {
+            Ok(result) => result,
+            Err(_) if callers_wait && written == 0 => Err(Failure::Timeout),
+            // A peer's flow control can hold a send for ever: past the limit it has stopped reading.
             Err(_) => {
                 *guard = None;
                 Err(Failure::NoProgress)
             }
+        }
+    }
+}
+
+impl channel::Channel for Channel {
+    fn send(&self, message: &[u8]) -> Result<(), Failure> {
+        self.write(message, self.send_limit, false)
+    }
+
+    /// Waits up to `timeout` instead of `Limits::send`. Past it, [`Failure::Timeout`] if nothing of the message went, and the
+    /// channel goes on; [`Failure::NoProgress`] if part of it went, and the channel's stream ends. `None` is [`send`](Self::send).
+    fn send_timeout(&self, message: &[u8], timeout: Option<Duration>) -> Result<(), Failure> {
+        match timeout {
+            Some(limit) => self.write(message, limit, true),
+            None => self.send(message),
         }
     }
 

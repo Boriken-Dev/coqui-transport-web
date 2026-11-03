@@ -54,6 +54,17 @@ pub trait Channel: Send + Sync {
     /// small limit can still answer up to the peer's. A channel with no limit of its own ignores it.
     fn set_max_send(&self, _bytes: usize) {}
 
+    /// Queues one message as [`send`](Self::send) does, but waits up to `timeout` for room behind what is already queued rather
+    /// than refusing at once; `None` waits for as long as the channel lives. A channel with nothing to wait for sends at once.
+    ///
+    /// # Errors
+    ///
+    /// [`Failure::Timeout`] when there was no room in time, after which the channel is still usable and the message was not sent;
+    /// otherwise as [`send`](Self::send).
+    fn send_timeout(&self, message: &[u8], _timeout: Option<Duration>) -> Result<(), Failure> {
+        self.send(message)
+    }
+
     /// This channel's raw datagrams, or `None` if it has none, as a WebSocket has none unless both ends agreed. There is deliberately
     /// no datagram call on the channel itself, so a caller finds out here. [`Datagrams::delivery`] says what they then are.
     fn datagrams(&self) -> Option<&dyn Datagrams> {
@@ -141,6 +152,10 @@ impl Channel for alloc::boxed::Box<dyn Channel> {
 
     fn set_max_send(&self, bytes: usize) {
         (**self).set_max_send(bytes);
+    }
+
+    fn send_timeout(&self, message: &[u8], timeout: Option<Duration>) -> Result<(), Failure> {
+        (**self).send_timeout(message, timeout)
     }
 
     fn datagrams(&self) -> Option<&dyn Datagrams> {
