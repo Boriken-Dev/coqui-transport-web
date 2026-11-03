@@ -10,6 +10,9 @@ mod failure;
 pub mod frame;
 #[cfg(any(feature = "websocket", feature = "webtransport"))]
 mod pump;
+#[cfg(feature = "webrtc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "webrtc")))]
+pub mod webrtc;
 #[cfg(feature = "websocket")]
 #[cfg_attr(docsrs, doc(cfg(feature = "websocket")))]
 pub mod websocket;

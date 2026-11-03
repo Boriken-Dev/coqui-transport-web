@@ -31,6 +31,8 @@ use crate::endpoints::CertificatePin;
 use crate::failure::Failure;
 use crate::frame::{self, Decoder};
 use crate::pump::{Admission, Inbox, Limits, Received};
+#[cfg(feature = "webrtc")]
+use crate::webrtc::Port;
 
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -107,24 +109,38 @@ pub struct Channel {
     datagrams: OnceLock<QuicDatagrams>,
     // Keeps the driver's runtime alive as long as a channel needs it.
     _runtime: Arc<Runtime>,
+    // Its packets go through this port's relay, so it must outlive the listener if the channel does.
+    #[cfg(feature = "webrtc")]
+    port: Option<Port>,
 }
 
 impl fmt::Debug for Channel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Channel")
-            .field("remote", &self.connection.remote_address())
+            .field("remote", &self.remote())
             .field("max_message", &self.max_message.load(Ordering::SeqCst))
             .finish_non_exhaustive()
     }
 }
 
 impl Channel {
+    /// Where the peer is. Through a port, the connection itself only knows the relay.
+    fn remote(&self) -> SocketAddr {
+        let seen = self.connection.remote_address();
+        #[cfg(feature = "webrtc")]
+        if let Some(source) = self.port.as_ref().and_then(|port| port.source_of(seen)) {
+            return source;
+        }
+        seen
+    }
+
     fn start(
         connection: Connection,
         send: SendStream,
         recv: RecvStream,
         limits: Limits,
         runtime: Arc<Runtime>,
+        #[cfg(feature = "webrtc")] port: Option<Port>,
     ) -> Self {
         let (to_reader, inbox) = mpsc::sync_channel::<Received>(limits.pending.max(1));
         let handle = runtime.handle().clone();
@@ -143,6 +159,8 @@ impl Channel {
             pending_datagrams: limits.pending_datagrams,
             datagrams: OnceLock::new(),
             _runtime: runtime,
+            #[cfg(feature = "webrtc")]
+            port,
         }
     }
 }
@@ -432,6 +450,8 @@ impl channel::Dialer for Dialer {
             recv,
             self.limits,
             Arc::clone(&self.runtime),
+            #[cfg(feature = "webrtc")]
+            None,
         ))
     }
 }
@@ -444,6 +464,8 @@ pub struct Listener {
     origins: Vec<alloc::string::String>,
     admission: Option<Admission>,
     runtime: Arc<Runtime>,
+    #[cfg(feature = "webrtc")]
+    port: Option<Port>,
 }
 
 impl fmt::Debug for Listener {
@@ -487,7 +509,55 @@ impl Listener {
             origins: Vec::new(),
             admission: None,
             runtime,
+            #[cfg(feature = "webrtc")]
+            port: None,
         })
+    }
+
+    /// Listens on a [`Port`] rather than a socket of its own, so data channels can share the number. `wtransport` runs on a loopback
+    /// socket behind the port's relay, unmodified but for not offering to grease QUIC's fixed bit: RFC 9443 forbids that on a shared
+    /// port, since a greased packet can read as DTLS. Admission still judges the real source.
+    ///
+    /// # Errors
+    ///
+    /// Why it could not start.
+    #[cfg(feature = "webrtc")]
+    pub fn on_port(port: &Port, tls: Arc<ServerConfig>) -> Result<Self, Failure> {
+        let runtime = runtime()?;
+        let mut tls = ServerConfig::clone(&tls);
+        tls.alpn_protocols = alloc::vec![WEBTRANSPORT_ALPN.to_vec()];
+        let mut config = wtransport::ServerConfig::builder()
+            .with_bind_address(SocketAddr::from((core::net::Ipv4Addr::LOCALHOST, 0)))
+            .with_custom_tls(tls)
+            .build();
+        config.quic_endpoint_config_mut().grease_quic_bit(false);
+        let endpoint = {
+            let _inside = runtime.enter();
+            Endpoint::server(config).map_err(|_| Failure::Unsupported)?
+        };
+        port.relay_to(endpoint.local_addr().map_err(|_| Failure::Unsupported)?);
+        Ok(Self {
+            endpoint,
+            address: port.local_addr(),
+            limits: Limits::default(),
+            origins: Vec::new(),
+            admission: None,
+            runtime,
+            port: Some(port.clone()),
+        })
+    }
+
+    /// Whether a source may start a handshake. On a port the source is the one its relay stands for, and an address no relay holds
+    /// reached the loopback socket some other way, so nothing can be said for it.
+    fn admits(&self, seen: SocketAddr) -> bool {
+        let Some(admit) = &self.admission else {
+            return true;
+        };
+        #[cfg(feature = "webrtc")]
+        if let Some(port) = &self.port {
+            return port.source_of(seen).is_some_and(|source| admit(source));
+        }
+        admit(seen)
     }
 
     /// The bounds of channels this listener accepts.
@@ -556,11 +626,7 @@ impl Listener {
                 incoming.retry();
                 continue;
             }
-            if self
-                .admission
-                .as_ref()
-                .is_some_and(|admit| !admit(incoming.remote_address()))
-            {
+            if !self.admits(incoming.remote_address()) {
                 incoming.refuse();
                 continue;
             }
@@ -569,6 +635,8 @@ impl Listener {
                 limits: self.limits,
                 origins: self.origins.clone(),
                 runtime: Arc::clone(&self.runtime),
+                #[cfg(feature = "webrtc")]
+                port: self.port.clone(),
             });
         }
     }
@@ -580,6 +648,8 @@ pub struct Pending {
     limits: Limits,
     origins: Vec<alloc::string::String>,
     runtime: Arc<Runtime>,
+    #[cfg(feature = "webrtc")]
+    port: Option<Port>,
 }
 
 impl fmt::Debug for Pending {
@@ -602,6 +672,8 @@ impl Pending {
             limits,
             origins,
             runtime,
+            #[cfg(feature = "webrtc")]
+            port,
         } = self;
         let opened = runtime.block_on(bounded(limits.handshake, async {
             let request = incoming.await.map_err(|e| connection_failure(&e))?;
@@ -620,7 +692,15 @@ impl Pending {
             Ok((connection, send, recv))
         }));
         let (connection, send, recv) = opened.map_err(|_| Failure::Timeout)??;
-        Ok(Channel::start(connection, send, recv, limits, runtime))
+        Ok(Channel::start(
+            connection,
+            send,
+            recv,
+            limits,
+            runtime,
+            #[cfg(feature = "webrtc")]
+            port,
+        ))
     }
 }
 

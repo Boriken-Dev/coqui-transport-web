@@ -18,6 +18,8 @@ proves nothing about who the peer is: identity is a separate step, on the channe
   pinned endpoint never downgrades.
 - Validated `Endpoints`: explicit URLs, one host, no credentials or query, plain WebSocket only on loopback by opt-in.
 - Blocking drivers for WebTransport and WebSocket, with a bound on every size and handshake.
+- Raw datagrams beside the messages, on a ladder: WebTransport's own, a WebRTC data channel on the same UDP port (`webrtc` feature), then
+  inside the WebSocket. A blocked UDP path costs only the attempt.
 - The same wire in Rust and Dart, held together by shared vectors.
 
 What belongs here: a channel a browser can open natively. An HTTP client, a web framework or an application protocol does not.
@@ -32,6 +34,7 @@ cargo add coqui-web --features websocket
 | --- | --- | --- |
 | `websocket` | `websocket::{Dialer, Listener}`, on `tungstenite`, `rustls` and `mio` | off |
 | `webtransport` | `webtransport::{Dialer, Listener}`, on `wtransport`, with a small runtime inside the driver | off |
+| `webrtc` | `webrtc::Port`, and a WebSocket channel that climbs onto a data channel on it, on `str0m`. Implies the other two | off |
 
 The Dart package is in `bindings/dart/coqui_web`.
 
@@ -60,6 +63,7 @@ assert_eq!(Failure::Certificate.recovery(Kind::WebTransport, Phase::Opening, tru
 | `frame` | the stream wire format, with no I/O |
 | `websocket` | the WebSocket driver |
 | `webtransport` | the WebTransport driver |
+| `webrtc` | one UDP port for WebTransport and data channels |
 
 ## Development
 

@@ -129,8 +129,12 @@ pub enum WsPart<'a> {
 /// The WebSocket subprotocol that says both ends tag binary messages. Agreed in the handshake, so a peer that never asked for it is
 /// sent what it always was.
 pub const WS_DATAGRAMS_PROTOCOL: &str = "coqui-web-datagrams.1";
+/// [`WS_DATAGRAMS_PROTOCOL`] and one tag more, for the signals that open a data channel on the same address. A server that can answer
+/// them chooses this over that when a client offers both.
+pub const WS_LADDER_PROTOCOL: &str = "coqui-web-ladder.1";
 const WS_MESSAGE: u8 = 0;
 const WS_DATAGRAM: u8 = 1;
+const WS_SIGNAL: u8 = 2;
 
 /// A message as a tagged binary message.
 #[must_use]
@@ -142,6 +146,22 @@ pub fn ws_message(body: &[u8]) -> Vec<u8> {
 #[must_use]
 pub fn ws_datagram(body: &[u8]) -> Vec<u8> {
     ws_tagged(WS_DATAGRAM, body)
+}
+
+/// A signal as a tagged binary message, under [`WS_LADDER_PROTOCOL`].
+#[must_use]
+pub fn ws_signal(body: &[u8]) -> Vec<u8> {
+    ws_tagged(WS_SIGNAL, body)
+}
+
+/// The signal in a tagged binary message, or `None` if it holds something else. [`ws_part`] calls a signal an unknown tag, as it is
+/// under any other subprotocol.
+#[must_use]
+pub fn ws_signal_part(tagged: &[u8]) -> Option<&[u8]> {
+    match tagged.split_first() {
+        Some((&WS_SIGNAL, body)) => Some(body),
+        _ => None,
+    }
 }
 
 fn ws_tagged(tag: u8, body: &[u8]) -> Vec<u8> {
@@ -193,6 +213,15 @@ mod tests {
         assert_eq!(decoder.next_frame(), Err(FrameError::Size));
         decoder.push(&encode(b"later", 10).unwrap());
         assert_eq!(decoder.next_frame(), Err(FrameError::Size));
+    }
+
+    #[test]
+    fn a_signal_is_its_own_tag_and_no_part_of_the_datagram_wire() {
+        let signal = ws_signal(b"sdp");
+        assert_eq!(signal, [2, b's', b'd', b'p']);
+        assert_eq!(ws_signal_part(&signal), Some(&b"sdp"[..]));
+        assert_eq!(ws_part(&signal), Err(FrameError::Tag));
+        assert_eq!(ws_signal_part(&ws_datagram(b"x")), None);
     }
 
     #[test]

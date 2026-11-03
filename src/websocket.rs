@@ -34,6 +34,8 @@ use crate::channel::{self, Datagrams, Delivery, Kind};
 use crate::failure::Failure;
 use crate::frame::{self, WS_DATAGRAMS_PROTOCOL, WsPart};
 use crate::pump::{Admission, Inbox, Limits, Received};
+#[cfg(feature = "webrtc")]
+use crate::webrtc::{Climb, Plan, Port, Settings};
 
 /// How often a listener looks for a connection, and a worker for room in a full inbox if a reader taking one has not said.
 const POLL: Duration = Duration::from_millis(10);
@@ -319,14 +321,32 @@ struct WsDatagrams {
     dropped: Arc<AtomicU64>,
     wanted: Arc<AtomicBool>,
     max_size: usize,
+    #[cfg(feature = "webrtc")]
+    climb: Option<Arc<Climb>>,
+}
+
+impl WsDatagrams {
+    /// The data channel, while one is open.
+    #[cfg(feature = "webrtc")]
+    fn climbed(&self) -> Option<&Climb> {
+        self.climb.as_deref().filter(|climb| climb.is_open())
+    }
 }
 
 impl Datagrams for WsDatagrams {
     fn max_size(&self) -> Option<usize> {
+        #[cfg(feature = "webrtc")]
+        if let Some(climb) = self.climbed() {
+            return Some(climb.max_size());
+        }
         Some(self.max_size)
     }
 
     fn send(&self, payload: &[u8]) -> Result<(), Failure> {
+        #[cfg(feature = "webrtc")]
+        if let Some(climb) = self.climbed() {
+            return climb.send(payload);
+        }
         if payload.len() > self.max_size {
             return Err(Failure::Protocol);
         }
@@ -353,7 +373,16 @@ impl Datagrams for WsDatagrams {
     }
 
     fn delivery(&self) -> Delivery {
+        #[cfg(feature = "webrtc")]
+        if self.climbed().is_some() {
+            return Delivery::Unreliable;
+        }
         Delivery::OverStream
+    }
+
+    #[cfg(feature = "webrtc")]
+    fn path_changes(&self) -> Option<mpsc::Receiver<Delivery>> {
+        self.climb.as_ref().map(|climb| climb.changes())
     }
 }
 
@@ -364,6 +393,15 @@ struct WorkerDatagrams {
     dropped: Arc<AtomicU64>,
     wanted: Arc<AtomicBool>,
     max_size: usize,
+    #[cfg(feature = "webrtc")]
+    climb: Option<WorkerClimb>,
+}
+
+/// What a worker has to do for a channel that climbs: send its signals, and hear the peer's.
+#[cfg(feature = "webrtc")]
+struct WorkerClimb {
+    climb: Arc<Climb>,
+    signals: mpsc::Receiver<Vec<u8>>,
 }
 
 impl WorkerDatagrams {
@@ -396,6 +434,7 @@ impl Channel {
         limits: Limits,
         frames: Frames,
         tagged: bool,
+        #[cfg(feature = "webrtc")] plan: Option<Plan>,
     ) -> Result<Self, Failure> {
         let poll = Poll::new().map_err(|e| io_failure(&e))?;
         socket
@@ -418,6 +457,32 @@ impl Channel {
             let (arrived, inbox) = mpsc::sync_channel(pending);
             let dropped = Arc::new(AtomicU64::new(0));
             let wanted = Arc::new(AtomicBool::new(false));
+            #[cfg(feature = "webrtc")]
+            let (climb, worker_climb) = match plan {
+                Some(plan) => {
+                    // An offer, an answer or a refusal: never more than one on its way.
+                    let (signals, for_worker) = mpsc::sync_channel(2);
+                    let waking = Arc::clone(&waker);
+                    let climb = Arc::new(Climb::new(
+                        plan,
+                        arrived.clone(),
+                        Arc::clone(&dropped),
+                        pending,
+                        signals,
+                        Box::new(move || {
+                            let _ = waking.wake();
+                        }),
+                    ));
+                    (
+                        Some(Arc::clone(&climb)),
+                        Some(WorkerClimb {
+                            climb,
+                            signals: for_worker,
+                        }),
+                    )
+                }
+                None => (None, None),
+            };
             (
                 Some(WsDatagrams {
                     outgoing: send,
@@ -426,6 +491,8 @@ impl Channel {
                     dropped: Arc::clone(&dropped),
                     wanted: Arc::clone(&wanted),
                     max_size: limits.websocket_datagram,
+                    #[cfg(feature = "webrtc")]
+                    climb,
                 }),
                 Some(WorkerDatagrams {
                     outgoing: to_send,
@@ -433,6 +500,8 @@ impl Channel {
                     dropped,
                     wanted,
                     max_size: limits.websocket_datagram,
+                    #[cfg(feature = "webrtc")]
+                    climb: worker_climb,
                 }),
             )
         } else {
@@ -525,6 +594,10 @@ impl channel::Channel for Channel {
     fn datagrams(&self) -> Option<&dyn Datagrams> {
         let datagrams = self.datagrams.as_ref()?;
         datagrams.wanted.store(true, Ordering::SeqCst);
+        #[cfg(feature = "webrtc")]
+        if let Some(climb) = &datagrams.climb {
+            climb.start();
+        }
         Some(datagrams)
     }
 
@@ -548,6 +621,40 @@ impl channel::Channel for Channel {
         {
             let _ = worker.join();
         }
+        #[cfg(feature = "webrtc")]
+        if let Some(climb) = self.datagrams.as_ref().and_then(|d| d.climb.as_ref()) {
+            climb.close();
+        }
+    }
+}
+
+#[cfg(feature = "webrtc")]
+impl Channel {
+    /// The next offer or answer for a caller to carry to the peer, with
+    /// [`Signaling::ByCaller`](crate::webrtc::Signaling::ByCaller). `None` once the channel has ended.
+    ///
+    /// # Errors
+    ///
+    /// [`Failure::Timeout`] when there was none within `timeout`; [`Failure::Unsupported`] on a channel that does not climb this way.
+    pub fn next_signal(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
+        self.climb()
+            .ok_or(Failure::Unsupported)?
+            .next_signal(timeout)
+    }
+
+    /// An offer or answer the peer sent through the caller.
+    ///
+    /// # Errors
+    ///
+    /// [`Failure::Unsupported`] on a channel that does not climb this way.
+    pub fn deliver_signal(&self, signal: &[u8]) -> Result<(), Failure> {
+        self.climb()
+            .ok_or(Failure::Unsupported)?
+            .deliver_signal(signal)
+    }
+
+    fn climb(&self) -> Option<&Climb> {
+        self.datagrams.as_ref()?.climb.as_deref()
     }
 }
 
@@ -613,6 +720,11 @@ struct Worker {
 }
 
 impl Worker {
+    #[cfg(feature = "webrtc")]
+    fn climbs(&self) -> bool {
+        self.datagrams.as_ref().is_some_and(|d| d.climb.is_some())
+    }
+
     /// Agreeing to datagrams adds a tag to every binary message, which a limit on what it holds does not count.
     fn tag(&self) -> usize {
         usize::from(self.datagrams.is_some())
@@ -632,6 +744,10 @@ impl Worker {
                 break stop;
             }
         };
+        #[cfg(feature = "webrtc")]
+        if let Some(climb) = self.datagrams.as_ref().and_then(|d| d.climb.as_ref()) {
+            climb.climb.close();
+        }
         match stop {
             Stop::Failed(failure) => self.report(failure),
             Stop::FailedClosing(failure) => {
@@ -676,6 +792,16 @@ impl Worker {
     /// number otherwise, so a busy sender cannot keep this from reading, and answers whether more may be waiting: nothing
     /// will wake this for what is already queued. Datagrams go first: a few at most, and a message sent after one follows it.
     fn write_queued(&mut self) -> Result<bool, Stop> {
+        #[cfg(feature = "webrtc")]
+        while self.unsent.is_none() {
+            let signal = self
+                .datagrams
+                .as_ref()
+                .and_then(|d| d.climb.as_ref())
+                .and_then(|climb| climb.signals.try_recv().ok());
+            let Some(signal) = signal else { break };
+            self.write(Message::binary(frame::ws_signal(&signal)))?;
+        }
         let mut more = false;
         if self.datagrams.is_some() {
             more = true;
@@ -764,6 +890,15 @@ impl Worker {
         self.pinged = false;
         match message {
             Message::Text(text) => self.waiting = Some(Ok(text.as_bytes().to_vec())),
+            #[cfg(feature = "webrtc")]
+            Message::Binary(body) if self.climbs() && frame::ws_signal_part(&body).is_some() => {
+                if let (Some(climb), Some(signal)) = (
+                    self.datagrams.as_ref().and_then(|d| d.climb.as_ref()),
+                    frame::ws_signal_part(&body),
+                ) {
+                    climb.climb.signal_from_channel(signal);
+                }
+            }
             Message::Binary(body) if self.datagrams.is_some() => match frame::ws_part(&body) {
                 Ok(WsPart::Datagram(datagram)) => {
                     if let Some(datagrams) = &self.datagrams {
@@ -927,6 +1062,8 @@ pub struct Dialer {
     limits: Limits,
     frames: Frames,
     datagrams: bool,
+    #[cfg(feature = "webrtc")]
+    webrtc: Option<Settings>,
 }
 
 impl fmt::Debug for Dialer {
@@ -977,6 +1114,17 @@ impl Dialer {
         self
     }
 
+    /// Asks the listener to agree to datagrams on this channel, as [`with_datagrams`](Self::with_datagrams) does, and to let them climb
+    /// onto a data channel on the same address when it can. A listener that cannot still gives plain datagrams, and an attempt that
+    /// fails leaves them where they are. The attempt starts when [`datagrams`](channel::Channel::datagrams) is first called.
+    #[cfg(feature = "webrtc")]
+    #[must_use]
+    pub const fn with_webrtc(mut self, settings: Settings) -> Self {
+        self.datagrams = true;
+        self.webrtc = Some(settings);
+        self
+    }
+
     /// Adds a header to the opening request. A value may be a credential: it is never printed. A header
     /// authenticates nothing by itself and does not replace proving the peer.
     #[must_use]
@@ -987,6 +1135,14 @@ impl Dialer {
     ) -> Self {
         self.headers.push((name.into(), value.into()));
         self
+    }
+
+    fn protocols_asked(&self) -> &'static str {
+        #[cfg(feature = "webrtc")]
+        if self.webrtc.is_some_and(|settings| settings.enabled) {
+            return LADDER_OR_DATAGRAMS;
+        }
+        WS_DATAGRAMS_PROTOCOL
     }
 
     fn open_tcp(url: &Url, deadline: Instant) -> Result<TcpStream, Failure> {
@@ -1012,6 +1168,17 @@ impl Dialer {
     }
 }
 
+/// What a dialer that climbs offers, the one it prefers first.
+#[cfg(feature = "webrtc")]
+const LADDER_OR_DATAGRAMS: &str = "coqui-web-ladder.1, coqui-web-datagrams.1";
+
+#[cfg(feature = "webrtc")]
+fn agreed_to_ladder(headers: &tungstenite::http::HeaderMap) -> bool {
+    headers
+        .get("sec-websocket-protocol")
+        .is_some_and(|value| value.as_bytes() == frame::WS_LADDER_PROTOCOL.as_bytes())
+}
+
 impl channel::Dialer for Dialer {
     type Connection = Channel;
 
@@ -1022,6 +1189,10 @@ impl channel::Dialer for Dialer {
         let timeout = timeout.min(self.limits.handshake);
         let deadline = Instant::now() + timeout;
         let tcp = Self::open_tcp(endpoint, deadline)?;
+        #[cfg(feature = "webrtc")]
+        let addresses = tcp
+            .local_addr()
+            .and_then(|local| Ok((local, tcp.peer_addr()?)));
         tcp.set_read_timeout(Some(timeout))
             .map_err(|e| io_failure(&e))?;
         tcp.set_write_timeout(Some(timeout))
@@ -1055,16 +1226,36 @@ impl channel::Dialer for Dialer {
         if self.datagrams {
             request.headers_mut().insert(
                 "sec-websocket-protocol",
-                HeaderValue::from_static(WS_DATAGRAMS_PROTOCOL),
+                HeaderValue::from_static(self.protocols_asked()),
             );
         }
-        let (socket, _) =
+        let (socket, _response) =
             tungstenite::client::client_with_config(request, stream, Some(config(self.limits)))
                 .map_err(|error| match error {
                     HandshakeError::Interrupted(_) => Failure::Timeout,
                     HandshakeError::Failure(error) => ws_failure(&error),
                 })?;
-        Channel::start(socket, self.limits, self.frames, self.datagrams)
+        #[cfg(feature = "webrtc")]
+        let plan = match (self.webrtc, addresses) {
+            (Some(settings), Ok((local, peer)))
+                if settings.enabled && agreed_to_ladder(_response.headers()) =>
+            {
+                Some(Plan::Dialing {
+                    settings,
+                    local,
+                    peer,
+                })
+            }
+            _ => None,
+        };
+        Channel::start(
+            socket,
+            self.limits,
+            self.frames,
+            self.datagrams,
+            #[cfg(feature = "webrtc")]
+            plan,
+        )
     }
 }
 
@@ -1076,6 +1267,8 @@ pub struct Listener {
     frames: Frames,
     origins: Vec<alloc::string::String>,
     admission: Option<Admission>,
+    #[cfg(feature = "webrtc")]
+    webrtc: Option<Port>,
 }
 
 impl fmt::Debug for Listener {
@@ -1110,7 +1303,17 @@ impl Listener {
             frames: Frames::default(),
             origins: Vec::new(),
             admission: None,
+            #[cfg(feature = "webrtc")]
+            webrtc: None,
         })
+    }
+
+    /// Lets a client that asks climb from its WebSocket onto a data channel on `port`. One with no use for that sees no change.
+    #[cfg(feature = "webrtc")]
+    #[must_use]
+    pub fn with_webrtc(mut self, port: &Port) -> Self {
+        self.webrtc = port.settings().enabled.then(|| port.clone());
+        self
     }
 
     /// The bounds of channels this listener accepts.
@@ -1180,6 +1383,8 @@ impl Listener {
             limits: self.limits,
             frames: self.frames,
             origins: self.origins.clone(),
+            #[cfg(feature = "webrtc")]
+            webrtc: self.webrtc.clone(),
         })
     }
 
@@ -1211,6 +1416,8 @@ pub struct Pending {
     limits: Limits,
     frames: Frames,
     origins: Vec<alloc::string::String>,
+    #[cfg(feature = "webrtc")]
+    webrtc: Option<Port>,
 }
 
 impl fmt::Debug for Pending {
@@ -1236,7 +1443,13 @@ impl Pending {
             limits,
             frames,
             origins,
+            #[cfg(feature = "webrtc")]
+            webrtc,
         } = self;
+        #[cfg(feature = "webrtc")]
+        let arrived_at = tcp.local_addr();
+        #[cfg(feature = "webrtc")]
+        let can_climb = webrtc.is_some();
         tcp.set_nonblocking(false).map_err(|e| io_failure(&e))?;
         tcp.set_read_timeout(Some(limits.handshake))
             .map_err(|e| io_failure(&e))?;
@@ -1263,16 +1476,31 @@ impl Pending {
         };
         let agreed = Arc::new(AtomicBool::new(false));
         let agreeing = Arc::clone(&agreed);
+        #[cfg(feature = "webrtc")]
+        let climbing = Arc::new(AtomicBool::new(false));
+        #[cfg(feature = "webrtc")]
+        let climbs = Arc::clone(&climbing);
         let check =
             move |request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
-                let asked = request
-                    .headers()
-                    .get_all("sec-websocket-protocol")
-                    .iter()
-                    .filter_map(|value| value.to_str().ok())
-                    .flat_map(|value| value.split(','))
-                    .any(|name| name.trim() == WS_DATAGRAMS_PROTOCOL);
-                if asked {
+                let asked_for = |protocol: &str| {
+                    request
+                        .headers()
+                        .get_all("sec-websocket-protocol")
+                        .iter()
+                        .filter_map(|value| value.to_str().ok())
+                        .flat_map(|value| value.split(','))
+                        .any(|name| name.trim() == protocol)
+                };
+                #[cfg(feature = "webrtc")]
+                if can_climb && asked_for(frame::WS_LADDER_PROTOCOL) {
+                    climbs.store(true, Ordering::SeqCst);
+                    agreeing.store(true, Ordering::SeqCst);
+                    response.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        HeaderValue::from_static(frame::WS_LADDER_PROTOCOL),
+                    );
+                }
+                if !agreeing.load(Ordering::SeqCst) && asked_for(WS_DATAGRAMS_PROTOCOL) {
                     agreeing.store(true, Ordering::SeqCst);
                     response.headers_mut().insert(
                         "sec-websocket-protocol",
@@ -1303,7 +1531,22 @@ impl Pending {
             HandshakeError::Failure(_) if started.elapsed() >= limits.handshake => Failure::Timeout,
             HandshakeError::Failure(error) => ws_failure(&error),
         })?;
-        Channel::start(socket, limits, frames, agreed.load(Ordering::SeqCst))
+        #[cfg(feature = "webrtc")]
+        let plan = match (webrtc, arrived_at) {
+            (Some(port), Ok(local)) if climbing.load(Ordering::SeqCst) => {
+                let candidate = port.candidate_for(local);
+                Some(Plan::Listening { port, candidate })
+            }
+            _ => None,
+        };
+        Channel::start(
+            socket,
+            limits,
+            frames,
+            agreed.load(Ordering::SeqCst),
+            #[cfg(feature = "webrtc")]
+            plan,
+        )
     }
 }
 

@@ -93,8 +93,14 @@ pub trait Datagrams: Send + Sync {
     /// that is behind. What the network lost cannot be seen from this side.
     fn dropped(&self) -> u64;
 
-    /// How these travel.
+    /// How these travel now. On a channel that climbs it changes during the connection: see [`Self::path_changes`].
     fn delivery(&self) -> Delivery;
+
+    /// Each change of path from this call on, as the [`Delivery`] now in force, or `None` for a channel whose path never changes.
+    /// [`Self::max_size`] follows the path, and a datagram over it is refused rather than moved to another one.
+    fn path_changes(&self) -> Option<std::sync::mpsc::Receiver<Delivery>> {
+        None
+    }
 }
 
 impl Channel for alloc::boxed::Box<dyn Channel> {

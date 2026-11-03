@@ -6,12 +6,13 @@ Header-file-style reference for the `coqui-web` crate: every public item with it
 | --- | --- | --- |
 | `websocket` | `websocket::{Channel, Dialer, Frames, Listener}`, on `tungstenite`, `rustls` and `mio` | off |
 | `webtransport` | `webtransport::{Channel, Dialer, Listener}`, on `wtransport`, with a small runtime inside | off |
+| `webrtc` | `webrtc::{Port, Settings, Signaling}`, and a WebSocket channel that climbs onto a data channel, on `str0m`; implies both others | off |
 
 MSRV Rust 1.89. A default build depends on `url` alone. Version `0.0.0-alpha.0`, not published; the API may change in any
 release before 1.0.
 
 Imports: the crate root holds the channel contract, `connect`, `Endpoints`, `Failure` and, with a driver feature, `Limits`.
-Public modules: `frame`, `websocket`, `webtransport`.
+Public modules: `frame`, `webrtc`, `websocket`, `webtransport`.
 
 No `unsafe` code (`#![forbid(unsafe_code)]`). No process-wide state. A dialer holds no trust roots: TLS is the caller's.
 
@@ -44,12 +45,13 @@ pub trait Datagrams: Send + Sync {
     fn send(&self, payload: &[u8]) -> Result<(), Failure>;                        // Protocol if too large, and the channel goes on; Unsupported; PathLost
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure>;   // None once the connection ended; Timeout
     fn dropped(&self) -> u64;                                                     // discarded here: a reader behind, or on a WebSocket a link behind; network loss cannot be seen
-    fn delivery(&self) -> Delivery;
+    fn delivery(&self) -> Delivery;                                               // how they travel now
+    fn path_changes(&self) -> Option<Receiver<Delivery>> { None }                 // each change from this call on, as the Delivery now in force; None: this path never changes
 }
 pub enum Delivery { Unreliable, OverStream }   // non_exhaustive
 ```
 
-Raw datagrams beside the messages, whole or not at all. `Unreliable` (WebTransport): lost, reordered or repeated without notice. `OverStream` (a WebSocket whose client asked with `websocket::Dialer::with_datagrams` and whose server agreed, which a `Listener` always does): in order and late rather than lost on the way, as tagged binary messages. **Outside any identity proof run on the messages**, so TLS is all that protects them. Read only once `datagrams()` is first called. Until then WebTransport's transport holds them in its bounded buffer, and a WebSocket discards and counts them.
+Raw datagrams beside the messages, whole or not at all. `Unreliable` (WebTransport): lost, reordered or repeated without notice. `OverStream` (a WebSocket whose client asked with `websocket::Dialer::with_datagrams` and whose server agreed, which a `Listener` always does): in order and late rather than lost on the way, as tagged binary messages. **Outside any identity proof run on the messages**, so TLS is all that protects them. Read only once `datagrams()` is first called. Until then WebTransport's transport holds them in its bounded buffer, and a WebSocket discards and counts them. A WebSocket with the `webrtc` feature can change from `OverStream` to `Unreliable` and back during a connection: `max_size` follows the path, and one over it is refused with `Failure::Protocol` rather than moved.
 
 ```rust
 pub trait Dialer {
@@ -236,16 +238,21 @@ pub fn Dialer::new() -> Self                // no TLS: reaches only ws://; wss:/
 pub fn Dialer::with_tls(self, tls: Arc<rustls::ClientConfig>) -> Self
 pub const fn Dialer::with_limits(self, limits: Limits) -> Self
 pub const fn Dialer::with_frames(self, frames: Frames) -> Self
+pub const fn Dialer::with_datagrams(self) -> Self                       // asks the server to agree; one that does not makes the dial Failure::Unsupported
+pub const fn Dialer::with_webrtc(self, settings: webrtc::Settings) -> Self  // feature webrtc; datagrams too, and a climb where the listener can
 pub fn Dialer::with_header(self, name: impl Into<String>, value: impl Into<String>) -> Self // a value never prints
 pub fn Listener::bind(address: SocketAddr, tls: Option<Arc<rustls::ServerConfig>>) -> Result<Self, Failure>
 pub const fn Listener::with_limits(self, limits: Limits) -> Self
 pub const fn Listener::with_frames(self, frames: Frames) -> Self
 pub fn Listener::with_origins(self, origins: impl IntoIterator<Item = String>) -> Self
 pub fn Listener::with_admission(self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self
+pub fn Listener::with_webrtc(self, port: &webrtc::Port) -> Self             // feature webrtc
 pub fn Listener::local_addr(&self) -> Result<SocketAddr, Failure>
 pub fn Listener::next(&self, timeout: Option<Duration>) -> Result<Pending, Failure>
 pub fn Pending::handshake(self) -> Result<Channel, Failure>
 pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Failure>
+pub fn Channel::next_signal(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure>  // feature webrtc, Signaling::ByCaller
+pub fn Channel::deliver_signal(&self, signal: &[u8]) -> Result<(), Failure>                        // feature webrtc, Signaling::ByCaller
 ```
 
 `bind` with no TLS on a non-loopback address is `Failure::Permission`. `accept` runs one handshake, bounded in total by `Limits::handshake`. `Listener::next` returns a `Pending` before its handshake, for a server that runs `Pending::handshake` on threads of its own so one slow peer cannot hold up others. A dialer refuses `ws://` beyond loopback with `Failure::Permission`. `close` returns once what was queued has gone, or the peer has taken nothing for `Limits::send`. Each channel has a worker thread that sleeps on its socket and on its callers, so an idle channel takes no CPU and a message goes as soon as it is sent; the wait holds up to two file handles beside the socket. `Failure::Certificate` means a certificate was rejected, by this side or the peer's; any other TLS error is `Failure::Protocol`, since one forged record can cause it.
@@ -258,6 +265,7 @@ pub fn Dialer::pinned(pins: &[CertificatePin]) -> Result<Self, Failure>
 pub fn Dialer::with_tls(tls: Arc<rustls::ClientConfig>) -> Result<Self, Failure>
 pub const fn Dialer::with_limits(self, limits: Limits) -> Self
 pub fn Listener::bind(address: SocketAddr, tls: Arc<rustls::ServerConfig>) -> Result<Self, Failure>
+pub fn Listener::on_port(port: &webrtc::Port, tls: Arc<rustls::ServerConfig>) -> Result<Self, Failure>  // feature webrtc
 pub const fn Listener::with_limits(self, limits: Limits) -> Self
 pub fn Listener::with_origins(self, origins: impl IntoIterator<Item = String>) -> Self
 pub fn Listener::with_admission(self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self
@@ -269,6 +277,33 @@ pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Fai
 
 `Listener::next` sends a source to retry first, since UDP sources are forgeable, then judges it by admission, and `Pending::handshake` completes it. Each dialer and listener runs its own runtime, and its calls block. Inside an async runtime, call them from its blocking pool.
 
+## The ladder (`coqui_web::webrtc`, feature `webrtc`)
+
+```rust
+pub struct Settings { pub enabled: bool, pub attempt: Duration, pub path_mtu: usize, pub public_address: Option<SocketAddr>, pub any_candidate: bool, pub signaling: Signaling, pub max_sessions: usize, pub max_relays: usize, pub relay_idle: Duration }
+pub const fn with_enabled(self, enabled: bool) -> Self
+pub const fn with_attempt(self, limit: Duration) -> Self
+pub const fn with_path_mtu(self, bytes: usize) -> Self
+pub const fn with_public_address(self, address: SocketAddr) -> Self
+pub const fn with_any_candidate(self) -> Self
+pub const fn with_signaling(self, signaling: Signaling) -> Self
+pub const fn with_max_sessions(self, sessions: usize) -> Self
+pub const fn with_max_relays(self, relays: usize) -> Self
+pub const fn with_relay_idle(self, limit: Duration) -> Self
+pub enum Signaling { OnChannel, ByCaller }            // non_exhaustive; default OnChannel
+pub struct Port                                       // Clone; Debug
+pub fn Port::bind(address: SocketAddr, settings: Settings) -> Result<Self, Failure>   // Failure::Permission when taken or not allowed
+pub fn Port::local_addr(&self) -> SocketAddr
+pub fn Port::relays(&self) -> usize                   // QUIC sources relayed now
+pub fn Port::data_channels(&self) -> usize            // data channels held now, opening or open
+```
+
+`#[non_exhaustive]`. Defaults: on, 5 s for an attempt, a path of 1280 bytes, no public address, a candidate only where the peer is, `OnChannel`, 256 data channels, 1024 relays, 120 s for a relay's silence.
+
+A `Port` reads the first byte of each packet (RFC 9443): QUIC to a loopback relay in front of `webtransport::Listener::on_port`, STUN and DTLS to a data channel, anything else dropped. One worker thread serves it and sleeps while nothing is due; at rest it wakes when `str0m` asks, every few seconds per data channel. It ends with its last clone, listener or channel: the socket and relays close and the thread is joined.
+
+A WebSocket with `Dialer::with_webrtc` asks for `coqui-web-ladder.1` and `coqui-web-datagrams.1`, and a listener with `with_webrtc` prefers the first, which adds tag 2, a signal: one byte, 1 offer, 2 answer or 3 refused, then the session description. A listener with no port never agrees to it, and a dialer without `with_webrtc` never asks. The attempt starts at each end when `datagrams()` is first called there, once per channel. The channel is unordered with no retransmits, created by the dialer. Until it opens, and after it dies, datagrams stay in the WebSocket; each switch is reported by `path_changes`. An attempt that fails changes nothing and reports nothing.
+
 ## Gotchas
 
 - `Unverified` proves nothing about the peer. Run the identity proof before `into_verified`.
@@ -276,3 +311,12 @@ pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Fai
 - A pin needs a certificate valid for at most 14 days, ECDSA P-256, in browsers and in `Dialer::pinned` alike. Otherwise it is refused as `Failure::Certificate`.
 - QUIC does not fall back between address families: a host resolving to IPv6 first can time out against an IPv4 listener. Dial by address when in doubt.
 - WebSocket `Text` frames: `Channel::send` refuses bytes that are not UTF-8 before they reach the wire.
+- A data channel's `max_size` is at most 1100 bytes, and less for a smaller `path_mtu`: a fragmented unreliable message is lost when any fragment is. The peer's own limit is not read.
+- An empty datagram sent from Rust on a data channel is refused with `Failure::Protocol`: `str0m` writes nothing for one. One arriving from a browser is delivered.
+- A datagram sent from a data channel's end before the other end has switched still arrives: each end listens on both paths.
+- `Port`'s candidate names the address the WebSocket connection arrived at, with the UDP port's number. Behind a proxy or NAT set `Settings::public_address`: the default is wrong there, and tells the peer an address it had no other way to learn. A peer always learns the address it is given. On a host with several addresses, bind one: a reply leaves by whichever the system picks, on a wildcard socket.
+- A peer can name any candidate in an answer. `with_webrtc` refuses one not at the WebSocket's peer unless `Settings::any_candidate`; candidates in an offer are discarded. A browser has no such check for a server named by host name.
+- Through a reverse proxy a UDP path needs a stream block for the port, or the host's own port with `public_address`. Without one the attempt fails and the ladder ends at the WebSocket.
+- `webtransport::Listener::on_port` sees the relay's address, not the client's, inside `wtransport`; admission and `Debug` read through to the real one. A local process reaching its loopback socket directly is refused when admission is set. QUIC's ECN does not cross the relay.
+- `Datagrams::path_changes` before `datagrams()` is not possible, and an event between the two calls is missed: read `delivery()` after subscribing.
+- Signals on the channel have what TLS gives them. For datagrams bound to a peer proof use `Signaling::ByCaller` and carry them inside the proven link.

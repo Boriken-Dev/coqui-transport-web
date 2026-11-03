@@ -37,4 +37,42 @@ A channel can carry raw datagrams beside its messages: `channel.datagrams()` in 
 - **Memory:** over a WebSocket none are held until `datagrams()` is first asked for, so a peer that has proved nothing cannot fill memory that way.
 - **Identity:** a peer proof covers messages. Datagrams are outside it, so TLS is all that protects them, and a channel that seals its messages has no datagrams unless it says how it seals them.
 
+## A ladder of datagrams
+
+A browser with no WebTransport, or a path where QUIC is blocked, can still have real unreliable delivery, with the `webrtc` feature, off by
+default:
+
+1. WebTransport's own datagrams, when WebTransport opened.
+2. A WebRTC data channel on the same UDP port number.
+3. Inside the WebSocket.
+
+```rust
+let port = webrtc::Port::bind(address, webrtc::Settings::default())?;
+let quic = webtransport::Listener::on_port(&port, tls.clone())?;
+let websocket = websocket::Listener::bind(port.local_addr(), Some(tls))?.with_webrtc(&port);
+```
+
+**One port.** A `Port` owns the socket and reads the first byte of each packet, as [RFC 9443](https://www.rfc-editor.org/rfc/rfc9443) lays out: QUIC goes through a relay to an unmodified
+`wtransport`, STUN and DTLS to a data channel, and anything else is dropped. A source with no credentials gets no reply at all. The relay
+map has a cap and an idle expiry. Past the cap a new source replaces the oldest that never completed a handshake, so a flood of forged
+sources cannot keep a real client out or put one out. QUIC must not grease its fixed bit on a shared port, so this listener does not offer to.
+
+**Climbing.** A client that asks offers `coqui-web-ladder.1` before `coqui-web-datagrams.1`, and a server with a port chooses it, which adds
+tag 2 to the binary messages: a signal, one byte (1 offer, 2 answer, 3 refused) and a session description. Datagrams start in the WebSocket.
+When a caller first asks for them, the client creates the data channel, unordered with no retransmits, and offers over the channel it has.
+The server, ICE-lite with one host candidate, answers once its own caller has asked too. When the channel opens both ends switch.
+`delivery` and `max_size` follow the path, an event says so, and a datagram over the limit is refused, never moved. A data channel's limit
+is what fits one packet of `path_mtu`, because a fragment lost is the whole datagram lost. If the path later dies they go back to the WebSocket,
+with an event, and nothing tries again. If UDP is blocked only the attempt is lost: 5 s by default, a setting, as is turning it off.
+
+**Identity.** Signals on the WebSocket have what TLS gives them. A caller with a proven, sealed link can carry them itself (`Signaling::ByCaller`). The DTLS fingerprints are then inside the proof, and so are that data channel's datagrams, which WebTransport's and
+the WebSocket's are not.
+
+**Addresses.** An offer goes with no candidates, so it names nothing about the client; the server learns it from the first check. A server
+names one candidate: the address the WebSocket arrived at, or `public_address`. Set that behind a proxy or NAT, or the candidate is wrong
+and reveals the address behind it. A candidate naming anywhere else is refused by the Rust client.
+
+**A reverse proxy.** nginx in front of the WebSocket does nothing for UDP. Give the port a `stream` block, or let clients reach the host's own
+port and set `public_address`. Without one the attempt fails and the ladder ends at the WebSocket.
+
 [Choosing a transport](fallback.md) explains when another transport may be tried.

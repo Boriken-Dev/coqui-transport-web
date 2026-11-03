@@ -24,6 +24,8 @@ default = []
 websocket = ["dep:tungstenite", "dep:rustls", "dep:mio"]
 # `webtransport::{Dialer, Listener}`: WebTransport drivers over a small runtime inside the driver.
 webtransport = ["dep:wtransport", "dep:tokio", "dep:rustls"]
+# `webrtc::Port`: one UDP port for WebTransport and WebRTC data channels, and a WebSocket channel that climbs onto one.
+webrtc = ["websocket", "webtransport", "dep:str0m"]
 
 [dependencies]
 # Endpoints are validated URLs; validation backs a trust decision, so it is not hand-written.
@@ -38,6 +40,8 @@ mio = { version = "1", optional = true, default-features = false, features = ["o
 # Pre-1.0: the only maintained HTTP/3 WebTransport session crate on quinn that browsers interoperate with.
 wtransport = { version = "0.7.2", optional = true, default-features = false, features = ["quinn", "ring"] }
 tokio = { version = "1", optional = true, default-features = false, features = ["rt-multi-thread", "time", "sync", "macros"] }
+# Sans-IO, so it runs on the worker that owns the socket. `rust-crypto` is the one provider that builds alike on every platform here.
+str0m = { version = "0.24", optional = true, default-features = false, features = ["rust-crypto"] }
 
 [dev-dependencies]
 serde_json = "1"
@@ -51,6 +55,18 @@ wtransport = { version = "0.7.2", default-features = false, features = ["quinn",
 [[example]]
 name = "echo"
 required-features = ["websocket", "webtransport"]
+
+[[example]]
+name = "ladder"
+required-features = ["webrtc"]
+
+[[test]]
+name = "ladder"
+required-features = ["webrtc"]
+
+[[test]]
+name = "ladder_idle"
+required-features = ["webrtc"]
 
 [lints.rust]
 missing_docs = "warn"
