@@ -359,7 +359,7 @@ impl channel::Channel for Channel {
     }
 
     /// Waits up to `timeout` instead of `Limits::send`. Past it, [`Failure::Timeout`] if nothing of the message went, and the
-    /// channel goes on; [`Failure::NoProgress`] if part of it went, and the channel's stream ends. `None` is [`send`](Self::send).
+    /// channel goes on; [`Failure::NoProgress`] if part of it went, and the channel's stream ends. `None` is [`send`](crate::Channel::send).
     fn send_timeout(&self, message: &[u8], timeout: Option<Duration>) -> Result<(), Failure> {
         match timeout {
             Some(limit) => self.write(message, limit, true),
