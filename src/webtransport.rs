@@ -21,6 +21,7 @@ use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 use tokio::time::timeout as within;
 use url::Url;
+use wtransport::config::{DnsLookupFuture, DnsResolver};
 use wtransport::endpoint::IncomingSession;
 use wtransport::endpoint::endpoint_side::{Client, Server};
 use wtransport::error::{ConnectingError, ConnectionClose, ConnectionError, SendDatagramError};
@@ -477,9 +478,10 @@ impl Dialer {
         self
     }
 
-    fn endpoint(&self) -> Result<Endpoint<Client>, Failure> {
+    /// A client endpoint, which sends a name's session to `address` when given one.
+    fn endpoint(&self, address: Option<SocketAddr>) -> Result<Endpoint<Client>, Failure> {
         let builder = wtransport::ClientConfig::builder().with_bind_default();
-        let config = match &self.tls {
+        let mut config = match &self.tls {
             Tls::Pinned(pins) => builder.with_server_certificate_hashes(pins.clone()).build(),
             Tls::Custom(tls) => {
                 let mut tls = ClientConfig::clone(tls);
@@ -487,34 +489,120 @@ impl Dialer {
                 builder.with_custom_tls(tls).build()
             }
         };
+        if let Some(address) = address {
+            config.set_dns_resolver(Resolved(address));
+        }
         let _inside = self.runtime.enter();
         Endpoint::client(config).map_err(|_| Failure::Unsupported)
     }
 }
 
+/// How long one address has before the next is tried beside it: RFC 8305's connection attempt delay.
+const ATTEMPT_DELAY: Duration = Duration::from_millis(250);
+
+/// Resolves any name to one address, so an attempt goes where it was sent while TLS still checks the name.
+#[derive(Debug)]
+struct Resolved(SocketAddr);
+
+impl DnsResolver for Resolved {
+    fn resolve(&self, _: &str) -> core::pin::Pin<Box<dyn DnsLookupFuture>> {
+        let address = self.0;
+        Box::pin(async move { Ok(Some(address)) })
+    }
+}
+
+/// Every address a host name gives, the families taking turns from the resolver's first (RFC 8305 section 4). Empty for an
+/// address literal, which needs no choosing.
+fn addresses(endpoint: &Url) -> Result<Vec<SocketAddr>, Failure> {
+    let Some(url::Host::Domain(name)) = endpoint.host() else {
+        return Ok(Vec::new());
+    };
+    let port = endpoint.port().unwrap_or(443);
+    let resolved: Vec<SocketAddr> = std::net::ToSocketAddrs::to_socket_addrs(&(name, port))
+        .map_err(|_| Failure::PathLost)?
+        .collect();
+    if resolved.is_empty() {
+        return Err(Failure::PathLost);
+    }
+    Ok(alternate(resolved))
+}
+
+/// The families taking turns, each in the resolver's order, starting with the family of its first.
+fn alternate(resolved: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let first = resolved.first().is_some_and(SocketAddr::is_ipv6);
+    let (preferred, other): (Vec<_>, Vec<_>) = resolved
+        .into_iter()
+        .partition(|address| address.is_ipv6() == first);
+    let mut other = other.into_iter();
+    let mut ordered = Vec::with_capacity(preferred.len() + other.len());
+    for address in preferred {
+        ordered.push(address);
+        ordered.extend(other.next());
+    }
+    ordered.extend(other);
+    ordered
+}
+
+/// One session and its stream, from `client` to `url`, after waiting `delay`.
+async fn attempt(
+    client: Endpoint<Client>,
+    url: alloc::string::String,
+    delay: Duration,
+) -> Result<(Connection, SendStream, RecvStream), Failure> {
+    tokio::time::sleep(delay).await;
+    let connection = client
+        .connect(url)
+        .await
+        .map_err(|e| connecting_failure(&e))?;
+    let opening = connection
+        .open_bi()
+        .await
+        .map_err(|e| connection_failure(&e))?;
+    let (send, recv) = opening.await.map_err(|_| Failure::PathLost)?;
+    Ok((connection, send, recv))
+}
+
 impl channel::Dialer for Dialer {
     type Connection = Channel;
 
+    /// A host name that resolves to several addresses is tried at each in turn, a new one every 250 ms beside those still
+    /// opening, and the first to open wins. A failure that is not about the path ends the dial at once, whichever address gave it.
     fn dial(&mut self, kind: Kind, endpoint: &Url, timeout: Duration) -> Result<Channel, Failure> {
         if kind != Kind::WebTransport {
             return Err(Failure::Unsupported);
         }
-        let client = self.endpoint()?;
         let url = endpoint.to_string();
+        let addresses = addresses(endpoint)?;
+        let mut attempts = tokio::task::JoinSet::new();
+        if addresses.is_empty() {
+            attempts.spawn_on(
+                attempt(self.endpoint(None)?, url.clone(), Duration::ZERO),
+                self.runtime.handle(),
+            );
+        }
+        let mut delay = Duration::ZERO;
+        for address in addresses {
+            let client = self.endpoint(Some(address))?;
+            attempts.spawn_on(attempt(client, url.clone(), delay), self.runtime.handle());
+            delay += ATTEMPT_DELAY;
+        }
         let opened = self
             .runtime
             .block_on(bounded(timeout.min(self.limits.handshake), async {
-                let connection = client
-                    .connect(url)
-                    .await
-                    .map_err(|e| connecting_failure(&e))?;
-                let opening = connection
-                    .open_bi()
-                    .await
-                    .map_err(|e| connection_failure(&e))?;
-                let (send, recv) = opening.await.map_err(|_| Failure::PathLost)?;
-                Ok::<_, Failure>((connection, send, recv))
+                let mut lost = None;
+                while let Some(finished) = attempts.join_next().await {
+                    match finished.map_err(|_| Failure::Unsupported)? {
+                        Ok(opened) => return Ok(opened),
+                        Err(failure) if failure.is_path() => {
+                            lost.get_or_insert(failure);
+                        }
+                        Err(failure) => return Err(failure),
+                    }
+                }
+                Err(lost.unwrap_or(Failure::PathLost))
             }));
+        // Those still opening are dropped with the set, which closes them.
+        drop(attempts);
         let (connection, send, recv) = opened.map_err(|_| Failure::Timeout)??;
         Ok(Channel::start(
             connection,
@@ -871,6 +959,22 @@ mod tests {
         }
         assert_eq!(quic_failure(Some(0xa)), Failure::Protocol);
         assert_eq!(quic_failure(None), Failure::Protocol);
+    }
+
+    #[test]
+    fn the_families_take_turns_from_the_resolvers_first() {
+        let [a, b, c, x, y]: [SocketAddr; 5] = [
+            "[::1]:1",
+            "[::2]:1",
+            "[::3]:1",
+            "127.0.0.1:1",
+            "127.0.0.2:1",
+        ]
+        .map(|text| text.parse().unwrap());
+        assert_eq!(alternate(alloc::vec![a, b, c, x, y]), [a, x, b, y, c]);
+        assert_eq!(alternate(alloc::vec![x, a, b, c, y]), [x, a, y, b, c]);
+        assert_eq!(alternate(alloc::vec![x, y]), [x, y]);
+        assert!(alternate(Vec::new()).is_empty());
     }
 
     #[test]

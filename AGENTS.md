@@ -335,7 +335,7 @@ A WebSocket with `Dialer::with_webrtc` asks for `coqui-web-ladder.1` and `coqui-
 - `Unverified` proves nothing about the peer. Run the identity proof before `into_verified`.
 - `connect` never retries after returning, and an endpoint with pins never falls back, even on a path failure.
 - A pin needs a certificate valid for at most 14 days, ECDSA P-256, in browsers and in `Dialer::pinned` alike. Otherwise it is refused as `Failure::Certificate`.
-- QUIC does not fall back between address families: a host resolving to IPv6 first can time out against an IPv4 listener. Dial by address when in doubt.
+- A WebTransport dialer given a host name tries every address it resolves to, the families taking turns from the resolver's first, a new attempt every 250 ms beside those still opening (RFC 8305); the first to open wins. A failure that is not about the path, such as a rejected certificate, ends the dial at once, whichever address gave it. The name is resolved by the system before the dial's timeout starts, as a WebSocket dialer's is. An address literal is dialled as it is.
 - WebSocket `Text` frames: `Channel::send` refuses bytes that are not UTF-8 before they reach the wire.
 - A data channel's `max_size` is at most 1100 bytes, and less for a smaller `path_mtu`: a fragmented unreliable message is lost when any fragment is. The peer's own limit is not read.
 - An empty datagram sent from Rust on a data channel is refused with `Failure::Protocol`: `str0m` writes nothing for one. One arriving from a browser is delivered.

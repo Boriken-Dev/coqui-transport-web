@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `close` no longer hangs when a channel's failure cannot reach a reader who is behind.
 - A WebSocket dialer refuses `ws://` beyond loopback before connecting, so the refusal is always `Failure::Permission` and the server
   sees no connection. It used to connect first, and an unreachable address gave `Failure::Timeout` instead.
+- A WebTransport dialer given a host name that resolves to both address families reaches a listener on either. It dialled only the
+  first address, so `localhost` resolving to `::1` first timed out against a listener on `127.0.0.1`. It now tries each address, the
+  families taking turns, a new attempt every 250 ms beside those still opening, and takes the first to open; a failure that is not
+  about the path ends the dial at once.
 - A WebSocket `send` after its worker ended answers `Failure::PathLost`. It answered `Failure::NoProgress` when what the worker left
   queued still filled `Limits::queued_bytes`, which read the same as a full queue.
 

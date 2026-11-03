@@ -1133,6 +1133,45 @@ fn a_blocked_webtransport_path_falls_back_to_websocket() {
     server.join().unwrap();
 }
 
+#[test]
+fn a_webtransport_name_resolving_to_both_families_reaches_a_listener_on_either() {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+    let resolved: Vec<SocketAddr> = ("localhost", 1).to_socket_addrs().unwrap().collect();
+    // The listener takes the family the resolver does not put first.
+    let other = if resolved[0].is_ipv6() {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    } else {
+        IpAddr::V6(Ipv6Addr::LOCALHOST)
+    };
+    if !resolved.iter().any(|address| address.ip() == other) {
+        eprintln!("localhost names one family here: {resolved:?}");
+        return;
+    }
+    let id = identity();
+    let listener =
+        webtransport::Listener::bind(SocketAddr::new(other, 0), server_tls(&id)).unwrap();
+    let port = listener.local_addr().port();
+    let server = thread::spawn(move || {
+        let channel = listener.accept(Some(WAIT)).unwrap();
+        echo_once(&channel);
+        echo_once(&channel);
+        channel
+    });
+    let url = Url::parse(&format!("https://localhost:{port}/channel")).unwrap();
+    let started = Instant::now();
+    let client = webtransport::Dialer::pinned(&[pin(&id)])
+        .unwrap()
+        .dial(Kind::WebTransport, &url, WAIT)
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    round_trip(&client);
+    drop(server.join().unwrap());
+}
+
 /// A handshake limit no test waits out.
 fn patient() -> Limits {
     Limits::default().with_handshake(Duration::from_secs(30))
