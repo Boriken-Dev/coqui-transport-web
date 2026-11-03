@@ -3,7 +3,7 @@
 //! A worker thread owns each socket, so the channel can be read and written from different
 //! threads, and sleeps until the socket is ready or a caller wakes it. TLS comes from the caller's
 //! `rustls` configuration: this crate holds no trust roots and decides nothing about identity. A
-//! plain socket is refused beyond loopback.
+//! plain socket beyond loopback is refused unless the caller chooses it.
 
 use alloc::string::ToString;
 use alloc::sync::Arc;
@@ -1088,6 +1088,7 @@ pub struct Dialer {
     limits: Limits,
     frames: Frames,
     datagrams: bool,
+    plain_beyond_loopback: bool,
     #[cfg(feature = "webrtc")]
     webrtc: Option<Settings>,
 }
@@ -1099,6 +1100,7 @@ impl fmt::Debug for Dialer {
             .field("limits", &self.limits)
             .field("frames", &self.frames)
             .field("headers", &self.headers.len())
+            .field("plain_beyond_loopback", &self.plain_beyond_loopback)
             .finish()
     }
 }
@@ -1108,6 +1110,20 @@ impl Dialer {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Lets this dialer open `ws://` beyond loopback: unencrypted and unauthenticated, so anyone on the path reads and changes
+    /// it. A weakening of the default, which [`plain_beyond_loopback`](Self::plain_beyond_loopback) reports.
+    #[must_use]
+    pub const fn with_plain_beyond_loopback(mut self) -> Self {
+        self.plain_beyond_loopback = true;
+        self
+    }
+
+    /// Whether this dialer may open `ws://` beyond loopback, so a host can show that weakening.
+    #[must_use]
+    pub const fn plain_beyond_loopback(&self) -> bool {
+        self.plain_beyond_loopback
     }
 
     /// The TLS configuration `wss://` uses. It decides which certificates are trusted.
@@ -1218,6 +1234,12 @@ impl channel::Dialer for Dialer {
         if let Some(settings) = self.webrtc.filter(|settings| settings.enabled) {
             settings.check()?;
         }
+        if endpoint.scheme() == "ws"
+            && !self.plain_beyond_loopback
+            && !endpoint_is_loopback(endpoint)
+        {
+            return Err(Failure::Permission);
+        }
         let tcp = Self::open_tcp(endpoint, deadline)?;
         #[cfg(feature = "webrtc")]
         let addresses = tcp
@@ -1228,8 +1250,7 @@ impl channel::Dialer for Dialer {
         tcp.set_write_timeout(Some(timeout))
             .map_err(|e| io_failure(&e))?;
         let stream = match endpoint.scheme() {
-            "ws" if endpoint_is_loopback(endpoint) => Stream::Plain(Transport::new(tcp)),
-            "ws" => return Err(Failure::Permission),
+            "ws" => Stream::Plain(Transport::new(tcp)),
             "wss" => {
                 let tls = self.tls.clone().ok_or(Failure::Certificate)?;
                 let host = endpoint.host_str().ok_or(Failure::Protocol)?;
@@ -1309,13 +1330,15 @@ impl fmt::Debug for Listener {
             .field("limits", &self.limits)
             .field("frames", &self.frames)
             .field("origins", &self.origins)
+            .field("plain_beyond_loopback", &self.plain_beyond_loopback())
             .finish()
     }
 }
 
 impl Listener {
     /// Binds `address`. With no TLS configuration only a loopback address is accepted: a plain
-    /// socket on any other is refused, as plain WebSocket is for local development only.
+    /// socket on any other is refused, as plain WebSocket is for local development unless
+    /// [`bind_plain`](Self::bind_plain) chooses otherwise.
     ///
     /// # Errors
     ///
@@ -1324,6 +1347,31 @@ impl Listener {
         if tls.is_none() && !address.ip().is_loopback() {
             return Err(Failure::Permission);
         }
+        Self::open(address, tls)
+    }
+
+    /// Binds `address` with no TLS, loopback or not, such as `0.0.0.0` for a trusted network. Beyond loopback that is
+    /// unencrypted and unauthenticated, so anyone on the path reads and changes it: a weakening of the default, which
+    /// [`plain_beyond_loopback`](Self::plain_beyond_loopback) reports.
+    ///
+    /// # Errors
+    ///
+    /// Why it could not bind.
+    pub fn bind_plain(address: SocketAddr) -> Result<Self, Failure> {
+        Self::open(address, None)
+    }
+
+    /// Whether this listener serves plain WebSocket beyond loopback, so a host can show that weakening.
+    #[must_use]
+    pub fn plain_beyond_loopback(&self) -> bool {
+        self.tls.is_none()
+            && !self
+                .socket
+                .local_addr()
+                .is_ok_and(|address| address.ip().is_loopback())
+    }
+
+    fn open(address: SocketAddr, tls: Option<Arc<ServerConfig>>) -> Result<Self, Failure> {
         let socket = TcpListener::bind(address).map_err(|e| io_failure(&e))?;
         socket.set_nonblocking(true).map_err(|e| io_failure(&e))?;
         Ok(Self {

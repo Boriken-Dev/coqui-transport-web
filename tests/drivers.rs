@@ -333,6 +333,59 @@ fn plain_websocket_from_a_dialer_is_refused_beyond_loopback() {
     }
 }
 
+/// An address of this machine beyond loopback, if it has one with a route.
+fn beyond_loopback() -> Option<std::net::IpAddr> {
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    probe.connect("192.0.2.1:9").ok()?;
+    let address = probe.local_addr().ok()?.ip();
+    (!address.is_loopback() && !address.is_unspecified()).then_some(address)
+}
+
+#[test]
+fn a_plain_websocket_listener_beyond_loopback_is_a_choice_it_reports() {
+    let anywhere: SocketAddr = "0.0.0.0:0".parse().unwrap();
+    let listener = websocket::Listener::bind_plain(anywhere).unwrap();
+    assert!(listener.plain_beyond_loopback());
+    assert!(format!("{listener:?}").contains("plain_beyond_loopback: true"));
+    for local in [
+        websocket::Listener::bind_plain(loopback()).unwrap(),
+        websocket::Listener::bind(loopback(), None).unwrap(),
+        websocket::Listener::bind(anywhere, Some(server_tls(&identity()))).unwrap(),
+    ] {
+        assert!(!local.plain_beyond_loopback(), "{local:?}");
+    }
+}
+
+#[test]
+fn a_dialer_opens_plain_websocket_beyond_loopback_only_when_told_to() {
+    let refused = websocket::Dialer::new().dial(
+        Kind::WebSocket,
+        &Url::parse("ws://192.0.2.1:9/").unwrap(),
+        Duration::from_secs(5),
+    );
+    assert_eq!(refused.unwrap_err(), Failure::Permission);
+    assert!(!websocket::Dialer::new().plain_beyond_loopback());
+    let Some(address) = beyond_loopback() else {
+        eprintln!("no address beyond loopback with a route: the dial itself is not tried");
+        return;
+    };
+    let listener = websocket::Listener::bind_plain(SocketAddr::new(address, 0)).unwrap();
+    let url = plain_ws_url(listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let channel = listener.accept(Some(WAIT)).unwrap();
+        echo_once(&channel);
+        echo_once(&channel);
+    });
+    let refused = websocket::Dialer::new().dial(Kind::WebSocket, &url, WAIT);
+    assert_eq!(refused.unwrap_err(), Failure::Permission);
+    let mut dialer = websocket::Dialer::new().with_plain_beyond_loopback();
+    assert!(dialer.plain_beyond_loopback());
+    assert!(format!("{dialer:?}").contains("plain_beyond_loopback: true"));
+    let client = dialer.dial(Kind::WebSocket, &url, WAIT).unwrap();
+    round_trip(&client);
+    server.join().unwrap();
+}
+
 #[test]
 fn a_peer_dribbling_its_handshake_gets_no_longer_than_the_total_limit_and_holds_up_nobody() {
     use std::io::Write;
