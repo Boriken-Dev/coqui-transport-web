@@ -103,7 +103,9 @@ pub struct Channel {
     send: Mutex<Option<SendStream>>,
     reader: AbortHandle,
     handle: Handle,
+    // The largest message read; the reader applies it.
     max_message: Arc<AtomicUsize>,
+    max_send: AtomicUsize,
     send_limit: Duration,
     pending_datagrams: usize,
     datagrams: OnceLock<QuicDatagrams>,
@@ -120,6 +122,7 @@ impl fmt::Debug for Channel {
         f.debug_struct("Channel")
             .field("remote", &self.remote())
             .field("max_message", &self.max_message.load(Ordering::SeqCst))
+            .field("max_send", &self.max_send.load(Ordering::SeqCst))
             .finish_non_exhaustive()
     }
 }
@@ -177,6 +180,7 @@ impl Channel {
             reader,
             handle,
             max_message,
+            max_send: AtomicUsize::new(limits.max_message),
             send_limit: limits.send,
             pending_datagrams: limits.pending_datagrams,
             datagrams: OnceLock::new(),
@@ -309,7 +313,7 @@ async fn deliver(inbox: &SyncSender<Received>, mut item: Received) -> bool {
 
 impl channel::Channel for Channel {
     fn send(&self, message: &[u8]) -> Result<(), Failure> {
-        let framed = frame::encode(message, self.max_message.load(Ordering::SeqCst))
+        let framed = frame::encode(message, self.max_send.load(Ordering::SeqCst))
             .map_err(|_| Failure::Protocol)?;
         let mut guard = self.send.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(stream) = guard.as_mut() else {
@@ -335,7 +339,16 @@ impl channel::Channel for Channel {
     }
 
     fn set_max_message(&self, bytes: usize) {
+        self.set_max_receive(bytes);
+        self.set_max_send(bytes);
+    }
+
+    fn set_max_receive(&self, bytes: usize) {
         self.max_message.store(bytes, Ordering::SeqCst);
+    }
+
+    fn set_max_send(&self, bytes: usize) {
+        self.max_send.store(bytes, Ordering::SeqCst);
     }
 
     fn datagrams(&self) -> Option<&dyn Datagrams> {

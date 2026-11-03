@@ -33,6 +33,8 @@ pub trait Channel: Send + Sync {
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure>;
     fn close(&self);
     fn set_max_message(&self, _bytes: usize) {}   // both ways, from the next read; a peer's answer to anything sent after this call meets it; default ignores it
+    fn set_max_receive(&self, _bytes: usize) {}   // what it reads only, as above
+    fn set_max_send(&self, _bytes: usize) {}      // what it sends only: a side reading under a small bound can still answer up to the peer's
     fn datagrams(&self) -> Option<&dyn Datagrams> { None }   // Some on WebTransport; a WebSocket, or a channel wrapping another, has none
     fn peer_certificates(&self) -> Option<&[Vec<u8>]> { None }   // DER, the peer's own first; Some on a TLS WebSocket and on WebTransport
 }

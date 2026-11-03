@@ -46,6 +46,14 @@ pub trait Channel: Send + Sync {
     /// to a small limit and raise it once the peer is proven. A channel with no limit of its own ignores it.
     fn set_max_message(&self, _bytes: usize) {}
 
+    /// Changes the largest message this channel reads from now on, leaving what it sends as it was. A peer's answer to anything
+    /// sent after this call meets it. A channel with no limit of its own ignores it.
+    fn set_max_receive(&self, _bytes: usize) {}
+
+    /// Changes the largest message this channel sends from now on, leaving what it reads as it was, so a side that reads under a
+    /// small limit can still answer up to the peer's. A channel with no limit of its own ignores it.
+    fn set_max_send(&self, _bytes: usize) {}
+
     /// This channel's raw datagrams, or `None` if it has none, as a WebSocket has none unless both ends agreed. There is deliberately
     /// no datagram call on the channel itself, so a caller finds out here. [`Datagrams::delivery`] says what they then are.
     fn datagrams(&self) -> Option<&dyn Datagrams> {
@@ -125,6 +133,14 @@ impl Channel for alloc::boxed::Box<dyn Channel> {
 
     fn set_max_message(&self, bytes: usize) {
         (**self).set_max_message(bytes);
+    }
+
+    fn set_max_receive(&self, bytes: usize) {
+        (**self).set_max_receive(bytes);
+    }
+
+    fn set_max_send(&self, bytes: usize) {
+        (**self).set_max_send(bytes);
     }
 
     fn datagrams(&self) -> Option<&dyn Datagrams> {

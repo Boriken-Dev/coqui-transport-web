@@ -319,7 +319,9 @@ pub struct Channel {
     behind: Arc<AtomicBool>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     frames: Frames,
+    // The largest message read; the worker applies it.
     max_message: Arc<AtomicUsize>,
+    max_send: AtomicUsize,
     datagrams: Option<WsDatagrams>,
     peer_certificates: Option<Vec<Vec<u8>>>,
 }
@@ -444,6 +446,7 @@ impl fmt::Debug for Channel {
         f.debug_struct("Channel")
             .field("frames", &self.frames)
             .field("max_message", &self.max_message.load(Ordering::SeqCst))
+            .field("max_send", &self.max_send.load(Ordering::SeqCst))
             .finish_non_exhaustive()
     }
 }
@@ -563,6 +566,7 @@ impl Channel {
             worker: Mutex::new(Some(worker)),
             frames,
             max_message,
+            max_send: AtomicUsize::new(limits.max_message),
             datagrams,
             peer_certificates,
         })
@@ -571,7 +575,7 @@ impl Channel {
 
 impl channel::Channel for Channel {
     fn send(&self, message: &[u8]) -> Result<(), Failure> {
-        if message.is_empty() || message.len() > self.max_message.load(Ordering::SeqCst) {
+        if message.is_empty() || message.len() > self.max_send.load(Ordering::SeqCst) {
             return Err(Failure::Protocol);
         }
         if self.frames == Frames::Text && core::str::from_utf8(message).is_err() {
@@ -610,7 +614,16 @@ impl channel::Channel for Channel {
     }
 
     fn set_max_message(&self, bytes: usize) {
+        self.set_max_receive(bytes);
+        self.set_max_send(bytes);
+    }
+
+    fn set_max_receive(&self, bytes: usize) {
         self.max_message.store(bytes, Ordering::SeqCst);
+    }
+
+    fn set_max_send(&self, bytes: usize) {
+        self.max_send.store(bytes, Ordering::SeqCst);
     }
 
     fn datagrams(&self) -> Option<&dyn Datagrams> {

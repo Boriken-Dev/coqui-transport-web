@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   when the peer presented none.
 - `websocket::Pending::peer_addr` and `webtransport::Pending::peer_addr`: the source address `Listener::next` admitted, which on a
   `webrtc::Port` is the client's rather than its relay's.
+- `Channel::set_max_receive` and `Channel::set_max_send` bound what a channel reads and what it sends apart, so a side reading under
+  a small limit can still answer up to its peer's. `set_max_message` still sets both. The defaults ignore them, as it does.
 - Plain WebSocket beyond loopback by a deliberate choice: `websocket::Listener::bind_plain`, which binds any address with no TLS, and
   `websocket::Dialer::with_plain_beyond_loopback`. Each reports the choice in `plain_beyond_loopback()` and in its `Debug`.
   `Listener::bind` with no TLS, a dialer without the choice and `Endpoints` still refuse it.

@@ -13,7 +13,7 @@ proves nothing about who the peer is: identity is a separate step, on the channe
 
 ## Features
 
-- A `Channel` of whole, ordered messages, readable and writable from different threads.
+- A `Channel` of whole, ordered messages, readable and writable from different threads, with its own bound on each direction.
 - `connect`: WebTransport first, WebSocket when the path fails or the server does not offer it. A certificate, proof or permission failure never falls back, and a
   pinned endpoint never downgrades.
 - Validated `Endpoints`: explicit URLs, one host, no credentials or query, plain WebSocket only on loopback by opt-in.
