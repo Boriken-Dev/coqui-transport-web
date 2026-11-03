@@ -319,11 +319,15 @@ mod tests {
 
     /// A port with room for two relays, and a socket standing in for the QUIC listener.
     fn port() -> (Port, UdpSocket) {
+        port_for(2)
+    }
+
+    fn port_for(relays: usize) -> (Port, UdpSocket) {
         let quic = UdpSocket::bind("127.0.0.1:0").unwrap();
         quic.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let port = Port::bind(
             "127.0.0.1:0".parse().unwrap(),
-            Settings::default().with_max_relays(2),
+            Settings::default().with_max_relays(relays),
         )
         .unwrap();
         port.relay_to(quic.local_addr().unwrap());
@@ -405,7 +409,7 @@ mod tests {
 
     #[test]
     fn only_a_client_first_packet_can_take_the_last_of_the_room() {
-        let (port, quic) = port();
+        let (port, quic) = port_for(4);
         let (one, stray) = (client(), client());
         // With plenty of room a short header gets a relay, as a client whose address changed needs.
         stray.send_to(&[0x40; 64], port.local_addr()).unwrap();
@@ -421,6 +425,9 @@ mod tests {
         late.send_to(&[0xc0; 1199], port.local_addr()).unwrap();
         assert!(nothing_arrives(&quic));
         assert_eq!(port.relays(), 2);
+        // What a client sends first still gets in, while there is room.
+        first_packet(&late, &port, &quic);
+        assert_eq!(port.relays(), 3);
     }
 
     fn worker_young() -> Duration {

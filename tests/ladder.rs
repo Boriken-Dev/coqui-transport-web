@@ -706,15 +706,24 @@ fn a_lossy_path_loses_datagrams_and_holds_nothing_up() {
 
     forwarder.drop_each.store(4, Ordering::SeqCst);
     const SENT: u32 = 300;
-    for number in 0..SENT {
-        near_datagrams.send(&number.to_be_bytes()).unwrap();
-        thread::sleep(Duration::from_millis(2));
-    }
-    let mut got = Vec::new();
-    while let Ok(Some(datagram)) = far_datagrams.receive(Some(Duration::from_secs(1))) {
-        got.push(u32::from_be_bytes(datagram.try_into().unwrap()));
-    }
+    // Read while sending: a reader behind would lose some here too, which is not what this is about.
+    let got = thread::scope(|scope| {
+        let reading = scope.spawn(|| {
+            let mut got = Vec::new();
+            while let Ok(Some(datagram)) = far_datagrams.receive(Some(Duration::from_secs(2))) {
+                got.push(u32::from_be_bytes(datagram.try_into().unwrap()));
+            }
+            got
+        });
+        for number in 0..SENT {
+            near_datagrams.send(&number.to_be_bytes()).unwrap();
+            thread::sleep(Duration::from_millis(2));
+        }
+        reading.join().unwrap()
+    });
     forwarder.drop_each.store(0, Ordering::SeqCst);
+    assert_eq!(far_datagrams.dropped(), 0);
+    assert_eq!(near_datagrams.dropped(), 0);
     assert!(
         !got.is_empty() && got.len() < SENT as usize,
         "{} of {SENT} with one packet in four dropped",
