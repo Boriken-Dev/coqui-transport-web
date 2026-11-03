@@ -176,6 +176,8 @@ pub(super) struct Worker {
     by_ufrag: HashMap<String, u64>,
     by_source: HashMap<SocketAddr, u64>,
     relays_per_address: HashMap<IpAddr, usize>,
+    // Sources whose connection ended, until when what they still send starts no relay unless it is a client's first packet.
+    ended: HashMap<SocketAddr, Instant>,
     buffer: Vec<u8>,
     // Sockets that had more to read when a turn's budget ran out.
     unfinished: Vec<Token>,
@@ -223,6 +225,7 @@ impl Worker {
             by_ufrag: HashMap::new(),
             by_source: HashMap::new(),
             relays_per_address: HashMap::new(),
+            ended: HashMap::new(),
             buffer: vec![0; BUFFER],
             unfinished: Vec::new(),
             open_sessions,
@@ -316,6 +319,17 @@ impl Worker {
                         .iter()
                         .find_map(|(token, held)| (held.address == relay).then_some(*token));
                     if let Some(token) = token {
+                        if let Some(source) =
+                            self.relay_by_token.get(&token).map(|held| held.source)
+                        {
+                            let now = Instant::now();
+                            if self.ended.len() >= self.settings.max_relays {
+                                self.ended.retain(|_, until| *until > now);
+                            }
+                            if self.ended.len() < self.settings.max_relays {
+                                self.ended.insert(source, now + UNPROVEN_IDLE);
+                            }
+                        }
                         self.remove_relay(token);
                     }
                 }
@@ -562,7 +576,7 @@ impl Worker {
         let now = Instant::now();
         let token = match self.relay_by_source.get(&source) {
             Some(token) => *token,
-            None if !self.may_start_relay(count) => return,
+            None if !self.may_start_relay(source, count, now) => return,
             None => match self.new_relay(source, quic, now) {
                 Some(token) => token,
                 None => return,
@@ -576,9 +590,11 @@ impl Worker {
 
     /// A client's first packet is a long header of [`LEAST_INITIAL`]. Anything else from a new source is a client whose address
     /// changed mid-connection, which is let in only while there is plenty of room.
-    fn may_start_relay(&self, count: usize) -> bool {
+    /// A connection that has ended still sends a packet or two, which must not look like a client that moved.
+    fn may_start_relay(&self, source: SocketAddr, count: usize, now: Instant) -> bool {
         (self.buffer[0] >= 192 && count >= LEAST_INITIAL)
-            || self.relay_by_token.len() < self.settings.max_relays / 2
+            || (self.relay_by_token.len() < self.settings.max_relays / 2
+                && self.ended.get(&source).is_none_or(|until| *until <= now))
     }
 
     /// A relay's address is a loopback port the system hands out, so one can come back for another source. A Retry token names the
@@ -724,6 +740,7 @@ impl Worker {
             self.remove_relay(token);
         }
         self.next_sweep = next;
+        self.ended.retain(|_, until| *until > now);
         if self.unproven.len() > self.relay_by_token.len().saturating_mul(2) + BUDGET {
             let relays = &self.relay_by_token;
             self.unproven

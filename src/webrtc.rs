@@ -484,6 +484,30 @@ mod tests {
     }
 
     #[test]
+    fn what_a_closed_connection_still_sends_starts_no_relay() {
+        let (port, quic) = port_for(4);
+        let one = client();
+        let relay = first_packet(&one, &port, &quic);
+        port.prove(relay);
+        port.release(relay);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while holds(&port, &one) {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The connection's last packets, after its end: a short header, which there is room for.
+        one.send_to(&[0x40; 64], port.local_addr()).unwrap();
+        assert!(
+            nothing_arrives(&quic),
+            "a closed connection's straggler made a relay"
+        );
+        assert!(!holds(&port, &one));
+        // A new connection from the same source starts as any other.
+        first_packet(&one, &port, &quic);
+        assert!(holds(&port, &one));
+    }
+
+    #[test]
     fn a_source_cannot_keep_its_relay_alive_by_sending() {
         let (port, quic) = port_with(
             Settings::default()
