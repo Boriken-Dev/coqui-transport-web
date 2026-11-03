@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::mem;
 use core::net::SocketAddr;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 use core::time::Duration;
 use std::io::{self, IoSlice, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -26,7 +26,8 @@ use rustls::{ClientConfig, ClientConnection, ServerConfig, ServerConnection, Str
 use tungstenite::client::IntoClientRequest;
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::http::{HeaderName, HeaderValue, StatusCode};
-use tungstenite::protocol::WebSocketConfig;
+use tungstenite::protocol::frame::coding::CloseCode;
+use tungstenite::protocol::{CloseFrame, WebSocketConfig};
 use tungstenite::{HandshakeError, Message, WebSocket};
 use url::Url;
 
@@ -37,7 +38,7 @@ use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, Received};
 #[cfg(feature = "webrtc")]
 use crate::webrtc::{Climb, Plan, Port, Settings};
 
-/// How often a listener looks for a connection, and a worker for room in a full inbox if a reader taking one has not said.
+/// How often a listener looks for a connection, and an ending worker for room in a full inbox to report in.
 const POLL: Duration = Duration::from_millis(10);
 /// What wakes a worker: its socket, or a caller with something for it.
 const SOCKET: Token = Token(0);
@@ -335,9 +336,23 @@ struct Room {
     freed: Condvar,
     // What it left queued still counts against the budget, so this is how a sender learns the worker is gone.
     ended: AtomicBool,
+    // Why, when the wire or the peer said so; set before the worker lets go of the queue.
+    failure: Mutex<Option<Failure>>,
 }
 
 impl Room {
+    fn end_with(&self, failure: Failure) {
+        *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = Some(failure);
+    }
+
+    /// What a sender meets once the worker has ended.
+    fn why(&self) -> Failure {
+        self.failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or(Failure::PathLost)
+    }
+
     /// Called after room was made: a waiter counts itself before it looks, under the lock this takes, so none misses it.
     fn made(&self) {
         if self.waiting.load(Ordering::SeqCst) > 0 {
@@ -480,6 +495,9 @@ impl WorkerDatagrams {
 
 /// As many sent in one turn of the worker, so they cannot keep it from a channel's messages.
 const DATAGRAMS_PER_TURN: usize = 16;
+/// Message bytes taken from the queue in one turn, past which it reads before taking more: a peer's close or ping is heard
+/// within one turn even while large messages keep coming. One message larger than this still goes whole.
+const BYTES_PER_TURN: usize = 256 * 1024;
 
 impl fmt::Debug for Channel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -595,6 +613,7 @@ impl Channel {
                     pinged: false,
                     unsent: None,
                     watching_writes: false,
+                    reads: Reads::Frames,
                 }
                 .run();
                 // The queue is gone with the worker: a sender still waiting finds that out now.
@@ -638,7 +657,7 @@ impl Channel {
             return Err(Failure::Cancelled);
         };
         if self.room.ended.load(Ordering::SeqCst) {
-            return Err(Failure::PathLost);
+            return Err(self.room.why());
         }
         if self
             .queued
@@ -653,7 +672,7 @@ impl Channel {
             self.queued.fetch_sub(message.len(), Ordering::SeqCst);
             return match error {
                 TrySendError::Full(_) => Ok(false),
-                TrySendError::Disconnected(_) => Err(Failure::PathLost),
+                TrySendError::Disconnected(_) => Err(self.room.why()),
             };
         }
         let _ = self.waker.wake();
@@ -714,6 +733,8 @@ impl channel::Channel for Channel {
 
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
         let next = self.inbox.receive(timeout);
+        // Pairs with the worker's fence in `deliver`: either it sees the room this take made, or this sees it behind.
+        fence(Ordering::SeqCst);
         if self.behind.swap(false, Ordering::SeqCst) {
             let _ = self.waker.wake();
         }
@@ -823,16 +844,46 @@ fn would_block(error: &tungstenite::Error) -> bool {
     matches!(error, tungstenite::Error::Io(error) if error.kind() == io::ErrorKind::WouldBlock)
 }
 
+/// The close code that tells the peer why its messages ended the channel.
+fn close_code(error: &tungstenite::Error) -> CloseCode {
+    match error {
+        tungstenite::Error::Capacity(_) => CloseCode::Size,
+        tungstenite::Error::Utf8(_) => CloseCode::Invalid,
+        tungstenite::Error::Protocol(_) => CloseCode::Protocol,
+        _ => CloseCode::Error,
+    }
+}
+
+/// A peer closing with one of these says something this side sent broke its wire format or its bounds.
+fn refused(frame: Option<&CloseFrame>) -> bool {
+    matches!(
+        frame.map(|frame| frame.code),
+        Some(CloseCode::Protocol | CloseCode::Unsupported | CloseCode::Invalid | CloseCode::Size)
+    )
+}
+
+/// What a worker may still read from its socket.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Reads {
+    Frames,
+    /// tungstenite's reader failed and may not be called again (a refused frame header is consumed and its body is not),
+    /// but the stream under it is sound: bytes are read and discarded, so closing leaves none unread to reset the connection.
+    Bytes,
+    Nothing,
+}
+
 /// How a worker stops.
 enum Stop {
     /// Reports this and drops the socket.
     Failed(Failure),
-    /// Reports this, then closes in order.
-    FailedClosing(Failure),
+    /// Reports this, then closes in order with this code.
+    FailedClosing(Failure, CloseCode),
     /// Nobody will send any more: closes in order.
     Closing,
     /// The peer closed, and what is left to send ends with the reply.
     Replying,
+    /// The peer closed refusing what this side sent: reports this, then replies.
+    Refused(Failure),
     /// The socket is finished with.
     Gone,
 }
@@ -864,6 +915,7 @@ struct Worker {
     // When the socket stopped taking what there is to send.
     unsent: Option<Instant>,
     watching_writes: bool,
+    reads: Reads,
 }
 
 impl Worker {
@@ -897,12 +949,18 @@ impl Worker {
         }
         match stop {
             Stop::Failed(failure) => self.report(failure),
-            Stop::FailedClosing(failure) => {
+            Stop::FailedClosing(failure, code) => {
+                self.room.end_with(failure);
                 self.report(failure);
-                self.finish();
+                self.finish(Some(code));
             }
-            Stop::Closing => self.finish(),
+            Stop::Closing => self.finish(None),
             Stop::Replying => {
+                let _ = self.drained();
+            }
+            Stop::Refused(failure) => {
+                self.room.end_with(failure);
+                self.report(failure);
                 let _ = self.drained();
             }
             Stop::Gone => {}
@@ -911,17 +969,17 @@ impl Worker {
 
     fn turn(&mut self) -> Result<(), Stop> {
         let more = self.write_queued()?;
-        self.keep_alive()?;
         // Writing stops when the socket is full, and if that has passed, nothing will say so.
         let was_unsent = self.unsent.is_some();
         let behind = self.deliver()?;
+        self.keep_alive(behind)?;
         let read = !behind && self.read_one()?;
         let retry = self.flush()?;
         let room = was_unsent && self.unsent.is_none();
         if more || read || retry || room || (!behind && self.socket.get_ref().holds_unread()) {
             return Ok(());
         }
-        self.wait(behind)
+        self.wait()
     }
 
     fn write(&mut self, message: Message) -> Result<(), Stop> {
@@ -936,7 +994,7 @@ impl Worker {
     }
 
     /// Takes nothing while the socket is full, so what waits stays counted against the caller's bounds. Takes a bounded
-    /// number otherwise, so a busy sender cannot keep this from reading, and answers whether more may be waiting: nothing
+    /// number and size otherwise, so a busy sender cannot keep this from reading, and answers whether more may be waiting: nothing
     /// will wake this for what is already queued. Datagrams go first: a few at most, and a message sent after one follows it.
     fn write_queued(&mut self) -> Result<bool, Stop> {
         #[cfg(feature = "webrtc")]
@@ -964,9 +1022,13 @@ impl Worker {
                 self.write(Message::binary(frame::ws_datagram(&datagram)))?;
             }
         }
+        let mut taken = 0;
         for _ in 0..OUTGOING {
             if self.unsent.is_some() {
                 return Ok(false);
+            }
+            if taken >= BYTES_PER_TURN {
+                return Ok(true);
             }
             let message = match self.outgoing.try_recv() {
                 Ok(message) => message,
@@ -975,6 +1037,7 @@ impl Worker {
             };
             self.queued.fetch_sub(message.len(), Ordering::SeqCst);
             self.room.made();
+            taken += message.len();
             let framed = match self.frames {
                 Frames::Text => match core::str::from_utf8(&message) {
                     Ok(text) => Message::text(text.to_string()),
@@ -988,7 +1051,16 @@ impl Worker {
         Ok(true)
     }
 
-    fn keep_alive(&mut self) -> Result<(), Stop> {
+    fn keep_alive(&mut self, behind: bool) -> Result<(), Stop> {
+        // Not reading, it cannot hear the peer, so that silence says nothing; a ping each idle period lets the peer hear it.
+        if behind {
+            if self.heard.elapsed() >= self.limits.idle {
+                self.heard = Instant::now();
+                self.pinged = false;
+                let _ = self.socket.write(Message::Ping(Vec::new().into()));
+            }
+            return Ok(());
+        }
         let silent = self.heard.elapsed();
         if silent >= self.limits.idle.saturating_mul(2) {
             return Err(Stop::Failed(Failure::NoProgress));
@@ -1005,11 +1077,18 @@ impl Worker {
         let Some(held) = self.waiting.take() else {
             return Ok(false);
         };
+        let held = match self.inbox.try_send(held) {
+            Ok(()) => return Ok(false),
+            Err(TrySendError::Full(held)) => held,
+            Err(TrySendError::Disconnected(_)) => return Err(Stop::Closing),
+        };
+        // Said before looking again, so a reader taking one from here on wakes this worker, which can then sleep until it does.
+        self.behind.store(true, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
         match self.inbox.try_send(held) {
             Ok(()) => Ok(false),
             Err(TrySendError::Full(held)) => {
                 self.waiting = Some(held);
-                self.behind.store(true, Ordering::SeqCst);
                 Ok(true)
             }
             Err(TrySendError::Disconnected(_)) => Err(Stop::Closing),
@@ -1032,7 +1111,13 @@ impl Worker {
             Ok(message) => message,
             Err(tungstenite::Error::ConnectionClosed) => return Err(Stop::Replying),
             Err(error) if would_block(&error) => return Ok(false),
-            Err(error) => return Err(Stop::FailedClosing(ended(&error))),
+            Err(error) => {
+                self.reads = match error {
+                    tungstenite::Error::Io(_) | tungstenite::Error::Tls(_) => Reads::Nothing,
+                    _ => Reads::Bytes,
+                };
+                return Err(Stop::FailedClosing(ended(&error), close_code(&error)));
+            }
         };
         self.heard = Instant::now();
         self.pinged = false;
@@ -1056,12 +1141,20 @@ impl Worker {
                 Ok(WsPart::Message(message)) if self.frames == Frames::Binary => {
                     self.waiting = Some(Ok(message.to_vec()));
                 }
-                _ => return Err(Stop::FailedClosing(Failure::Protocol)),
+                _ => return Err(Stop::FailedClosing(Failure::Protocol, CloseCode::Protocol)),
             },
             Message::Binary(body) if self.frames == Frames::Binary => {
                 self.waiting = Some(Ok(body.to_vec()));
             }
-            Message::Binary(_) => return Err(Stop::FailedClosing(Failure::Protocol)),
+            Message::Binary(_) => {
+                return Err(Stop::FailedClosing(
+                    Failure::Protocol,
+                    CloseCode::Unsupported,
+                ));
+            }
+            Message::Close(frame) if refused(frame.as_ref()) => {
+                return Err(Stop::Refused(Failure::Protocol));
+            }
             // An orderly close: the reader sees the end when this sender drops.
             Message::Close(_) => return Err(Stop::Replying),
             _ => {}
@@ -1095,8 +1188,9 @@ impl Worker {
         Some(self.limits.send.saturating_sub(since.elapsed()))
     }
 
-    /// Sleeps until the socket or a caller has something, or until the next thing that is due.
-    fn wait(&mut self, behind: bool) -> Result<(), Stop> {
+    /// Sleeps until the socket or a caller has something, or until the next thing that is due. While the reader is behind,
+    /// that reader taking a message is what wakes it.
+    fn wait(&mut self) -> Result<(), Stop> {
         let silence = if self.pinged {
             self.limits.idle.saturating_mul(2)
         } else {
@@ -1105,9 +1199,6 @@ impl Worker {
         let mut limit = silence.saturating_sub(self.heard.elapsed());
         if let Some(left) = self.send_left() {
             limit = limit.min(left);
-        }
-        if behind {
-            limit = limit.min(POLL);
         }
         self.sleep(Some(limit))
             .map_err(|_| Stop::Failed(Failure::PathLost))
@@ -1168,26 +1259,41 @@ impl Worker {
     }
 
     /// Starts the closing handshake and leaves it a moment to finish, then the socket drops anyway.
-    fn finish(&mut self) {
+    fn finish(&mut self, code: Option<CloseCode>) {
         // The close frame is queued whatever this returns, and `drained` sends it.
-        let _ = self.socket.close(None);
+        let _ = self.socket.close(code.map(|code| CloseFrame {
+            code,
+            reason: "".into(),
+        }));
         if !self.drained() {
             return;
         }
         let until = Instant::now() + Duration::from_millis(500);
+        let mut discarded = Vec::new();
         loop {
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return;
             }
-            match self.socket.read() {
-                Ok(_) => {}
-                Err(error) if would_block(&error) => {
-                    if self.sleep(Some(left)).is_err() {
-                        return;
+            let waiting = match self.reads {
+                Reads::Frames => match self.socket.read() {
+                    Ok(_) => false,
+                    Err(error) if would_block(&error) => true,
+                    Err(_) => return,
+                },
+                Reads::Bytes => {
+                    discarded.resize(64 * 1024, 0);
+                    match self.socket.get_mut().read(&mut discarded) {
+                        Ok(0) => return,
+                        Ok(_) => false,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => true,
+                        Err(_) => return,
                     }
                 }
-                Err(_) => return,
+                Reads::Nothing => return,
+            };
+            if waiting && self.sleep(Some(left)).is_err() {
+                return;
             }
         }
     }

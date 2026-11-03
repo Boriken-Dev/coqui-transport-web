@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   about the path ends the dial at once.
 - A WebSocket `send` after its worker ended answers `Failure::PathLost`. It answered `Failure::NoProgress` when what the worker left
   queued still filled `Limits::queued_bytes`, which read the same as a full queue.
+- A WebSocket peer sending a message over the reader's bound no longer kills the worker in a debug build (tungstenite's
+  `assertion failed: self.in_buffer.capacity() > len`), and in a release build no longer reads its own full buffer as the peer
+  resetting. Either way the socket closed with bytes unread, and the reset made the peer's sends `Failure::PathLost`. The worker
+  read through tungstenite again after a read had failed, while closing. It now never does: it closes with code 1009 (1002, 1003
+  or 1007 for a broken wire), discards what the peer still sends until the peer closes, and the peer reports `Failure::Protocol`
+  to its reader and to its senders.
+- A WebSocket whose reader stops for longer than twice `Limits::idle` is no longer taken for gone by either end. The end not
+  reading counted the silence it could not hear and ended with `Failure::NoProgress`; it now pings the peer every `idle` instead.
+  Its worker sleeps until the reader takes a message rather than waking every 10 ms.
+- A busy WebSocket sender reads between every 256 KiB it writes, rather than after as many as 256 queued messages, so a peer's
+  close or ping is heard while large messages keep coming.
 
 ### Added
 

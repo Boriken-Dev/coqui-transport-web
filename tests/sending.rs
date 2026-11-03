@@ -197,6 +197,92 @@ fn a_websocket_send_waiting_for_room_ends_with_the_channel() {
     }
 }
 
+/// A server that read a small hello, then raises its bound, takes one 1 MiB message and stops reading: the client's sends
+/// fill every buffer between them and then wait, and neither end sees the other as gone.
+#[test]
+fn a_websocket_reader_that_stops_holds_its_sender_back() {
+    let (client, server) = websocket_pair(Limits::default(), Limits::default());
+    server.set_max_receive(1024);
+    client.send(b"hello").unwrap();
+    assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), b"hello");
+    // Raised before the client sends: a bound reaches only what is read after it.
+    server.set_max_receive(64 << 20);
+    client.set_max_send(64 << 20);
+    let message = vec![3; 1 << 20];
+    client
+        .send_timeout(&message, Some(Duration::from_millis(700)))
+        .unwrap();
+    let (opened, taken) = mpsc::channel();
+    let (done, finished) = mpsc::channel::<()>();
+    let holding = thread::spawn(move || {
+        let first = server.receive(Some(WAIT));
+        opened.send(()).unwrap();
+        // Reads no more until the sender has given up.
+        let _ = finished.recv();
+        let rest = server.receive(Some(Duration::ZERO));
+        (first, rest)
+    });
+    taken.recv_timeout(Duration::from_secs(60)).unwrap();
+    let started = Instant::now();
+    let mut ended = None;
+    for _ in 0..1000 {
+        if let Err(failure) = client.send_timeout(&message, Some(Duration::from_millis(700))) {
+            ended = Some(failure);
+            break;
+        }
+    }
+    assert_eq!(ended, Some(Failure::Timeout));
+    assert!(started.elapsed() < Duration::from_secs(60));
+    done.send(()).unwrap();
+    let (first, rest) = holding.join().unwrap();
+    assert_eq!(first.map(|m| m.map(|m| m.len())), Ok(Some(1 << 20)));
+    // What waits for the reader is the next message, not an end.
+    assert_eq!(rest.map(|m| m.map(|m| m.len())), Ok(Some(1 << 20)));
+}
+
+/// A reader that stops for longer than twice the idle limit leaves both ends open: the end not reading still pings, and its
+/// own silence counts for nothing while it cannot listen.
+#[test]
+fn a_websocket_reader_stalled_past_the_idle_limit_is_not_taken_for_gone() {
+    let idle = Duration::from_millis(200);
+    let (client, server) = websocket_pair(
+        Limits::default().with_idle(idle),
+        Limits::default().with_idle(idle).with_pending(1),
+    );
+    for n in 0..4 {
+        client.send(&[n; 16]).unwrap();
+    }
+    thread::sleep(idle * 6);
+    for n in 0..4 {
+        assert_eq!(server.receive(Some(WAIT)), Ok(Some(vec![n; 16])));
+    }
+    client.send(b"after").unwrap();
+    assert_eq!(server.receive(Some(WAIT)), Ok(Some(b"after".to_vec())));
+    server.send(b"back").unwrap();
+    assert_eq!(client.receive(Some(WAIT)), Ok(Some(b"back".to_vec())));
+}
+
+/// A message over the bound its reader set ends the channel at both ends as refused, while the sender still has more on
+/// the way: neither end reads the other as gone.
+#[test]
+fn a_websocket_message_over_the_readers_bound_is_refused_at_both_ends() {
+    let (client, server) = websocket_pair(Limits::default(), Limits::default());
+    server.set_max_receive(1024);
+    client.send(b"hello").unwrap();
+    assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), b"hello");
+    let message = vec![3; 1 << 20];
+    let until = Instant::now() + WAIT;
+    let refused = loop {
+        assert!(Instant::now() < until, "the client was never refused");
+        if let Err(failure) = client.send_timeout(&message, Some(Duration::from_millis(700))) {
+            break failure;
+        }
+    };
+    assert_eq!(refused, Failure::Protocol);
+    assert_eq!(server.receive(Some(WAIT)), Err(Failure::Protocol));
+    assert_eq!(client.receive(Some(WAIT)), Err(Failure::Protocol));
+}
+
 #[test]
 fn a_webtransport_send_waits_as_long_as_its_caller_says() {
     let (client, _server) = webtransport_pair(
