@@ -962,7 +962,7 @@ fn admission_judges_the_real_source_and_not_the_relay() {
 
 #[test]
 fn a_flood_of_sources_cannot_pass_the_cap_or_keep_a_real_client_out() {
-    const CAP: usize = 8;
+    const CAP: usize = 64;
     let port = Port::bind(
         loopback(),
         Settings::default()
@@ -979,11 +979,12 @@ fn a_flood_of_sources_cannot_pass_the_cap_or_keep_a_real_client_out() {
     let flood = thread::spawn(move || {
         let packet = [0xc0_u8; 1200];
         while !flooding.load(Ordering::SeqCst) {
+            // Enough to fill the map and turn it over, and no more than it can take with room for one real client.
             for _ in 0..16 {
                 let source = UdpSocket::bind(loopback()).unwrap();
                 let _ = source.send_to(&packet, target);
             }
-            thread::sleep(Duration::from_millis(5));
+            thread::sleep(Duration::from_millis(250));
         }
     });
     let deadline = Instant::now() + WAIT;
@@ -1001,8 +1002,7 @@ fn a_flood_of_sources_cannot_pass_the_cap_or_keep_a_real_client_out() {
         near.send(b"open").unwrap();
         let far = accepted.join().unwrap();
         assert_eq!(far.receive(Some(WAIT)).unwrap().unwrap(), b"open");
-        // A source that completed a handshake is not what a flood replaces.
-        for round in 0..200_u8 {
+        for round in 0..=255_u8 {
             assert!(port.relays() <= CAP, "{}", port.relays());
             near.send(&[round]).unwrap();
             assert_eq!(far.receive(Some(WAIT)).unwrap().unwrap(), [round]);

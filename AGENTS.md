@@ -298,7 +298,7 @@ pub fn Port::relays(&self) -> usize                   // QUIC sources relayed no
 pub fn Port::data_channels(&self) -> usize            // data channels held now, opening or open
 ```
 
-`#[non_exhaustive]`. Defaults: on, 5 s for an attempt, a path of 1280 bytes, no public address, a candidate only where the peer is, `OnChannel`, 256 data channels, 1024 relays, 120 s for a relay's silence.
+`#[non_exhaustive]`. Defaults: on, 5 s for an attempt, a path of 1280 bytes, no public address, a candidate only where the peer is, `OnChannel`, 256 data channels, 512 relays, 120 s for a relay's silence.
 
 A `Port` reads the first byte of each packet (RFC 9443): QUIC to a loopback relay in front of `webtransport::Listener::on_port`, STUN and DTLS to a data channel, anything else dropped. One worker thread serves it and sleeps while nothing is due; at rest it wakes when `str0m` asks, every few seconds per data channel. It ends with its last clone, listener or channel: the socket and relays close and the thread is joined.
 
@@ -317,6 +317,7 @@ A WebSocket with `Dialer::with_webrtc` asks for `coqui-web-ladder.1` and `coqui-
 - `Port`'s candidate names the address the WebSocket connection arrived at, with the UDP port's number. Behind a proxy or NAT set `Settings::public_address`: the default is wrong there, and tells the peer an address it had no other way to learn. A peer always learns the address it is given. On a host with several addresses, bind one: a reply leaves by whichever the system picks, on a wildcard socket.
 - A peer can name any candidate in an answer. `with_webrtc` refuses one not at the WebSocket's peer unless `Settings::any_candidate`; candidates in an offer are discarded. A browser has no such check for a server named by host name.
 - Through a reverse proxy a UDP path needs a stream block for the port, or the host's own port with `public_address`. Without one the attempt fails and the ladder ends at the WebSocket.
+- A relay is a socket per QUIC source, so a flood of forged sources is a real cost, which the cap bounds. Past the cap a new source replaces the oldest with no finished handshake and at least half a second old, or is dropped, and takes at least a 1200-byte first packet. A source with a finished handshake is never replaced, and the WebSocket and data channels are not affected, but a flood of more than the cap per half second holds back new WebTransport sessions, each of whose first packets then has that share of a chance. They fall back like any failed WebTransport.
 - `webtransport::Listener::on_port` sees the relay's address, not the client's, inside `wtransport`; admission and `Debug` read through to the real one. A local process reaching its loopback socket directly is refused when admission is set. QUIC's ECN does not cross the relay.
 - `Datagrams::path_changes` before `datagrams()` is not possible, and an event between the two calls is missed: read `delivery()` after subscribing.
 - Signals on the channel have what TLS gives them. For datagrams bound to a peer proof use `Signaling::ByCaller` and carry them inside the proven link.

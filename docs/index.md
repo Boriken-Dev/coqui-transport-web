@@ -54,8 +54,8 @@ let websocket = websocket::Listener::bind(port.local_addr(), Some(tls))?.with_we
 
 **One port.** A `Port` owns the socket and reads the first byte of each packet, as [RFC 9443](https://www.rfc-editor.org/rfc/rfc9443) lays out: QUIC goes through a relay to an unmodified
 `wtransport`, STUN and DTLS to a data channel, and anything else is dropped. A source with no credentials gets no reply at all. The relay
-map has a cap and an idle expiry. Past the cap a new source replaces the oldest that never completed a handshake, so a flood of forged
-sources cannot keep a real client out or put one out. QUIC must not grease its fixed bit on a shared port, so this listener does not offer to.
+map has a cap and an idle expiry. A source that completed a handshake is never replaced. A flood of forged sources can still hold back
+new WebTransport sessions, which then fall back like any other that fails, and it does not reach the WebSocket or a data channel. QUIC must not grease its fixed bit on a shared port, so this listener does not offer to.
 
 **Climbing.** A client that asks offers `coqui-web-ladder.1` before `coqui-web-datagrams.1`, and a server with a port chooses it, which adds
 tag 2 to the binary messages: a signal, one byte (1 offer, 2 answer, 3 refused) and a session description. Datagrams start in the WebSocket.

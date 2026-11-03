@@ -61,8 +61,8 @@ pub struct Settings {
     pub signaling: Signaling,
     /// Data channels a [`Port`] holds at once, past which an offer is refused.
     pub max_sessions: usize,
-    /// QUIC sources a [`Port`] relays at once. A new one past this replaces the oldest that has never completed a handshake, or is
-    /// dropped when every one has.
+    /// QUIC sources a [`Port`] relays at once, each a socket, so keep this well below the process's limit on them. A new source past
+    /// this replaces the oldest that has completed no handshake in half a second, and is dropped if there is none.
     pub max_relays: usize,
     /// Silence after which a relay ends. A source returning later gets a new one, which QUIC reads as a changed address. It should
     /// outlast the QUIC idle timeout.
@@ -79,7 +79,7 @@ impl Default for Settings {
             any_candidate: false,
             signaling: Signaling::OnChannel,
             max_sessions: 256,
-            max_relays: 1024,
+            max_relays: 512,
             relay_idle: Duration::from_secs(120),
         }
     }
@@ -308,5 +308,122 @@ impl Drop for Inner {
         {
             let _ = worker.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::*;
+
+    /// A port with room for two relays, and a socket standing in for the QUIC listener.
+    fn port() -> (Port, UdpSocket) {
+        let quic = UdpSocket::bind("127.0.0.1:0").unwrap();
+        quic.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let port = Port::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            Settings::default().with_max_relays(2),
+        )
+        .unwrap();
+        port.relay_to(quic.local_addr().unwrap());
+        (port, quic)
+    }
+
+    fn client() -> UdpSocket {
+        UdpSocket::bind("127.0.0.1:0").unwrap()
+    }
+
+    /// Sends what a new client sends, and answers where it reached the listener from.
+    fn first_packet(from: &UdpSocket, port: &Port, quic: &UdpSocket) -> SocketAddr {
+        from.send_to(&[0xc0; 1200], port.local_addr()).unwrap();
+        let mut buffer = [0_u8; 2048];
+        quic.recv_from(&mut buffer).unwrap().1
+    }
+
+    fn holds(port: &Port, source: &UdpSocket) -> bool {
+        let source = source.local_addr().unwrap();
+        port.inner
+            .relays
+            .0
+            .lock()
+            .unwrap()
+            .values()
+            .any(|held| *held == source)
+    }
+
+    fn nothing_arrives(quic: &UdpSocket) -> bool {
+        quic.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let mut buffer = [0_u8; 2048];
+        let quiet = quic.recv_from(&mut buffer).is_err();
+        quic.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        quiet
+    }
+
+    #[test]
+    fn a_new_relay_cannot_be_replaced_before_it_has_had_its_chance() {
+        let (port, quic) = port();
+        let (one, two, three) = (client(), client(), client());
+        let started = Instant::now();
+        first_packet(&one, &port, &quic);
+        first_packet(&two, &port, &quic);
+        three.send_to(&[0xc0; 1200], port.local_addr()).unwrap();
+        assert!(nothing_arrives(&quic));
+        assert!(started.elapsed() < worker_young(), "too slow to say");
+        assert!(holds(&port, &one) && holds(&port, &two) && !holds(&port, &three));
+
+        std::thread::sleep(worker_young());
+        first_packet(&three, &port, &quic);
+        assert!(!holds(&port, &one), "the oldest should have gone");
+        assert!(holds(&port, &two) && holds(&port, &three));
+        assert_eq!(port.relays(), 2);
+    }
+
+    #[test]
+    fn a_source_that_was_answered_in_full_is_never_replaced() {
+        let (port, quic) = port();
+        let (one, two, three) = (client(), client(), client());
+        let relay = first_packet(&one, &port, &quic);
+        first_packet(&two, &port, &quic);
+        // A handshake's first flight, which a Retry is too small to be.
+        quic.send_to(&[0xc0; 600], relay).unwrap();
+        one.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut buffer = [0_u8; 2048];
+        assert_eq!(one.recv(&mut buffer).unwrap(), 600);
+
+        std::thread::sleep(worker_young());
+        first_packet(&three, &port, &quic);
+        assert!(holds(&port, &one), "a proven source was replaced");
+        assert!(!holds(&port, &two));
+        let four = client();
+        std::thread::sleep(worker_young());
+        first_packet(&four, &port, &quic);
+        assert!(holds(&port, &one), "a proven source was replaced");
+        assert!(holds(&port, &four) && !holds(&port, &three));
+    }
+
+    #[test]
+    fn only_a_client_first_packet_can_take_the_last_of_the_room() {
+        let (port, quic) = port();
+        let (one, stray) = (client(), client());
+        // With plenty of room a short header gets a relay, as a client whose address changed needs.
+        stray.send_to(&[0x40; 64], port.local_addr()).unwrap();
+        let mut buffer = [0_u8; 2048];
+        quic.recv_from(&mut buffer).unwrap();
+        assert!(holds(&port, &stray));
+        first_packet(&one, &port, &quic);
+        let late = client();
+        late.send_to(&[0x40; 64], port.local_addr()).unwrap();
+        assert!(nothing_arrives(&quic));
+        assert!(!holds(&port, &late));
+        // Under the least a first packet may be.
+        late.send_to(&[0xc0; 1199], port.local_addr()).unwrap();
+        assert!(nothing_arrives(&quic));
+        assert_eq!(port.relays(), 2);
+    }
+
+    fn worker_young() -> Duration {
+        worker::YOUNG + Duration::from_millis(50)
     }
 }

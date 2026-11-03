@@ -37,6 +37,11 @@ const BUDGET: usize = 256;
 const BUFFER: usize = 64 * 1024;
 /// How long a source that has completed no handshake keeps its relay with nothing happening. QUIC's handshake limit is this long.
 const UNPROVEN_IDLE: Duration = Duration::from_secs(10);
+/// How long a new relay is safe from being replaced: long enough for a Retry and the answer to it. Replaced sooner, a flood would
+/// keep every real client out, since a Retry's token names the relay and a replaced one starts again with another.
+pub(super) const YOUNG: Duration = Duration::from_millis(500);
+/// QUIC's least for a client's first datagram (RFC 9000 section 14.1), so a forged source costs a flood this much.
+const LEAST_INITIAL: usize = 1200;
 /// A reply this large is no Retry, so the listener accepted the source's address: only a source that can read what it was sent gets one.
 const PROVEN_REPLY: usize = 512;
 /// Datagrams taken from one session's queue in one turn.
@@ -45,7 +50,7 @@ const CHANNEL_LABEL: &str = "coqui-web-datagrams";
 
 /// Which relay stands for which source, shared with whoever must judge a QUIC source.
 #[derive(Clone, Default)]
-pub(super) struct Relays(Arc<Mutex<HashMap<SocketAddr, SocketAddr>>>);
+pub(super) struct Relays(pub(super) Arc<Mutex<HashMap<SocketAddr, SocketAddr>>>);
 
 impl Relays {
     pub(super) fn len(&self) -> usize {
@@ -118,6 +123,7 @@ struct Relay {
     address: SocketAddr,
     source: SocketAddr,
     last: Instant,
+    born: Instant,
     proven: bool,
 }
 
@@ -435,6 +441,7 @@ impl Worker {
         let now = Instant::now();
         let token = match self.relay_by_source.get(&source) {
             Some(token) => *token,
+            None if !self.may_start_relay(count) => return,
             None => match self.new_relay(source, quic, now) {
                 Some(token) => token,
                 None => return,
@@ -446,8 +453,15 @@ impl Worker {
         }
     }
 
+    /// A client's first packet is a long header of [`LEAST_INITIAL`]. Anything else from a new source is a client whose address
+    /// changed mid-connection, which is let in only while there is plenty of room.
+    fn may_start_relay(&self, count: usize) -> bool {
+        (self.buffer[0] >= 192 && count >= LEAST_INITIAL)
+            || self.relay_by_token.len() < self.settings.max_relays / 2
+    }
+
     fn new_relay(&mut self, source: SocketAddr, quic: SocketAddr, now: Instant) -> Option<Token> {
-        if self.relay_by_token.len() >= self.settings.max_relays && !self.evict_unproven() {
+        if self.relay_by_token.len() >= self.settings.max_relays && !self.evict_unproven(now) {
             return None;
         }
         let socket = StdSocket::bind((Ipv4Addr::LOCALHOST, 0)).ok()?;
@@ -470,6 +484,7 @@ impl Worker {
                 address,
                 source,
                 last: now,
+                born: now,
                 proven: false,
             },
         );
@@ -479,15 +494,21 @@ impl Worker {
         Some(token)
     }
 
-    fn evict_unproven(&mut self) -> bool {
-        while let Some(token) = self.unproven.pop_front() {
-            if self
-                .relay_by_token
-                .get(&token)
-                .is_some_and(|relay| !relay.proven)
-            {
-                self.remove_relay(token);
-                return true;
+    /// Replaces the oldest relay that has completed no handshake, if it has had its chance to.
+    fn evict_unproven(&mut self, now: Instant) -> bool {
+        while let Some(token) = self.unproven.front().copied() {
+            match self.relay_by_token.get(&token) {
+                Some(relay) if !relay.proven => {
+                    if now.saturating_duration_since(relay.born) < YOUNG {
+                        return false;
+                    }
+                    self.unproven.pop_front();
+                    self.remove_relay(token);
+                    return true;
+                }
+                _ => {
+                    self.unproven.pop_front();
+                }
             }
         }
         false
