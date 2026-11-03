@@ -339,3 +339,100 @@ fn a_webtransport_dial_nothing_answers_is_a_path_failure() {
     let failure = dialed.err();
     assert!(failure.is_some_and(Failure::is_path), "{failure:?}");
 }
+
+/// Each connection's source and the local address it reached, as a listener's TLS hook was given them.
+type Addressed = Arc<Mutex<Vec<(SocketAddr, SocketAddr)>>>;
+
+/// A listener on `address` that notes what its TLS hook is given and answers with `server`'s configuration.
+fn noting_tls(address: SocketAddr, server: &Identity) -> (webtransport::Listener, Addressed) {
+    let tls = server_tls(server, server, Ask::Nothing);
+    let noted = Addressed::default();
+    let noting = Arc::clone(&noted);
+    let listener = webtransport::Listener::bind(address, Arc::clone(&tls))
+        .unwrap()
+        .with_tls_per_connection(move |source, local| {
+            noting.lock().unwrap().push((source, local));
+            Arc::clone(&tls)
+        });
+    (listener, noted)
+}
+
+#[test]
+fn a_wildcard_webtransport_listener_builds_tls_from_the_source_and_the_address_reached() {
+    let server = Identity::new();
+    let (listener, noted) = noting_tls("0.0.0.0:0".parse().unwrap(), &server);
+    let port = listener.local_addr().port();
+    let accepted = thread::spawn(move || {
+        let pending = listener.next(Some(WAIT)).unwrap();
+        let addresses = (pending.peer_addr(), pending.local_addr());
+        (addresses, pending.handshake().unwrap())
+    });
+    let url = Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
+    let client = webtransport::Dialer::pinned(&[server.pin()])
+        .unwrap()
+        .dial(Kind::WebTransport, &url, WAIT)
+        .unwrap();
+    client.send(b"open").unwrap();
+    let ((source, local), _channel) = accepted.join().unwrap();
+    assert_eq!(local, SocketAddr::from(([127, 0, 0, 1], port)));
+    assert!(
+        source.ip().is_loopback() && source.port() != port,
+        "{source}"
+    );
+    assert_eq!(*noted.lock().unwrap(), [(source, local)]);
+}
+
+/// Opens a session to `port` on 127.0.0.1 from a socket bound to `from`, and sends one message on its stream.
+fn session_from(from: [u8; 4], port: u16, server: &Identity) {
+    let hash = wtransport::tls::Certificate::from_der(server.certificate.to_vec())
+        .unwrap()
+        .hash();
+    let config = wtransport::ClientConfig::builder()
+        .with_bind_address(SocketAddr::from((from, 0)))
+        .with_server_certificate_hashes([hash])
+        .build();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let client = wtransport::Endpoint::client(config).unwrap();
+        let session = client
+            .connect(format!("https://127.0.0.1:{port}/"))
+            .await
+            .unwrap();
+        let (mut send, _recv) = session.open_bi().await.unwrap().await.unwrap();
+        send.write_all(&coqui_web::frame::encode(b"open", 1024).unwrap())
+            .await
+            .unwrap();
+        // Held open until the server has the session.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    });
+}
+
+#[test]
+fn webtransport_clients_from_different_sources_reach_tls_apart() {
+    let server = Identity::new();
+    let (listener, noted) = noting_tls(loopback(), &server);
+    let port = listener.local_addr().port();
+    let accepting = thread::spawn(move || {
+        (0..2)
+            .map(|_| listener.accept(Some(WAIT)).unwrap())
+            .collect::<Vec<_>>()
+    });
+    for from in [[127, 0, 0, 1], [127, 0, 0, 2]] {
+        session_from(from, port, &server);
+    }
+    let _channels = accepting.join().unwrap();
+    let mut sources: Vec<_> = noted
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(source, _)| source.ip())
+        .collect();
+    sources.sort();
+    assert_eq!(
+        sources,
+        [[127, 0, 0, 1], [127, 0, 0, 2]].map(std::net::IpAddr::from)
+    );
+}

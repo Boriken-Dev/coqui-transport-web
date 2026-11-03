@@ -22,9 +22,11 @@ use tokio::task::AbortHandle;
 use tokio::time::timeout as within;
 use url::Url;
 use wtransport::config::{DnsLookupFuture, DnsResolver};
-use wtransport::endpoint::IncomingSession;
-use wtransport::endpoint::endpoint_side::{Client, Server};
+use wtransport::endpoint::IncomingSessionFuture;
+use wtransport::endpoint::endpoint_side::Client;
 use wtransport::error::{ConnectingError, ConnectionClose, ConnectionError, SendDatagramError};
+use wtransport::quinn::crypto::rustls::QuicServerConfig;
+use wtransport::quinn::{self, Incoming};
 use wtransport::tls::{Sha256Digest, WEBTRANSPORT_ALPN};
 use wtransport::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 
@@ -633,9 +635,32 @@ impl channel::Dialer for Dialer {
     }
 }
 
+/// Builds one connection's TLS configuration from its source and the local address it reached.
+type TlsFor = Arc<dyn Fn(SocketAddr, SocketAddr) -> Arc<ServerConfig> + Send + Sync>;
+
+/// The QUIC endpoint behind a listener, on quinn itself so each connection can have a TLS configuration of its own, and the
+/// configuration a connection otherwise gets.
+fn server_endpoint(
+    runtime: &Runtime,
+    socket: std::net::UdpSocket,
+    config: &wtransport::ServerConfig,
+) -> io::Result<(quinn::Endpoint, Arc<quinn::ServerConfig>)> {
+    let quic = Arc::new(config.quic_config().clone());
+    let _inside = runtime.enter();
+    let endpoint = quinn::Endpoint::new(
+        config.quic_endpoint_config().clone(),
+        Some(quinn::ServerConfig::clone(&quic)),
+        socket,
+        Arc::new(quinn::TokioRuntime),
+    )?;
+    Ok((endpoint, quic))
+}
+
 /// Accepts WebTransport sessions, each carrying one channel on the first stream a client opens.
 pub struct Listener {
-    endpoint: Endpoint<Server>,
+    endpoint: quinn::Endpoint,
+    quic: Arc<quinn::ServerConfig>,
+    tls_for: Option<TlsFor>,
     address: SocketAddr,
     limits: Limits,
     origins: Vec<alloc::string::String>,
@@ -671,16 +696,17 @@ impl Listener {
             .with_bind_address(address)
             .with_custom_tls(tls)
             .build();
-        let endpoint = {
-            let _inside = runtime.enter();
-            Endpoint::server(config).map_err(|error: io::Error| match error.kind() {
+        let (endpoint, quic) = std::net::UdpSocket::bind(address)
+            .and_then(|socket| server_endpoint(&runtime, socket, &config))
+            .map_err(|error| match error.kind() {
                 io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied => Failure::Permission,
                 _ => Failure::Unsupported,
-            })?
-        };
+            })?;
         let address = endpoint.local_addr().map_err(|_| Failure::Unsupported)?;
         Ok(Self {
             endpoint,
+            quic,
+            tls_for: None,
             address,
             limits: Limits::default(),
             origins: Vec::new(),
@@ -717,13 +743,14 @@ impl Listener {
             .sent(0)
             .log(Arc::new(wtransport::quinn::NoneTokenLog));
         config.quic_config_mut().validation_token_config(tokens);
-        let endpoint = {
-            let _inside = runtime.enter();
-            Endpoint::server(config).map_err(|_| Failure::Unsupported)?
-        };
+        let (endpoint, quic) = std::net::UdpSocket::bind((core::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| server_endpoint(&runtime, socket, &config))
+            .map_err(|_| Failure::Unsupported)?;
         port.relay_to(endpoint.local_addr().map_err(|_| Failure::Unsupported)?);
         Ok(Self {
             endpoint,
+            quic,
+            tls_for: None,
             address: port.local_addr(),
             limits: Limits::default(),
             origins: Vec::new(),
@@ -741,6 +768,18 @@ impl Listener {
             return port.source_of(seen);
         }
         Some(seen)
+    }
+
+    /// The address a connection reached: on a wildcard bind, the one the client sent to, as the system reports it. On a port it is
+    /// the port's own.
+    fn local_of(&self, incoming: &Incoming) -> SocketAddr {
+        #[cfg(feature = "webrtc")]
+        if self.port.is_some() {
+            return self.address;
+        }
+        incoming
+            .local_ip()
+            .map_or(self.address, |ip| SocketAddr::new(ip, self.address.port()))
     }
 
     /// Whether a source may start a handshake.
@@ -766,6 +805,19 @@ impl Listener {
         origins: impl IntoIterator<Item = alloc::string::String>,
     ) -> Self {
         self.origins = origins.into_iter().collect();
+        self
+    }
+
+    /// Builds each connection's TLS configuration before its handshake from the client's source and the local address it reached
+    /// (on a wildcard bind, the one it sent to), so a client certificate verifier can judge a client by both. The handshake runs on
+    /// the driver's own threads, where nothing the caller set up around [`Pending::handshake`] is in scope. Its ALPN is set to
+    /// WebTransport's. Without this, every connection gets the configuration the listener was bound with.
+    #[must_use]
+    pub fn with_tls_per_connection(
+        mut self,
+        tls: impl Fn(SocketAddr, SocketAddr) -> Arc<ServerConfig> + Send + Sync + 'static,
+    ) -> Self {
+        self.tls_for = Some(Arc::new(tls));
         self
     }
 
@@ -804,7 +856,7 @@ impl Listener {
     pub fn next(&self, timeout: Option<Duration>) -> Result<Pending, Failure> {
         let deadline = timeout.map(|limit| std::time::Instant::now() + limit);
         loop {
-            let incoming: IncomingSession = match deadline {
+            let incoming = match deadline {
                 Some(deadline) => {
                     let left = deadline.saturating_duration_since(std::time::Instant::now());
                     self.runtime
@@ -812,9 +864,12 @@ impl Listener {
                         .map_err(|_| Failure::Timeout)?
                 }
                 None => self.runtime.block_on(self.endpoint.accept()),
-            };
+            }
+            // The listener holds its endpoint open, so it ends only with the runtime.
+            .ok_or(Failure::PathLost)?;
             if !incoming.remote_address_validated() {
-                incoming.retry();
+                // Only a source already validated cannot be sent to retry, and this one was not.
+                let _ = incoming.retry();
                 continue;
             }
             let seen = incoming.remote_address();
@@ -823,9 +878,15 @@ impl Listener {
                 incoming.refuse();
                 continue;
             }
+            let local = self.local_of(&incoming);
             return Ok(Pending {
                 incoming,
                 peer: source.unwrap_or(seen),
+                local,
+                tls: self
+                    .tls_for
+                    .as_ref()
+                    .map(|tls_for| (Arc::clone(tls_for), Arc::clone(&self.quic))),
                 cancel: Arc::default(),
                 stop: Arc::default(),
                 limits: self.limits,
@@ -840,8 +901,10 @@ impl Listener {
 
 /// A session that has not done its handshake.
 pub struct Pending {
-    incoming: IncomingSession,
+    incoming: Incoming,
     peer: SocketAddr,
+    local: SocketAddr,
+    tls: Option<(TlsFor, Arc<quinn::ServerConfig>)>,
     cancel: Arc<Abandon>,
     stop: Arc<Notify>,
     limits: Limits,
@@ -867,6 +930,12 @@ impl Pending {
         self.peer
     }
 
+    /// The local address the client reached: on a wildcard bind, the one it sent to; on a port, the port's own.
+    #[must_use]
+    pub const fn local_addr(&self) -> SocketAddr {
+        self.local
+    }
+
     /// A handle that abandons this handshake from another thread, before or while [`handshake`](Self::handshake) runs: it then
     /// returns [`Failure::Cancelled`] and the session closes.
     #[must_use]
@@ -890,7 +959,9 @@ impl Pending {
     pub fn handshake(self) -> Result<Channel, Failure> {
         let Self {
             incoming,
-            peer: _,
+            peer,
+            local,
+            tls,
             cancel,
             stop,
             limits,
@@ -903,11 +974,29 @@ impl Pending {
             return Err(Failure::Cancelled);
         }
         let _finishing = cancel.finishing();
+        let config = match tls {
+            Some((tls_for, base)) => {
+                let mut tls = ServerConfig::clone(&tls_for(peer, local));
+                tls.alpn_protocols = alloc::vec![WEBTRANSPORT_ALPN.to_vec()];
+                let mut config = quinn::ServerConfig::clone(&base);
+                config.crypto =
+                    Arc::new(QuicServerConfig::try_from(tls).map_err(|_| Failure::Unsupported)?);
+                Some(Arc::new(config))
+            }
+            None => None,
+        };
         let opened = runtime.block_on(bounded(limits.handshake, async {
+            let connecting = match config {
+                Some(config) => incoming.accept_with(config),
+                None => incoming.accept(),
+            }
+            .map_err(|e| connection_failure(&e.into()))?;
             let stopped = stop.notified();
             tokio::pin!(stopped);
             let request = tokio::select! {
-                request = incoming.into_future() => request.map_err(|e| connection_failure(&e))?,
+                request = IncomingSessionFuture::with_quic_connecting(connecting) => {
+                    request.map_err(|e| connection_failure(&e))?
+                }
                 () = &mut stopped => return Err(Failure::Cancelled),
             };
             if let Some(origin) = request.origin()

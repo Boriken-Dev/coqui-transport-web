@@ -292,15 +292,17 @@ pub fn Listener::on_port(port: &webrtc::Port, tls: Arc<rustls::ServerConfig>) ->
 pub const fn Listener::with_limits(self, limits: Limits) -> Self
 pub fn Listener::with_origins(self, origins: impl IntoIterator<Item = String>) -> Self
 pub fn Listener::with_admission(self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self
+pub fn Listener::with_tls_per_connection(self, tls: impl Fn(SocketAddr, SocketAddr) -> Arc<rustls::ServerConfig> + Send + Sync + 'static) -> Self  // (source, local) -> this connection's TLS
 pub const fn Listener::local_addr(&self) -> SocketAddr
 pub fn Listener::next(&self, timeout: Option<Duration>) -> Result<Pending, Failure>
 pub const fn Pending::peer_addr(&self) -> SocketAddr                         // the source admission judged; on a Port the client's, not its relay's
+pub const fn Pending::local_addr(&self) -> SocketAddr                        // the address the client reached; on a wildcard bind the one it sent to, on a Port the port's
 pub fn Pending::canceller(&self) -> Cancel                                   // abandons the handshake from another thread
 pub fn Pending::handshake(self) -> Result<Channel, Failure>
 pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Failure>
 ```
 
-A dialer whose certificate the server refuses, or which presented none to a server requiring one, fails with `Failure::Certificate`, as a TLS WebSocket reads the same alerts (bad, unsupported, revoked, expired or unknown certificate, unknown CA, access denied, certificate required); another TLS alert is `Failure::Unsupported`.
+`with_tls_per_connection` builds each connection's TLS configuration in `Pending::handshake`, before its QUIC handshake, from the source and the local address `Pending` reports, so a client certificate verifier can judge a client by both, or keep strangers from different sources apart. The handshake itself runs on the listener's runtime threads, where nothing set up around `Pending::handshake` (a thread-local scope) is in force. Its ALPN is set to WebTransport's; without it every connection gets the configuration the listener was bound with. A dialer whose certificate the server refuses, or which presented none to a server requiring one, fails with `Failure::Certificate`, as a TLS WebSocket reads the same alerts (bad, unsupported, revoked, expired or unknown certificate, unknown CA, access denied, certificate required); another TLS alert is `Failure::Unsupported`.
 
 `Listener::next` sends a source to retry first, since UDP sources are forgeable, then judges it by admission, and `Pending::handshake` completes it. A source admission refuses, or a `Pending` dropped before its handshake, is closed with QUIC's CONNECTION_REFUSED, which its dialer reports as `Failure::Permission` and never falls back from. The client cannot tell that from any QUIC server refusing a connection (quinn also does when it runs out of connection IDs), and anyone who saw its first packet can forge one, as with a TCP reset. Each dialer and listener runs its own runtime, and its calls block. Inside an async runtime, call them from its blocking pool.
 
