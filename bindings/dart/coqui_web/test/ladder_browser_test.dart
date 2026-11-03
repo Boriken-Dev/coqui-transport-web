@@ -156,12 +156,30 @@ void main() {
   test(
     'an empty datagram from a page reaches the peer on a data channel',
     () async {
-      // Rust refuses to send an empty one back, so the peer's echo of it fails and this only sees what follows.
       final channel = await climbing('direct');
       final datagrams = datagramsOf(channel)!;
       await datagrams.changes.first.timeout(wait);
+      // Rust refuses to send an empty one, so the peer says it got one in a message.
+      final said = channel.messages.first;
       await datagrams.send(Uint8List(0));
-      await echoes(datagrams, [9]);
+      expect(await said.timeout(wait), 'an empty datagram');
+      await channel.close();
+    },
+  );
+
+  test(
+    'the WebSocket\'s datagram setting does not limit a data channel',
+    () async {
+      final channel = await connectWebChannel(
+        endpoints('direct'),
+        maxWebSocketDatagram: 100,
+        dataChannel: const DataChannelSettings(),
+      );
+      final datagrams = datagramsOf(channel)!;
+      expect(datagrams.maxSize, 100);
+      await datagrams.changes.first.timeout(wait);
+      expect(datagrams.maxSize, greaterThan(100));
+      await echoes(datagrams, List.filled(500, 3));
       await channel.close();
     },
   );
@@ -269,7 +287,9 @@ void main() {
         expect(datagrams.delivery, WebDatagramDelivery.overStream);
         // The attempt is over, not merely unfinished: what it held has gone.
         expect(
-          (_eval('window.__connections[window.__connections.length - 1].signalingState')!
+          (_eval(
+                    'window.__connections[window.__connections.length - 1].signalingState',
+                  )!
                   as JSString)
               .toDart,
           'closed',

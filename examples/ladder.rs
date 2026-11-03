@@ -2,7 +2,8 @@
 //!
 //! `direct` is WebTransport, a data channel and a WebSocket on one number. `forwarded` is a data channel whose candidate names a UDP
 //! forwarder this peer controls, so a test can lose packets, count them or black-hole the path. `carried` leaves its signals to the
-//! caller, carrying them in messages as `signal:<hex>`. Everything else is echoed, messages and datagrams alike.
+//! caller, carrying them in messages as `signal:<hex>`. Everything else is echoed, messages and datagrams alike, except an empty
+//! datagram, which Rust cannot send on a data channel: that is answered with the message `an empty datagram`.
 //!
 //! On `forwarded`, a message `!loss N` drops one packet in N, `!hole` drops all, `!pass` none, `!counts` answers with the packets
 //! that crossed each way and how many of them were large, and `!burst N` sends N numbered datagrams then the message `burst done`.
@@ -108,7 +109,11 @@ fn serve<C: Channel>(channel: &C, path: Option<&Path>, carried: Option<&websocke
         if let Some(datagrams) = channel.datagrams() {
             scope.spawn(move || {
                 while let Ok(Some(datagram)) = datagrams.receive(None) {
-                    let _ = datagrams.send(&datagram);
+                    if datagram.is_empty() {
+                        let _ = channel.send(b"an empty datagram");
+                    } else {
+                        let _ = datagrams.send(&datagram);
+                    }
                 }
             });
         }

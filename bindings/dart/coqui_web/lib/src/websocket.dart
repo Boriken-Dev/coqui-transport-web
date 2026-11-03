@@ -87,7 +87,14 @@ final class _WebSocketDatagrams implements WebDatagrams, DataChannelEvents {
   void ended() => _changes.add(WebDatagramDelivery.overStream);
 
   @override
-  void arrived(Uint8List datagram) => arrive(datagram);
+  void arrived(Uint8List datagram) {
+    // The setting is for the WebSocket: the data channel has its own limit, already applied.
+    if (_arrived.hasListener) {
+      _arrived.add(datagram);
+    } else {
+      dropped += 1;
+    }
+  }
 
   @override
   void discarded() => dropped += 1;
