@@ -220,6 +220,32 @@ void main() {
     },
   );
 
+  test(
+    'a browser whose RTCPeerConnection throws stays on the WebSocket, with nothing left over',
+    () async {
+      _eval(
+        'window.__saved_pc = window.RTCPeerConnection; '
+        'window.RTCPeerConnection = function () { throw new Error("refused"); };',
+      );
+      try {
+        final channel = await climbing(
+          'direct',
+          settings: const DataChannelSettings(
+            attempt: Duration(milliseconds: 500),
+          ),
+        );
+        final datagrams = datagramsOf(channel)!;
+        await echoes(datagrams, [1]);
+        await Future<void>.delayed(const Duration(seconds: 1));
+        expect(datagrams.delivery, WebDatagramDelivery.overStream);
+        await echoes(datagrams, [2]);
+        await channel.close();
+      } finally {
+        _eval('window.RTCPeerConnection = window.__saved_pc;');
+      }
+    },
+  );
+
   test('turned off, a page never tries', () async {
     final before =
         (_eval('window.__connections.length')! as JSNumber).toDartInt;
@@ -441,6 +467,56 @@ void main() {
       await echoes(datagramsOf(channel)!, [1]);
       await channel.close();
     });
+
+    test(
+      'once the data channel is open, a datagram added inside the WebSocket is not taken',
+      () async {
+        final injector = spawnHybridUri(
+          'support/injector_hybrid.dart',
+          stayAlive: true,
+        );
+        final replies = StreamIterator(injector.stream);
+        injector.sink.add(peer['carried']);
+        expect(await replies.moveNext().timeout(wait), isTrue);
+        final through = replies.current! as int;
+        final channel = await connectWebChannel(
+          WebEndpoints(
+            webSocket: Uri.parse('ws://127.0.0.1:$through/channel'),
+            allowLocalPlainWebSocket: true,
+          ),
+          dataChannel: const DataChannelSettings(carriedSignals: true),
+        );
+        expect(await replies.moveNext().timeout(wait), isTrue);
+        expect(replies.current, 'connected');
+        final datagrams = datagramsOf(channel)!;
+        final got = <String>[];
+        datagrams.incoming.listen(
+          (datagram) => got.add(utf8.decode(datagram, allowMalformed: true)),
+        );
+
+        // The control: before the data channel opens a datagram in the WebSocket arrives, as documented, so the injector works.
+        injector.sink.add('inject:before');
+        final deadline = DateTime.now().add(wait);
+        while (!got.contains('before')) {
+          if (DateTime.now().isAfter(deadline)) {
+            fail('the injector reached nothing');
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        }
+
+        final change = datagrams.changes.first;
+        await carry(channel, (answer) => answer);
+        expect(await change.timeout(wait), WebDatagramDelivery.unreliable);
+        final dropped = datagrams.dropped;
+        injector.sink.add('inject:forged');
+        await Future<void>.delayed(const Duration(seconds: 1));
+        expect(got, isNot(contains('forged')));
+        expect(datagrams.dropped, greaterThan(dropped));
+        await echoes(datagrams, [1]);
+        await channel.close();
+        await injector.sink.close();
+      },
+    );
 
     test(
       'a changed fingerprint never opens, and the WebSocket goes on',

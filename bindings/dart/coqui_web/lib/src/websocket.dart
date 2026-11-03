@@ -102,7 +102,13 @@ final class _WebSocketDatagrams implements WebDatagrams, DataChannelEvents {
   @override
   int dropped = 0;
 
+  /// One that came inside the WebSocket. Once a data channel whose signals the caller carried is open, only TLS protects such a one
+  /// and everything arriving is meant to be inside the peer proof, so it is discarded and counted.
   void arrive(Uint8List body) {
+    if (_climbed && _connection._carriedSignals != null) {
+      dropped += 1;
+      return;
+    }
     if (body.length > _maxOverStream || !_arrived.hasListener) {
       dropped += 1;
     } else {

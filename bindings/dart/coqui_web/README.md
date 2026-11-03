@@ -19,4 +19,5 @@ when `datagramsOf` is first called, offers over the channel it already has, and 
 attempt is lost. The Dart VM has no WebRTC, and stays on the WebSocket.
 
 With `carriedSignals: true` the offer and answer are left to the caller, through `signalsOf(channel)`. Carried inside a sealed, proven link,
-the DTLS fingerprints are bound to that proof, so the data channel's datagrams are too.
+the DTLS fingerprints are bound to that proof, so the data channel's datagrams are too. While it is open, a datagram tagged inside the
+WebSocket is discarded and counted in `dropped`.

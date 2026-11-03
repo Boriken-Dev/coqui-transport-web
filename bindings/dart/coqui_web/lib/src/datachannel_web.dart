@@ -124,8 +124,9 @@ final class _Attempt implements DataChannelPath {
   final Uri _endpoint;
   final DataChannelSettings _settings;
   final DataChannelEvents _events;
-  late final _PeerConnection _connection;
-  late final _Channel _channel;
+  // Null until made, and for good if the browser refuses to make them.
+  _PeerConnection? _connection;
+  _Channel? _channel;
   Timer? _attempt;
   bool _open = false;
   bool _answered = false;
@@ -138,28 +139,35 @@ final class _Attempt implements DataChannelPath {
   int get maxSize {
     final path = _settings.pathMtu - _overhead;
     final limit = path < _largest ? path : _largest;
-    final peer = _connection.sctp?.maxMessageSize;
+    final peer = _connection?.sctp?.maxMessageSize;
     return peer != null && peer > 0 && peer < limit ? peer.toInt() : limit;
   }
 
   Future<void> start() async {
-    _connection = _PeerConnection(
-      _Configuration(iceServers: <JSObject>[].toJS),
-    );
-    _channel = _connection.createDataChannel(
-      _label,
-      _ChannelInit(ordered: false, maxRetransmits: 0),
-    );
-    _channel.binaryType = 'arraybuffer';
+    final _PeerConnection connection;
+    final _Channel channel;
+    try {
+      connection = _connection = _PeerConnection(
+        _Configuration(iceServers: <JSObject>[].toJS),
+      );
+      channel = _channel = connection.createDataChannel(
+        _label,
+        _ChannelInit(ordered: false, maxRetransmits: 0),
+      );
+    } catch (_) {
+      _end();
+      return;
+    }
+    channel.binaryType = 'arraybuffer';
     _attempt = Timer(_settings.attempt, _end);
-    _channel.onopen = (() {
+    channel.onopen = (() {
       if (_closed) return;
       _attempt?.cancel();
       _open = true;
       _events.opened();
     }).toJS;
-    _channel.onclose = (() => _end()).toJS;
-    _channel.onmessage = ((JSObject event) {
+    channel.onclose = (() => _end()).toJS;
+    channel.onmessage = ((JSObject event) {
       final data = _MessageEvent._(event).data;
       if (data.isA<JSArrayBuffer>()) {
         final bytes = (data as JSArrayBuffer).toDart.asUint8List();
@@ -170,18 +178,18 @@ final class _Attempt implements DataChannelPath {
         }
       }
     }).toJS;
-    _connection.onconnectionstatechange = (() {
-      final state = _connection.connectionState;
+    connection.onconnectionstatechange = (() {
+      final state = connection.connectionState;
       if (state == 'failed' || state == 'disconnected' || state == 'closed') {
         _end();
       }
     }).toJS;
     try {
-      final offer = await _connection.createOffer().toDart;
-      await _connection.setLocalDescription(offer).toDart;
+      final offer = await connection.createOffer().toDart;
+      await connection.setLocalDescription(offer).toDart;
       if (_closed) return;
       // Sent at once, with no wait for gathering: an ICE-lite peer learns where this page is from its first check.
-      final sdp = _withoutCandidates(_connection.localDescription!.sdp);
+      final sdp = _withoutCandidates(connection.localDescription!.sdp);
       _events.signal(Uint8List.fromList([_offer, ...utf8.encode(sdp)]));
     } catch (_) {
       _end();
@@ -190,7 +198,12 @@ final class _Attempt implements DataChannelPath {
 
   @override
   void deliver(Uint8List signal) {
-    if (_closed || _answered || signal.isEmpty || signal.length > _maxSignal) {
+    final connection = _connection;
+    if (connection == null ||
+        _closed ||
+        _answered ||
+        signal.isEmpty ||
+        signal.length > _maxSignal) {
       return;
     }
     if (signal[0] == _refused) {
@@ -212,7 +225,7 @@ final class _Attempt implements DataChannelPath {
       return;
     }
     unawaited(
-      _connection
+      connection
           .setRemoteDescription(_Description(type: 'answer', sdp: checked))
           .toDart
           .then<void>((_) {}, onError: (Object _) => _end()),
@@ -222,13 +235,15 @@ final class _Attempt implements DataChannelPath {
   /// Hands one to the data channel. One that finds too much waiting is discarded and counted.
   @override
   void send(Uint8List datagram) {
-    if (_channel.readyState != 'open' ||
-        _channel.bufferedAmount > _maxBuffered) {
+    final channel = _channel;
+    if (channel == null ||
+        channel.readyState != 'open' ||
+        channel.bufferedAmount > _maxBuffered) {
       _events.discarded();
       return;
     }
     try {
-      _channel.send(datagram.toJS);
+      channel.send(datagram.toJS);
     } catch (_) {
       _events.discarded();
     }
@@ -247,13 +262,19 @@ final class _Attempt implements DataChannelPath {
     _closed = true;
     _open = false;
     _attempt?.cancel();
-    _channel.onopen = null;
-    _channel.onclose = null;
-    _channel.onmessage = null;
-    _connection.onconnectionstatechange = null;
+    final channel = _channel;
+    final connection = _connection;
     try {
-      _channel.close();
-      _connection.close();
+      if (channel != null) {
+        channel.onopen = null;
+        channel.onclose = null;
+        channel.onmessage = null;
+        channel.close();
+      }
+      if (connection != null) {
+        connection.onconnectionstatechange = null;
+        connection.close();
+      }
     } catch (_) {}
   }
 }
