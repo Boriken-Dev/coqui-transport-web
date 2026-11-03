@@ -250,6 +250,7 @@ pub fn Listener::with_admission(self, admit: impl Fn(SocketAddr) -> bool + Send 
 pub fn Listener::with_webrtc(self, port: &webrtc::Port) -> Self             // feature webrtc
 pub fn Listener::local_addr(&self) -> Result<SocketAddr, Failure>
 pub fn Listener::next(&self, timeout: Option<Duration>) -> Result<Pending, Failure>
+pub const fn Pending::peer_addr(&self) -> SocketAddr                         // the source Listener::next admitted
 pub fn Pending::handshake(self) -> Result<Channel, Failure>
 pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Failure>
 pub fn Channel::next_signal(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure>  // feature webrtc, Signaling::ByCaller
@@ -272,6 +273,7 @@ pub fn Listener::with_origins(self, origins: impl IntoIterator<Item = String>) -
 pub fn Listener::with_admission(self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self
 pub const fn Listener::local_addr(&self) -> SocketAddr
 pub fn Listener::next(&self, timeout: Option<Duration>) -> Result<Pending, Failure>
+pub const fn Pending::peer_addr(&self) -> SocketAddr                         // the source admission judged; on a Port the client's, not its relay's
 pub fn Pending::handshake(self) -> Result<Channel, Failure>
 pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Failure>
 ```

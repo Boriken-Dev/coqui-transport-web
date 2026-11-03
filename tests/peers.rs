@@ -3,7 +3,7 @@
 #![allow(clippy::std_instead_of_core, clippy::std_instead_of_alloc)]
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -211,3 +211,78 @@ fn a_boxed_channel_passes_its_certificates_on() {
     accepted.join().unwrap().unwrap();
 }
 
+/// An admission that lets everyone in and remembers who it was asked about.
+fn noting() -> (
+    Arc<Mutex<Vec<SocketAddr>>>,
+    impl Fn(SocketAddr) -> bool + Send + Sync + 'static,
+) {
+    let noted = Arc::new(Mutex::new(Vec::new()));
+    let noting = Arc::clone(&noted);
+    (noted, move |source| {
+        noting.lock().unwrap().push(source);
+        true
+    })
+}
+
+#[test]
+fn a_pending_websocket_names_the_source_it_admitted() {
+    let (noted, admit) = noting();
+    let listener = websocket::Listener::bind(loopback(), None)
+        .unwrap()
+        .with_admission(admit);
+    let tcp = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let pending = listener.next(Some(WAIT)).unwrap();
+    assert_eq!(pending.peer_addr(), tcp.local_addr().unwrap());
+    assert_eq!(*noted.lock().unwrap(), [pending.peer_addr()]);
+}
+
+#[test]
+fn a_pending_webtransport_session_names_the_source_it_admitted() {
+    let id = Identity::new();
+    let (noted, admit) = noting();
+    let listener = webtransport::Listener::bind(loopback(), server_tls(&id, &id, Ask::Nothing))
+        .unwrap()
+        .with_admission(admit);
+    let url = Url::parse(&format!(
+        "https://127.0.0.1:{}/",
+        listener.local_addr().port()
+    ))
+    .unwrap();
+    let client = thread::spawn(move || {
+        let _ = webtransport::Dialer::pinned(&[id.pin()]).unwrap().dial(
+            Kind::WebTransport,
+            &url,
+            Duration::from_secs(3),
+        );
+    });
+    let pending = listener.next(Some(WAIT)).unwrap();
+    assert_eq!(*noted.lock().unwrap(), [pending.peer_addr()]);
+    assert!(pending.peer_addr().ip().is_loopback());
+    assert_ne!(pending.peer_addr(), listener.local_addr());
+    drop(pending);
+    client.join().unwrap();
+}
+
+#[cfg(feature = "webrtc")]
+#[test]
+fn a_pending_session_on_a_port_names_the_client_and_not_its_relay() {
+    use coqui_web::webrtc::{Port, Settings};
+    let id = Identity::new();
+    let (noted, admit) = noting();
+    let port = Port::bind(loopback(), Settings::default()).unwrap();
+    let listener = webtransport::Listener::on_port(&port, server_tls(&id, &id, Ask::Nothing))
+        .unwrap()
+        .with_admission(admit);
+    let url = Url::parse(&format!("https://127.0.0.1:{}/", port.local_addr().port())).unwrap();
+    let client = thread::spawn(move || {
+        let _ = webtransport::Dialer::pinned(&[id.pin()]).unwrap().dial(
+            Kind::WebTransport,
+            &url,
+            Duration::from_secs(3),
+        );
+    });
+    let pending = listener.next(Some(WAIT)).unwrap();
+    assert_eq!(*noted.lock().unwrap(), [pending.peer_addr()]);
+    drop(pending);
+    client.join().unwrap();
+}

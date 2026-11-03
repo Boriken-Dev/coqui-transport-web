@@ -583,17 +583,22 @@ impl Listener {
         })
     }
 
-    /// Whether a source may start a handshake. On a port the source is the one its relay stands for, and an address no relay holds
-    /// reached the loopback socket some other way, so nothing can be said for it.
-    fn admits(&self, seen: SocketAddr) -> bool {
+    /// Where a handshake comes from. On a port the source is the one its relay stands for, and an address no relay holds reached
+    /// the loopback socket some other way, so nothing can be said for it.
+    fn source(&self, seen: SocketAddr) -> Option<SocketAddr> {
+        #[cfg(feature = "webrtc")]
+        if let Some(port) = &self.port {
+            return port.source_of(seen);
+        }
+        Some(seen)
+    }
+
+    /// Whether a source may start a handshake.
+    fn admits(&self, source: Option<SocketAddr>) -> bool {
         let Some(admit) = &self.admission else {
             return true;
         };
-        #[cfg(feature = "webrtc")]
-        if let Some(port) = &self.port {
-            return port.source_of(seen).is_some_and(|source| admit(source));
-        }
-        admit(seen)
+        source.is_some_and(|source| admit(source))
     }
 
     /// The bounds of channels this listener accepts.
@@ -662,12 +667,15 @@ impl Listener {
                 incoming.retry();
                 continue;
             }
-            if !self.admits(incoming.remote_address()) {
+            let seen = incoming.remote_address();
+            let source = self.source(seen);
+            if !self.admits(source) {
                 incoming.refuse();
                 continue;
             }
             return Ok(Pending {
                 incoming,
+                peer: source.unwrap_or(seen),
                 limits: self.limits,
                 origins: self.origins.clone(),
                 runtime: Arc::clone(&self.runtime),
@@ -681,6 +689,7 @@ impl Listener {
 /// A session that has not done its handshake.
 pub struct Pending {
     incoming: IncomingSession,
+    peer: SocketAddr,
     limits: Limits,
     origins: Vec<alloc::string::String>,
     runtime: Arc<Runtime>,
@@ -691,12 +700,19 @@ pub struct Pending {
 impl fmt::Debug for Pending {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Pending")
+            .field("peer", &self.peer)
             .field("limits", &self.limits)
             .finish_non_exhaustive()
     }
 }
 
 impl Pending {
+    /// The source address [`Listener::next`] admitted: on a port, the client's, not its relay's.
+    #[must_use]
+    pub const fn peer_addr(&self) -> SocketAddr {
+        self.peer
+    }
+
     /// Completes the session and takes its first stream, within the handshake limit in total.
     ///
     /// # Errors
@@ -705,6 +721,7 @@ impl Pending {
     pub fn handshake(self) -> Result<Channel, Failure> {
         let Self {
             incoming,
+            peer: _,
             limits,
             origins,
             runtime,

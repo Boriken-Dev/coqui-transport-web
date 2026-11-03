@@ -1407,8 +1407,10 @@ impl Listener {
     ///
     /// [`Failure::Timeout`] when no connection arrived within `timeout`.
     pub fn next(&self, timeout: Option<Duration>) -> Result<Pending, Failure> {
+        let (tcp, peer) = self.next_socket(timeout)?;
         Ok(Pending {
-            tcp: self.next_socket(timeout)?,
+            tcp,
+            peer,
             tls: self.tls.clone(),
             limits: self.limits,
             frames: self.frames,
@@ -1418,13 +1420,13 @@ impl Listener {
         })
     }
 
-    fn next_socket(&self, timeout: Option<Duration>) -> Result<TcpStream, Failure> {
+    fn next_socket(&self, timeout: Option<Duration>) -> Result<(TcpStream, SocketAddr), Failure> {
         let deadline = timeout.map(|limit| Instant::now() + limit);
         loop {
             match self.socket.accept() {
                 Ok((tcp, source)) => {
                     if self.admission.as_ref().is_none_or(|admit| admit(source)) {
-                        return Ok(tcp);
+                        return Ok((tcp, source));
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -1442,6 +1444,7 @@ impl Listener {
 /// A connection that has not done its handshake.
 pub struct Pending {
     tcp: TcpStream,
+    peer: SocketAddr,
     tls: Option<Arc<ServerConfig>>,
     limits: Limits,
     frames: Frames,
@@ -1459,6 +1462,12 @@ impl fmt::Debug for Pending {
 }
 
 impl Pending {
+    /// The source address [`Listener::next`] admitted.
+    #[must_use]
+    pub const fn peer_addr(&self) -> SocketAddr {
+        self.peer
+    }
+
     /// Completes the handshake within the handshake limit in total: a peer sending a byte at a time gets no longer.
     ///
     /// # Errors
@@ -1469,6 +1478,7 @@ impl Pending {
     pub fn handshake(self) -> Result<Channel, Failure> {
         let Self {
             tcp,
+            peer: _,
             tls,
             limits,
             frames,
