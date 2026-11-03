@@ -5,7 +5,8 @@ fallback, and a policy that never downgrades after a security failure. The Dart 
 [coqui-web](https://github.com/Boriken-Dev/coqui-web).
 
 A channel is open, not trusted: run the peer's identity proof with `StagedChannel.nextSetupMessage`, then
-call `allowApplicationMessages`. No keys, trust decisions or application protocol live here.
+call `allowApplicationMessages`. A method whose handshake is binary, such as Noise, reads each message with `nextSetupBytes`
+and sends with `sendBytes`, both before the handoff. No keys, trust decisions or application protocol live here.
 
 The Dart VM has no WebTransport, so it reports `TransportUnavailable` and uses the WebSocket endpoint.
 
