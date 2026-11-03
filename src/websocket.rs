@@ -1681,10 +1681,13 @@ impl Pending {
         // own read timeout ends a blocking read, so neither a deadline nor a cancel could end one from outside.
         let deadline = Instant::now() + limits.handshake;
         let mut poll = Poll::new().map_err(|e| io_failure(&e))?;
-        let waker = Waker::new(poll.registry(), CALLER).map_err(|e| io_failure(&e))?;
+        // Held here until the handshake ends: on Linux a waker dropped right after waking closes its eventfd, and the wake
+        // is lost before the poll collects it.
+        let waker = Arc::new(Waker::new(poll.registry(), CALLER).map_err(|e| io_failure(&e))?);
+        let waking = Arc::clone(&waker);
         cancel.interrupt_with(|| {
             Some(Box::new(move || {
-                let _ = waker.wake();
+                let _ = waking.wake();
             }))
         });
         if cancel.cancelled() {
