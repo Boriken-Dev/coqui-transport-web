@@ -34,10 +34,11 @@ pub trait Channel: Send + Sync {
     fn close(&self);
     fn set_max_message(&self, _bytes: usize) {}   // both ways, from the next read; a peer's answer to anything sent after this call meets it; default ignores it
     fn datagrams(&self) -> Option<&dyn Datagrams> { None }   // Some on WebTransport; a WebSocket, or a channel wrapping another, has none
+    fn peer_certificates(&self) -> Option<&[Vec<u8>]> { None }   // DER, the peer's own first; Some on a TLS WebSocket and on WebTransport
 }
 ```
 
-A reliable, ordered channel of whole messages.
+A reliable, ordered channel of whole messages. `peer_certificates` is the chain the peer presented and this side's rustls configuration accepted: the server's on a client, the client's on a server whose configuration asked for one. `None` without TLS, or when the peer presented none, as a client does when not asked. It proves what that configuration's verifier checked, and nothing about a channel wrapping this one.
 
 ```rust
 pub trait Datagrams: Send + Sync {

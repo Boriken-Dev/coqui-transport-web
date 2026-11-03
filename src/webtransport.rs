@@ -107,6 +107,7 @@ pub struct Channel {
     send_limit: Duration,
     pending_datagrams: usize,
     datagrams: OnceLock<QuicDatagrams>,
+    peer_certificates: Option<Vec<Vec<u8>>>,
     // Keeps the driver's runtime alive as long as a channel needs it.
     _runtime: Arc<Runtime>,
     // Its packets go through this port's relay, so it must outlive the listener if the channel does.
@@ -148,6 +149,16 @@ impl Channel {
         let reader = handle
             .spawn(read_loop(recv, Arc::clone(&max_message), to_reader))
             .abort_handle();
+        let peer_certificates = connection
+            .peer_identity()
+            .filter(|chain| !chain.as_slice().is_empty())
+            .map(|chain| {
+                chain
+                    .as_slice()
+                    .iter()
+                    .map(|certificate| certificate.der().to_vec())
+                    .collect()
+            });
         let connection = Arc::new(connection);
         // Through a port, a finished handshake is what keeps a relay from being replaced, and the connection's end is what ends it.
         #[cfg(feature = "webrtc")]
@@ -169,6 +180,7 @@ impl Channel {
             send_limit: limits.send,
             pending_datagrams: limits.pending_datagrams,
             datagrams: OnceLock::new(),
+            peer_certificates,
             _runtime: runtime,
             #[cfg(feature = "webrtc")]
             port,
@@ -330,6 +342,10 @@ impl channel::Channel for Channel {
         Some(self.datagrams.get_or_init(|| {
             QuicDatagrams::start(&self.connection, self.pending_datagrams, &self.handle)
         }))
+    }
+
+    fn peer_certificates(&self) -> Option<&[Vec<u8>]> {
+        self.peer_certificates.as_deref()
     }
 
     fn close(&self) {

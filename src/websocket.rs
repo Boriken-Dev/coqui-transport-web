@@ -200,6 +200,16 @@ impl Stream {
             Self::Server(stream) => !stream.conn.wants_read(),
         }
     }
+
+    /// The chain TLS accepted from the peer, once its handshake is done.
+    fn peer_certificates(&self) -> Option<Vec<Vec<u8>>> {
+        let chain = match self {
+            Self::Plain(_) => None,
+            Self::Client(stream) => stream.conn.peer_certificates(),
+            Self::Server(stream) => stream.conn.peer_certificates(),
+        }?;
+        (!chain.is_empty()).then(|| chain.iter().map(|der| der.to_vec()).collect())
+    }
 }
 
 impl Read for Stream {
@@ -311,6 +321,7 @@ pub struct Channel {
     frames: Frames,
     max_message: Arc<AtomicUsize>,
     datagrams: Option<WsDatagrams>,
+    peer_certificates: Option<Vec<Vec<u8>>>,
 }
 
 /// Datagrams as tagged messages on the socket, for a channel whose ends agreed to them.
@@ -445,6 +456,7 @@ impl Channel {
         tagged: bool,
         #[cfg(feature = "webrtc")] plan: Option<Plan>,
     ) -> Result<Self, Failure> {
+        let peer_certificates = socket.get_ref().peer_certificates();
         let poll = Poll::new().map_err(|e| io_failure(&e))?;
         socket
             .get_mut()
@@ -552,6 +564,7 @@ impl Channel {
             frames,
             max_message,
             datagrams,
+            peer_certificates,
         })
     }
 }
@@ -608,6 +621,10 @@ impl channel::Channel for Channel {
             climb.start();
         }
         Some(datagrams)
+    }
+
+    fn peer_certificates(&self) -> Option<&[Vec<u8>]> {
+        self.peer_certificates.as_deref()
     }
 
     fn close(&self) {

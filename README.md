@@ -18,6 +18,7 @@ proves nothing about who the peer is: identity is a separate step, on the channe
   pinned endpoint never downgrades.
 - Validated `Endpoints`: explicit URLs, one host, no credentials or query, plain WebSocket only on loopback by opt-in.
 - Blocking drivers for WebTransport and WebSocket, with a bound on every size and handshake.
+- The certificate chain TLS accepted from the peer, on either end of a channel, for a peer proof or a pin to decide on.
 - Raw datagrams beside the messages, on a ladder: WebTransport's own, a WebRTC data channel on the same UDP port (`webrtc` feature), then
   inside the WebSocket. A blocked UDP path costs only the attempt.
 - The same wire in Rust and Dart, held together by shared vectors.

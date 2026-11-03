@@ -51,6 +51,13 @@ pub trait Channel: Send + Sync {
     fn datagrams(&self) -> Option<&dyn Datagrams> {
         None
     }
+
+    /// The certificate chain the peer presented and this side's TLS configuration accepted, as DER, the peer's own certificate first:
+    /// the server's on a client, and on a server the client's, when its configuration asked for one. `None` on a channel with no TLS
+    /// or when the peer presented none. What it proves is what that configuration's verifier checked.
+    fn peer_certificates(&self) -> Option<&[Vec<u8>]> {
+        None
+    }
 }
 
 /// How a channel's datagrams actually travel, which decides what a caller can do with them.
@@ -122,6 +129,10 @@ impl Channel for alloc::boxed::Box<dyn Channel> {
 
     fn datagrams(&self) -> Option<&dyn Datagrams> {
         (**self).datagrams()
+    }
+
+    fn peer_certificates(&self) -> Option<&[Vec<u8>]> {
+        (**self).peer_certificates()
     }
 }
 
