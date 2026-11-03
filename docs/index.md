@@ -53,9 +53,16 @@ let websocket = websocket::Listener::bind(port.local_addr(), Some(tls))?.with_we
 ```
 
 **One port.** A `Port` owns the socket and reads the first byte of each packet, as [RFC 9443](https://www.rfc-editor.org/rfc/rfc9443) lays out: QUIC goes through a relay to an unmodified
-`wtransport`, STUN and DTLS to a data channel, and anything else is dropped. A source with no credentials gets no reply at all. The relay
-map has a cap and an idle expiry. A source that completed a handshake is never replaced. A flood of forged sources can still hold back
-new WebTransport sessions, which then fall back like any other that fails, and it does not reach the WebSocket or a data channel. QUIC must not grease its fixed bit on a shared port, so this listener does not offer to.
+`wtransport`, STUN and DTLS to a data channel, and anything else is dropped. STUN or DTLS without a session's credentials gets no reply;
+QUIC is answered as any QUIC server answers, with a Retry first. The relay map has a cap, a share for each IP address and an idle expiry
+that only the listener's side resets. A relay whose handshake finished is never replaced, and ends with its connection. A flood of forged
+sources can still hold back new WebTransport sessions, which then fall back like any other that fails, and it shares the port's thread
+with the data channels. QUIC must not grease its fixed bit on a shared port, so this listener does not offer to.
+
+**Who may use a data channel's path.** A server answers checks only from its WebSocket peer's IP address, routes each check by the
+username fragment it names, and once the peer nominates a source hears from that source alone. So a client holding the credentials can
+neither point the server's traffic at someone else nor take another client's path. Behind a proxy, where the WebSocket peer is the proxy,
+`any_candidate` lifts the address check and only the hold to the nominated source remains.
 
 **Climbing.** A client that asks offers `coqui-web-ladder.1` before `coqui-web-datagrams.1`, and a server with a port chooses it, which adds
 tag 2 to the binary messages: a signal, one byte (1 offer, 2 answer, 3 refused) and a session description. Datagrams start in the WebSocket.
@@ -67,7 +74,8 @@ with an event, and nothing tries again. If UDP is blocked only the attempt is lo
 
 **Identity.** Signals on the WebSocket have what TLS gives them. A caller with a proven, sealed link can carry them itself (`Signaling::ByCaller`,
 `carriedSignals` in Dart). The DTLS fingerprints are then inside the proof, and so are that data channel's datagrams, which WebTransport's and
-the WebSocket's are not.
+the WebSocket's are not. While that data channel is open, a datagram tagged inside the WebSocket is discarded and counted rather than
+delivered beside them.
 
 **Addresses.** An offer goes with no candidates, so it names nothing about the client; the server learns it from the first check. A server
 names one candidate: the address the WebSocket arrived at, or `public_address`. Set that behind a proxy or NAT, or the candidate is wrong

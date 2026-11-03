@@ -13,7 +13,7 @@ mod worker;
 use alloc::sync::Arc;
 use core::fmt;
 use core::net::{IpAddr, SocketAddr};
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 use std::io;
 use std::net::UdpSocket;
@@ -54,8 +54,10 @@ pub struct Settings {
     /// The address a [`Port`] names in its one candidate. Unset, it names the address the WebSocket connection arrived at, with the
     /// UDP port's number. Behind a proxy or NAT that is wrong, and it tells the peer an address it had no other way to learn.
     pub public_address: Option<SocketAddr>,
-    /// Lets a dialer use a candidate at another address than the WebSocket's peer. Off, an answer naming another address is refused,
-    /// so a peer cannot point this side's connectivity checks somewhere else.
+    /// Lets the other end's path be at another address than the WebSocket's peer. Off, a dialer refuses an answer naming another
+    /// address, and a [`Port`] answers checks only from the WebSocket peer's address, so neither end can point the other's traffic
+    /// somewhere else. Behind a proxy the WebSocket peer is the proxy, so a `Port` there needs this on, and each data channel is then
+    /// held to the one source its peer nominated.
     pub any_candidate: bool,
     /// How offers and answers travel.
     pub signaling: Signaling,
@@ -64,6 +66,9 @@ pub struct Settings {
     /// QUIC sources a [`Port`] relays at once, each a socket, so keep this well below the process's limit on them. A new source past
     /// this replaces the oldest that has completed no handshake in half a second, and is dropped if there is none.
     pub max_relays: usize,
+    /// QUIC sources, and data channels, one IP address holds at once. Behind a proxy every WebSocket client has the proxy's
+    /// address, which this then limits.
+    pub max_per_address: usize,
     /// Silence after which a relay ends. A source returning later gets a new one, which QUIC reads as a changed address. It should
     /// outlast the QUIC idle timeout.
     pub relay_idle: Duration,
@@ -80,12 +85,28 @@ impl Default for Settings {
             signaling: Signaling::OnChannel,
             max_sessions: 256,
             max_relays: 512,
+            max_per_address: 64,
             relay_idle: Duration::from_secs(120),
         }
     }
 }
 
 impl Settings {
+    /// Whether these leave room for a datagram, a time to try in and something to hold.
+    pub(crate) fn check(&self) -> Result<(), Failure> {
+        let usable = self.path_mtu > climb::OVERHEAD
+            && !self.attempt.is_zero()
+            && !self.relay_idle.is_zero()
+            && self.max_sessions > 0
+            && self.max_relays > 0
+            && self.max_per_address > 0;
+        if usable {
+            Ok(())
+        } else {
+            Err(Failure::Unsupported)
+        }
+    }
+
     /// Sets whether to try.
     #[must_use]
     pub const fn with_enabled(mut self, enabled: bool) -> Self {
@@ -114,7 +135,7 @@ impl Settings {
         self
     }
 
-    /// Lets a dialer use a candidate at another address than the WebSocket's peer.
+    /// Lets the other end's path be at another address than the WebSocket's peer.
     #[must_use]
     pub const fn with_any_candidate(mut self) -> Self {
         self.any_candidate = true;
@@ -142,6 +163,13 @@ impl Settings {
         self
     }
 
+    /// Sets how many QUIC sources, and data channels, one IP address holds at once.
+    #[must_use]
+    pub const fn with_max_per_address(mut self, held: usize) -> Self {
+        self.max_per_address = held;
+        self
+    }
+
     /// Sets the silence after which a relay ends.
     #[must_use]
     pub const fn with_relay_idle(mut self, limit: Duration) -> Self {
@@ -165,6 +193,7 @@ struct Inner {
     commands: mpsc::Sender<Command>,
     waker: Arc<Waker>,
     relays: Relays,
+    quic_taken: AtomicBool,
     next_session: AtomicU64,
     open_sessions: Arc<AtomicUsize>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
@@ -184,8 +213,10 @@ impl Port {
     ///
     /// # Errors
     ///
-    /// [`Failure::Permission`] when the address is taken or not allowed; otherwise [`Failure::Unsupported`].
+    /// [`Failure::Permission`] when the address is taken or not allowed; [`Failure::Unsupported`] for settings that leave no room
+    /// for a datagram, a time to try in or anything to hold, or when the socket or thread could not start.
     pub fn bind(address: SocketAddr, settings: Settings) -> Result<Self, Failure> {
+        settings.check()?;
         let socket = UdpSocket::bind(address).map_err(|error| match error.kind() {
             io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied => Failure::Permission,
             _ => Failure::Unsupported,
@@ -231,6 +262,7 @@ impl Port {
                 commands,
                 waker,
                 relays,
+                quic_taken: AtomicBool::new(false),
                 next_session: AtomicU64::new(0),
                 open_sessions,
                 worker: Mutex::new(Some(worker)),
@@ -263,6 +295,21 @@ impl Port {
     /// Sends QUIC packets to this address from now on.
     pub(crate) fn relay_to(&self, quic: SocketAddr) {
         self.command(Command::Quic(quic));
+    }
+
+    /// Takes the port's one place for a QUIC listener, if it is free.
+    pub(crate) fn take_quic(&self) -> bool {
+        !self.inner.quic_taken.swap(true, Ordering::SeqCst)
+    }
+
+    /// The relay at this address carried a finished handshake.
+    pub(crate) fn prove(&self, relay: SocketAddr) {
+        self.command(Command::Proven(relay));
+    }
+
+    /// The connection through the relay at this address has ended.
+    pub(crate) fn release(&self, relay: SocketAddr) {
+        self.command(Command::Released(relay));
     }
 
     /// The source a relay's address stands for. `None` for an address no relay holds, which reached the listener some other way.
@@ -323,13 +370,13 @@ mod tests {
     }
 
     fn port_for(relays: usize) -> (Port, UdpSocket) {
+        port_with(Settings::default().with_max_relays(relays))
+    }
+
+    fn port_with(settings: Settings) -> (Port, UdpSocket) {
         let quic = UdpSocket::bind("127.0.0.1:0").unwrap();
         quic.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let port = Port::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            Settings::default().with_max_relays(relays),
-        )
-        .unwrap();
+        let port = Port::bind("127.0.0.1:0".parse().unwrap(), settings).unwrap();
         port.relay_to(quic.local_addr().unwrap());
         (port, quic)
     }
@@ -385,12 +432,12 @@ mod tests {
     }
 
     #[test]
-    fn a_source_that_was_answered_in_full_is_never_replaced() {
+    fn a_reply_however_large_proves_nothing() {
         let (port, quic) = port();
         let (one, two, three) = (client(), client(), client());
         let relay = first_packet(&one, &port, &quic);
         first_packet(&two, &port, &quic);
-        // A handshake's first flight, which a Retry is too small to be.
+        // A handshake's first flight, which a source gets before it has finished anything.
         quic.send_to(&[0xc0; 600], relay).unwrap();
         one.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut buffer = [0_u8; 2048];
@@ -398,13 +445,90 @@ mod tests {
 
         std::thread::sleep(worker_young());
         first_packet(&three, &port, &quic);
-        assert!(holds(&port, &one), "a proven source was replaced");
+        assert!(
+            !holds(&port, &one),
+            "a reply was taken for a finished handshake"
+        );
+        assert!(holds(&port, &two) && holds(&port, &three));
+    }
+
+    #[test]
+    fn a_finished_handshake_is_never_replaced() {
+        let (port, quic) = port();
+        let (one, two, three, four) = (client(), client(), client(), client());
+        let relay = first_packet(&one, &port, &quic);
+        first_packet(&two, &port, &quic);
+        port.prove(relay);
+        std::thread::sleep(worker_young());
+        first_packet(&three, &port, &quic);
+        assert!(holds(&port, &one), "a finished handshake was replaced");
         assert!(!holds(&port, &two));
-        let four = client();
         std::thread::sleep(worker_young());
         first_packet(&four, &port, &quic);
-        assert!(holds(&port, &one), "a proven source was replaced");
+        assert!(holds(&port, &one), "a finished handshake was replaced");
         assert!(holds(&port, &four) && !holds(&port, &three));
+    }
+
+    #[test]
+    fn a_relay_ends_with_its_connection() {
+        let (port, quic) = port();
+        let one = client();
+        let relay = first_packet(&one, &port, &quic);
+        port.prove(relay);
+        port.release(relay);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while holds(&port, &one) {
+            assert!(Instant::now() < deadline, "a relay outlived its connection");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_source_cannot_keep_its_relay_alive_by_sending() {
+        let (port, quic) = port_with(
+            Settings::default()
+                .with_max_relays(4)
+                .with_relay_idle(Duration::from_millis(300)),
+        );
+        let one = client();
+        let first = first_packet(&one, &port, &quic);
+        let mut relays = std::collections::HashSet::from([first]);
+        let started = Instant::now();
+        let mut buffer = [0_u8; 2048];
+        quic.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        while started.elapsed() < Duration::from_millis(1500) {
+            one.send_to(&[0x40; 64], port.local_addr()).unwrap();
+            if let Ok((_, relay)) = quic.recv_from(&mut buffer) {
+                relays.insert(relay);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // Gone quiet on the listener's side, it ended, and the next packet from the source got a new one.
+        assert!(relays.len() >= 2, "one relay throughout: {relays:?}");
+    }
+
+    #[test]
+    fn one_address_holds_no_more_than_its_share() {
+        let (port, quic) = port_with(
+            Settings::default()
+                .with_max_relays(8)
+                .with_max_per_address(2),
+        );
+        let (one, two, three) = (client(), client(), client());
+        first_packet(&one, &port, &quic);
+        first_packet(&two, &port, &quic);
+        three.send_to(&[0xc0; 1200], port.local_addr()).unwrap();
+        assert!(nothing_arrives(&quic));
+        assert!(!holds(&port, &three));
+        if let Ok(elsewhere) = UdpSocket::bind("127.0.0.2:0") {
+            first_packet(&elsewhere, &port, &quic);
+            assert!(holds(&port, &elsewhere));
+        }
+        // Its oldest makes way for it once that has had its chance.
+        std::thread::sleep(worker_young());
+        first_packet(&three, &port, &quic);
+        assert!(holds(&port, &three) && !holds(&port, &one));
     }
 
     #[test]

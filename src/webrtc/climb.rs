@@ -22,8 +22,10 @@ pub(super) const REFUSED: u8 = 3;
 const MAX_SIGNAL: usize = 16 * 1024;
 /// An offer, an answer or a refusal: there is never more than one on its way.
 const SIGNALS: usize = 2;
+/// Subscriptions to a channel's changes held at once: the most recent, since one let go cannot be told from one still listening.
+const WATCHERS: usize = 16;
 /// SCTP, DTLS and padding on a data channel's message, and UDP and IPv6 under them.
-const OVERHEAD: usize = 116;
+pub(super) const OVERHEAD: usize = 116;
 /// What fits one SCTP chunk whichever implementation is at the other end: str0m's and a browser's fragment points are near this.
 const LARGEST: usize = 1100;
 
@@ -35,8 +37,12 @@ pub(crate) enum Plan {
         local: SocketAddr,
         peer: SocketAddr,
     },
-    /// Answers on `port`, naming `candidate`.
-    Listening { port: Port, candidate: SocketAddr },
+    /// Answers on `port`, naming `candidate`, for a WebSocket peer at `peer`.
+    Listening {
+        port: Port,
+        candidate: SocketAddr,
+        peer: SocketAddr,
+    },
 }
 
 /// Where a signal goes.
@@ -80,6 +86,17 @@ impl Path {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|watcher| watcher.send(delivery).is_ok());
+    }
+
+    /// Each change from now on.
+    fn watch(&self) -> mpsc::Receiver<Delivery> {
+        let (watcher, changes) = mpsc::channel();
+        let mut watchers = self.watchers.lock().unwrap_or_else(PoisonError::into_inner);
+        watchers.push(watcher);
+        if watchers.len() > WATCHERS {
+            watchers.remove(0);
+        }
+        changes
     }
 
     pub(super) fn opened(&self) {
@@ -187,7 +204,11 @@ impl Climb {
                     self.open(&mut state, &port, Role::Offer);
                 }
             }
-            Plan::Listening { port, candidate } => {
+            Plan::Listening {
+                port,
+                candidate,
+                peer,
+            } => {
                 if let Some(offer) = state.held_offer.take() {
                     self.open(
                         &mut state,
@@ -195,6 +216,7 @@ impl Climb {
                         Role::Answer {
                             offer,
                             candidate: *candidate,
+                            peer: peer.ip(),
                         },
                     );
                 }
@@ -249,7 +271,14 @@ impl Climb {
             return;
         }
         match (&self.plan, kind) {
-            (Plan::Listening { port, candidate }, OFFER) => {
+            (
+                Plan::Listening {
+                    port,
+                    candidate,
+                    peer,
+                },
+                OFFER,
+            ) => {
                 if state.attempted || state.held_offer.is_some() {
                     return;
                 }
@@ -264,6 +293,7 @@ impl Climb {
                         Role::Answer {
                             offer,
                             candidate: *candidate,
+                            peer: peer.ip(),
                         },
                     );
                 } else {
@@ -312,6 +342,12 @@ impl Climb {
             .receive(timeout)
     }
 
+    /// Whether this channel's datagrams are inside the peer proof now: signals carried by the caller, and the data channel open. Then
+    /// a datagram tagged inside the WebSocket, which only TLS protects, is not one of them.
+    pub(crate) fn sealed(&self) -> bool {
+        self.settings.signaling == Signaling::ByCaller && self.is_open()
+    }
+
     pub(crate) fn is_open(&self) -> bool {
         self.path.open.load(Ordering::SeqCst)
     }
@@ -339,13 +375,7 @@ impl Climb {
 
     /// Each change of path from now on.
     pub(crate) fn changes(&self) -> mpsc::Receiver<Delivery> {
-        let (watcher, changes) = mpsc::channel();
-        self.path
-            .watchers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(watcher);
-        changes
+        self.path.watch()
     }
 
     /// Ends the session and what it holds, so nothing keeps a reader waiting. Safe to call more than once.
@@ -370,5 +400,37 @@ impl Climb {
         if let Some((port, id)) = on {
             port.command(Command::Close(id));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path() -> Path {
+        Path {
+            open: AtomicBool::new(false),
+            max_size: LARGEST,
+            inbox: Mutex::new(None),
+            dropped: Arc::new(AtomicU64::new(0)),
+            watchers: Mutex::new(Vec::new()),
+            outgoing: Mutex::new(None),
+        }
+    }
+
+    #[test]
+    fn watching_and_letting_go_again_and_again_holds_nothing() {
+        let path = path();
+        for _ in 0..100 {
+            drop(path.watch());
+        }
+        let kept = path.watch();
+        assert!(
+            path.watchers.lock().unwrap().len() <= WATCHERS,
+            "{}",
+            path.watchers.lock().unwrap().len()
+        );
+        path.opened();
+        assert_eq!(kept.try_recv(), Ok(Delivery::Unreliable));
     }
 }

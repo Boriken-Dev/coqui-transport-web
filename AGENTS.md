@@ -265,7 +265,7 @@ pub fn Dialer::pinned(pins: &[CertificatePin]) -> Result<Self, Failure>
 pub fn Dialer::with_tls(tls: Arc<rustls::ClientConfig>) -> Result<Self, Failure>
 pub const fn Dialer::with_limits(self, limits: Limits) -> Self
 pub fn Listener::bind(address: SocketAddr, tls: Arc<rustls::ServerConfig>) -> Result<Self, Failure>
-pub fn Listener::on_port(port: &webrtc::Port, tls: Arc<rustls::ServerConfig>) -> Result<Self, Failure>  // feature webrtc
+pub fn Listener::on_port(port: &webrtc::Port, tls: Arc<rustls::ServerConfig>) -> Result<Self, Failure>  // feature webrtc; one per port, a second is Failure::Permission
 pub const fn Listener::with_limits(self, limits: Limits) -> Self
 pub fn Listener::with_origins(self, origins: impl IntoIterator<Item = String>) -> Self
 pub fn Listener::with_admission(self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self
@@ -280,7 +280,7 @@ pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Fai
 ## The ladder (`coqui_web::webrtc`, feature `webrtc`)
 
 ```rust
-pub struct Settings { pub enabled: bool, pub attempt: Duration, pub path_mtu: usize, pub public_address: Option<SocketAddr>, pub any_candidate: bool, pub signaling: Signaling, pub max_sessions: usize, pub max_relays: usize, pub relay_idle: Duration }
+pub struct Settings { pub enabled: bool, pub attempt: Duration, pub path_mtu: usize, pub public_address: Option<SocketAddr>, pub any_candidate: bool, pub signaling: Signaling, pub max_sessions: usize, pub max_relays: usize, pub max_per_address: usize, pub relay_idle: Duration }
 pub const fn with_enabled(self, enabled: bool) -> Self
 pub const fn with_attempt(self, limit: Duration) -> Self
 pub const fn with_path_mtu(self, bytes: usize) -> Self
@@ -289,16 +289,17 @@ pub const fn with_any_candidate(self) -> Self
 pub const fn with_signaling(self, signaling: Signaling) -> Self
 pub const fn with_max_sessions(self, sessions: usize) -> Self
 pub const fn with_max_relays(self, relays: usize) -> Self
+pub const fn with_max_per_address(self, held: usize) -> Self
 pub const fn with_relay_idle(self, limit: Duration) -> Self
 pub enum Signaling { OnChannel, ByCaller }            // non_exhaustive; default OnChannel
 pub struct Port                                       // Clone; Debug
-pub fn Port::bind(address: SocketAddr, settings: Settings) -> Result<Self, Failure>   // Failure::Permission when taken or not allowed
+pub fn Port::bind(address: SocketAddr, settings: Settings) -> Result<Self, Failure>   // Permission when taken or not allowed; Unsupported for settings that leave no room
 pub fn Port::local_addr(&self) -> SocketAddr
 pub fn Port::relays(&self) -> usize                   // QUIC sources relayed now
 pub fn Port::data_channels(&self) -> usize            // data channels held now, opening or open
 ```
 
-`#[non_exhaustive]`. Defaults: on, 5 s for an attempt, a path of 1280 bytes, no public address, a candidate only where the peer is, `OnChannel`, 256 data channels, 512 relays, 120 s for a relay's silence.
+`#[non_exhaustive]`. Defaults: on, 5 s for an attempt, a path of 1280 bytes, no public address, a candidate only where the peer is, `OnChannel`, 256 data channels, 512 relays, 64 of either for one IP address, 120 s for a relay's silence on the listener's side. Settings with a `path_mtu` of 116 or less, or a zero time or count, are `Failure::Unsupported` from `Port::bind` and from a `with_webrtc` dialer's `dial`.
 
 A `Port` reads the first byte of each packet (RFC 9443): QUIC to a loopback relay in front of `webtransport::Listener::on_port`, STUN and DTLS to a data channel, anything else dropped. One worker thread serves it and sleeps while nothing is due; at rest it wakes when `str0m` asks, every few seconds per data channel. It ends with its last clone, listener or channel: the socket and relays close and the thread is joined.
 
@@ -316,8 +317,11 @@ A WebSocket with `Dialer::with_webrtc` asks for `coqui-web-ladder.1` and `coqui-
 - A datagram sent from a data channel's end before the other end has switched still arrives: each end listens on both paths.
 - `Port`'s candidate names the address the WebSocket connection arrived at, with the UDP port's number. Behind a proxy or NAT set `Settings::public_address`: the default is wrong there, and tells the peer an address it had no other way to learn. A peer always learns the address it is given. On a host with several addresses, bind one: a reply leaves by whichever the system picks, on a wildcard socket.
 - A peer can name any candidate in an answer. `with_webrtc` refuses one not at the WebSocket's peer unless `Settings::any_candidate`; candidates in an offer are discarded. A browser has no such check for a server named by host name.
+- A listening data channel answers checks only from its WebSocket peer's IP address, and once its peer nominates a source it hears from that one alone, so a client holding the credentials cannot point the port's traffic elsewhere or take another session's path. A check is routed by the fragment it names, anything else by its source. Behind a proxy the WebSocket peer is the proxy: set `any_candidate` on the `Port`, and each session is then held to the first source its peer nominated, which that peer could have forged.
+- One IP address holds at most `max_per_address` relays and as many data channels. Behind a proxy every client has the proxy's address.
 - Through a reverse proxy a UDP path needs a stream block for the port, or the host's own port with `public_address`. Without one the attempt fails and the ladder ends at the WebSocket.
-- A relay is a socket per QUIC source, so a flood of forged sources is a real cost, which the cap bounds. Past the cap a new source replaces the oldest with no finished handshake and at least half a second old, or is dropped, and takes at least a 1200-byte first packet. A source with a finished handshake is never replaced, and the WebSocket and data channels are not affected, but a flood of more than the cap per half second holds back new WebTransport sessions, each of whose first packets then has that share of a chance. They fall back like any failed WebTransport.
+- A relay is a socket per QUIC source, so a flood of forged sources is a real cost, which the caps bound. Past either cap a new source replaces the oldest of the same kind with no finished handshake and at least half a second old, or is dropped, and takes at least a 1200-byte first packet. A relay whose WebTransport handshake finished is never replaced and ends when its connection does; one is kept alive only by what the listener sends, never by the source. A flood of more than the cap per half second still holds back new WebTransport sessions, which fall back like any failed WebTransport. It shares the port's one thread with the data channels, so it can slow them too.
+- A relay's address is a loopback port the system hands out, so it can come back for another source. A Retry token names that address and lasts seconds, and went only to the source it was minted for. No address-validation token is handed out on a port: one is bound to an IP address, and every relay is 127.0.0.1.
 - `webtransport::Listener::on_port` sees the relay's address, not the client's, inside `wtransport`; admission and `Debug` read through to the real one. A local process reaching its loopback socket directly is refused when admission is set. QUIC's ECN does not cross the relay.
-- `Datagrams::path_changes` before `datagrams()` is not possible, and an event between the two calls is missed: read `delivery()` after subscribing.
-- Signals on the channel have what TLS gives them. For datagrams bound to a peer proof use `Signaling::ByCaller` and carry them inside the proven link.
+- `Datagrams::path_changes` before `datagrams()` is not possible, and an event between the two calls is missed: read `delivery()` after subscribing. A climbing channel tells only its 16 most recent subscriptions.
+- Signals on the channel have what TLS gives them. For datagrams bound to a peer proof use `Signaling::ByCaller` and carry them inside the proven link. Then, while the data channel is open, a datagram tagged inside the WebSocket is discarded and counted, so everything received is inside the proof; before it opens, and after it dies, they are what TLS gives them.

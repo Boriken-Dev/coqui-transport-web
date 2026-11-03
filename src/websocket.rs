@@ -407,6 +407,15 @@ struct WorkerClimb {
 impl WorkerDatagrams {
     /// Holds one only once someone has asked for them: a peer that has proved nothing must not be able to fill memory that way.
     fn arrived(&self, body: &[u8]) {
+        #[cfg(feature = "webrtc")]
+        if self
+            .climb
+            .as_ref()
+            .is_some_and(|climb| climb.climb.sealed())
+        {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         let kept = self.wanted.load(Ordering::SeqCst)
             && body.len() <= self.max_size
             && self.inbox.try_send(Ok(body.to_vec())).is_ok();
@@ -1188,6 +1197,10 @@ impl channel::Dialer for Dialer {
         }
         let timeout = timeout.min(self.limits.handshake);
         let deadline = Instant::now() + timeout;
+        #[cfg(feature = "webrtc")]
+        if let Some(settings) = self.webrtc.filter(|settings| settings.enabled) {
+            settings.check()?;
+        }
         let tcp = Self::open_tcp(endpoint, deadline)?;
         #[cfg(feature = "webrtc")]
         let addresses = tcp
@@ -1447,7 +1460,9 @@ impl Pending {
             webrtc,
         } = self;
         #[cfg(feature = "webrtc")]
-        let arrived_at = tcp.local_addr();
+        let arrived_at = tcp
+            .local_addr()
+            .and_then(|local| Ok((local, tcp.peer_addr()?)));
         #[cfg(feature = "webrtc")]
         let can_climb = webrtc.is_some();
         tcp.set_nonblocking(false).map_err(|e| io_failure(&e))?;
@@ -1533,9 +1548,13 @@ impl Pending {
         })?;
         #[cfg(feature = "webrtc")]
         let plan = match (webrtc, arrived_at) {
-            (Some(port), Ok(local)) if climbing.load(Ordering::SeqCst) => {
+            (Some(port), Ok((local, peer))) if climbing.load(Ordering::SeqCst) => {
                 let candidate = port.candidate_for(local);
-                Some(Plan::Listening { port, candidate })
+                Some(Plan::Listening {
+                    port,
+                    candidate,
+                    peer,
+                })
             }
             _ => None,
         };

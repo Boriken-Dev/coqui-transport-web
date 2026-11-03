@@ -148,9 +148,20 @@ impl Channel {
         let reader = handle
             .spawn(read_loop(recv, Arc::clone(&max_message), to_reader))
             .abort_handle();
+        let connection = Arc::new(connection);
+        // Through a port, a finished handshake is what keeps a relay from being replaced, and the connection's end is what ends it.
+        #[cfg(feature = "webrtc")]
+        if let Some(port) = &port {
+            port.prove(connection.remote_address());
+            let (port, watched) = (port.clone(), Arc::clone(&connection));
+            handle.spawn(async move {
+                watched.closed().await;
+                port.release(watched.remote_address());
+            });
+        }
         Self {
             inbox: Inbox::new(inbox),
-            connection: Arc::new(connection),
+            connection,
             send: Mutex::new(Some(send)),
             reader,
             handle,
@@ -514,15 +525,18 @@ impl Listener {
         })
     }
 
-    /// Listens on a [`Port`] rather than a socket of its own, so data channels can share the number. `wtransport` runs on a loopback
+    /// Listens on a [`Port`], which takes one such listener in its life, so data channels can share the number. `wtransport` runs on a loopback
     /// socket behind the port's relay, unmodified but for not offering to grease QUIC's fixed bit: RFC 9443 forbids that on a shared
     /// port, since a greased packet can read as DTLS. Admission still judges the real source.
     ///
     /// # Errors
     ///
-    /// Why it could not start.
+    /// [`Failure::Permission`] when the port already has its listener; otherwise why it could not start.
     #[cfg(feature = "webrtc")]
     pub fn on_port(port: &Port, tls: Arc<ServerConfig>) -> Result<Self, Failure> {
+        if !port.take_quic() {
+            return Err(Failure::Permission);
+        }
         let runtime = runtime()?;
         let mut tls = ServerConfig::clone(&tls);
         tls.alpn_protocols = alloc::vec![WEBTRANSPORT_ALPN.to_vec()];
@@ -531,6 +545,12 @@ impl Listener {
             .with_custom_tls(tls)
             .build();
         config.quic_endpoint_config_mut().grease_quic_bit(false);
+        // An address token is bound to an IP address, and every source here has 127.0.0.1: one would let anyone skip validation.
+        let mut tokens = wtransport::quinn::ValidationTokenConfig::default();
+        tokens
+            .sent(0)
+            .log(Arc::new(wtransport::quinn::NoneTokenLog));
+        config.quic_config_mut().validation_token_config(tokens);
         let endpoint = {
             let _inside = runtime.enter();
             Endpoint::server(config).map_err(|_| Failure::Unsupported)?

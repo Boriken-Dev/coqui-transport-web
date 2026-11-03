@@ -57,7 +57,8 @@ fn tls() -> (Arc<rustls::ServerConfig>, CertificatePin) {
 /// port sees a source this test knows.
 struct Forwarder {
     address: SocketAddr,
-    target: SocketAddr,
+    /// Where it forwards to, which a test may set once the port is bound.
+    target: Arc<Mutex<SocketAddr>>,
     /// Of every this many packets the first is dropped; 0 drops none.
     drop_each: Arc<AtomicUsize>,
     black_hole: Arc<AtomicBool>,
@@ -80,7 +81,7 @@ impl Forwarder {
         let address = near.local_addr().unwrap();
         let this = Self {
             address,
-            target,
+            target: Arc::new(Mutex::new(target)),
             drop_each: Arc::default(),
             black_hole: Arc::default(),
             upstream: Arc::default(),
@@ -98,6 +99,7 @@ impl Forwarder {
         let large_downstream = Arc::clone(&this.large_downstream);
         let sources = Arc::clone(&this.sources);
         let stop = Arc::clone(&this.stop);
+        let target = Arc::clone(&this.target);
         thread::spawn(move || {
             let mut far: HashMap<SocketAddr, UdpSocket> = HashMap::new();
             let mut buffer = vec![0_u8; 65536];
@@ -114,7 +116,9 @@ impl Forwarder {
                     let socket = far.entry(client).or_insert_with(|| {
                         let socket = UdpSocket::bind(loopback()).unwrap();
                         socket.set_nonblocking(true).unwrap();
-                        socket.connect(target).unwrap();
+                        socket
+                            .connect(*target.lock().unwrap_or_else(PoisonError::into_inner))
+                            .unwrap();
                         sources
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
@@ -375,7 +379,11 @@ fn a_path_that_dies_goes_back_to_the_websocket_with_an_event_and_no_second_attem
 /// A port whose candidate is `forwarder`, on the number it forwards to.
 fn on_forwarded(forwarder: &Forwarder) -> (Port, websocket::Listener) {
     let settings = Settings::default().with_public_address(forwarder.address);
-    let port = Port::bind(forwarder.target, settings).unwrap();
+    let port = Port::bind(loopback(), settings).unwrap();
+    *forwarder
+        .target
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = port.local_addr();
     let listener = websocket::Listener::bind(loopback(), None)
         .unwrap()
         .with_frames(Frames::Binary)
@@ -1074,11 +1082,8 @@ fn closing_frees_the_number_and_ends_the_channels_reader() {
 }
 
 impl Forwarder {
-    /// A forwarder to a number free for the caller to bind.
+    /// A forwarder whose target [`on_forwarded`] sets.
     fn reserve() -> Self {
-        let holder = UdpSocket::bind(loopback()).unwrap();
-        let target = holder.local_addr().unwrap();
-        drop(holder);
-        Self::new(target)
+        Self::new(loopback())
     }
 }

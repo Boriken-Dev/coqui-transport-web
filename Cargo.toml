@@ -51,6 +51,12 @@ url = "2.5"
 time = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 wtransport = { version = "0.7.2", default-features = false, features = ["quinn", "ring"] }
+# The tests that forge STUN, and count QUIC address tokens as a consumer with quinn's default `bloom` would see them.
+hmac = "0.12"
+sha1 = "0.10"
+bytes = "1"
+quinn = { version = "0.11", default-features = false, features = ["bloom"] }
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 
 [[example]]
 name = "echo"
@@ -66,6 +72,10 @@ required-features = ["webrtc"]
 
 [[test]]
 name = "ladder_idle"
+required-features = ["webrtc"]
+
+[[test]]
+name = "ladder_peers"
 required-features = ["webrtc"]
 
 [lints.rust]

@@ -5,7 +5,7 @@
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
-use core::net::{Ipv4Addr, SocketAddr};
+use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use core::panic::AssertUnwindSafe;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
@@ -21,8 +21,9 @@ use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Token};
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
+use str0m::ice::StunMessage;
 use str0m::net::{Protocol, Receive};
-use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
+use str0m::{Candidate, Event, IceConnectionState, IceCreds, Input, Output, Rtc};
 
 use super::Settings;
 use super::climb::{ANSWER, OFFER, Path, REFUSED};
@@ -35,15 +36,16 @@ const FIRST_RELAY: usize = 2;
 const BUDGET: usize = 256;
 /// A UDP datagram cannot be larger.
 const BUFFER: usize = 64 * 1024;
-/// How long a source that has completed no handshake keeps its relay with nothing happening. QUIC's handshake limit is this long.
+/// How long a source that has completed no handshake keeps its relay with nothing from the listener. QUIC's handshake limit is this
+/// long.
 const UNPROVEN_IDLE: Duration = Duration::from_secs(10);
 /// How long a new relay is safe from being replaced: long enough for a Retry and the answer to it. Replaced sooner, a flood would
 /// keep every real client out, since a Retry's token names the relay and a replaced one starts again with another.
 pub(super) const YOUNG: Duration = Duration::from_millis(500);
 /// QUIC's least for a client's first datagram (RFC 9000 section 14.1), so a forged source costs a flood this much.
 const LEAST_INITIAL: usize = 1200;
-/// A reply this large is no Retry, so the listener accepted the source's address: only a source that can read what it was sent gets one.
-const PROVEN_REPLY: usize = 512;
+/// Sources a listening session answers checks from before its peer nominates one. A browser checks from each of its addresses.
+const CHECKED: usize = 8;
 /// Datagrams taken from one session's queue in one turn.
 const SENDS_PER_TURN: usize = 64;
 const CHANNEL_LABEL: &str = "coqui-web-datagrams";
@@ -84,6 +86,10 @@ impl Relays {
 pub(super) enum Command {
     /// Where QUIC goes.
     Quic(SocketAddr),
+    /// The relay at this address carried a finished handshake.
+    Proven(SocketAddr),
+    /// The connection through the relay at this address has ended.
+    Released(SocketAddr),
     /// Starts a session.
     Open(Box<Opening>),
     /// The peer's answer to this session's offer, and where it said to send.
@@ -109,10 +115,11 @@ pub(super) struct Opening {
 
 /// Which end of the offer this is.
 pub(super) enum Role {
-    /// Answers `offer`, naming one candidate.
+    /// Answers `offer`, naming one candidate, for a WebSocket peer at `peer`.
     Answer {
         offer: String,
         candidate: SocketAddr,
+        peer: IpAddr,
     },
     /// Makes an offer. The socket's own address is the one candidate.
     Offer,
@@ -140,8 +147,14 @@ struct Session {
     /// Something happened, so it must be asked what it wants next.
     stirred: bool,
     pending: Option<SdpPendingOffer>,
-    /// A dialer hears only from where the answer said.
-    only_from: Option<SocketAddr>,
+    /// This side's ICE username fragment, which a check names and so routes by.
+    ufrag: String,
+    /// A listener's WebSocket peer, the only address checks may come from unless the settings allow any.
+    peer: Option<IpAddr>,
+    /// The one source this session hears from: where a dialer's answer said, or what a listener's peer nominated.
+    pinned: Option<SocketAddr>,
+    /// Sources that passed a check before the nomination.
+    checked: Vec<SocketAddr>,
 }
 
 pub(super) struct Worker {
@@ -159,6 +172,10 @@ pub(super) struct Worker {
     next_token: usize,
     next_sweep: Option<Instant>,
     sessions: HashMap<u64, Session>,
+    // A check routes by the fragment it names, anything else by where it came from; neither can be claimed from another session.
+    by_ufrag: HashMap<String, u64>,
+    by_source: HashMap<SocketAddr, u64>,
+    relays_per_address: HashMap<IpAddr, usize>,
     buffer: Vec<u8>,
     // Sockets that had more to read when a turn's budget ran out.
     unfinished: Vec<Token>,
@@ -203,6 +220,9 @@ impl Worker {
             next_token: FIRST_RELAY,
             next_sweep: None,
             sessions: HashMap::new(),
+            by_ufrag: HashMap::new(),
+            by_source: HashMap::new(),
+            relays_per_address: HashMap::new(),
             buffer: vec![0; BUFFER],
             unfinished: Vec::new(),
             open_sessions,
@@ -281,10 +301,28 @@ impl Worker {
                     }
                     self.quic = Some(address);
                 }
+                Ok(Command::Proven(relay)) => {
+                    if let Some(relay) = self
+                        .relay_by_token
+                        .values_mut()
+                        .find(|held| held.address == relay)
+                    {
+                        relay.proven = true;
+                    }
+                }
+                Ok(Command::Released(relay)) => {
+                    let token = self
+                        .relay_by_token
+                        .iter()
+                        .find_map(|(token, held)| (held.address == relay).then_some(*token));
+                    if let Some(token) = token {
+                        self.remove_relay(token);
+                    }
+                }
                 Ok(Command::Open(opening)) => self.open(*opening),
                 Ok(Command::Answer { id, sdp, candidate }) => self.answer(id, &sdp, candidate),
                 Ok(Command::Close(id)) => {
-                    if let Some(mut session) = self.sessions.remove(&id) {
+                    if let Some(mut session) = self.remove_session(id) {
                         session.close(&self.public);
                     }
                 }
@@ -292,6 +330,13 @@ impl Worker {
                 Err(TryRecvError::Empty) => return true,
             }
         }
+    }
+
+    fn remove_session(&mut self, id: u64) -> Option<Session> {
+        let session = self.sessions.remove(&id)?;
+        self.by_ufrag.remove(&session.ufrag);
+        self.by_source.retain(|_, owner| *owner != id);
+        Some(session)
     }
 
     fn open(&mut self, opening: Opening) {
@@ -302,14 +347,32 @@ impl Worker {
             role,
             attempt,
         } = opening;
-        if self.sessions.len() >= self.settings.max_sessions {
+        let peer = match &role {
+            Role::Answer { peer, .. } => Some(peer.to_canonical()),
+            Role::Offer => None,
+        };
+        let held = peer.map_or(0, |peer| {
+            self.sessions
+                .values()
+                .filter(|session| session.peer == Some(peer))
+                .count()
+        });
+        if self.sessions.len() >= self.settings.max_sessions
+            || held >= self.settings.max_per_address
+        {
             path.signal(REFUSED, "");
             return;
         }
         let now = Instant::now();
+        // A fragment of its own, so no two sessions here can be told apart only by the order they are tried in.
+        let mut credentials = IceCreds::new();
+        credentials.ufrag = format!("{}{id:x}", credentials.ufrag);
+        let ufrag = credentials.ufrag.clone();
         let built = catch_unwind(AssertUnwindSafe(|| match role {
-            Role::Answer { offer, candidate } => answering(now, &offer, candidate),
-            Role::Offer => offering(now, self.local),
+            Role::Answer {
+                offer, candidate, ..
+            } => answering(now, &offer, candidate, credentials),
+            Role::Offer => offering(now, self.local, credentials),
         }));
         let Ok(Some((rtc, local, description, pending))) = built else {
             path.signal(REFUSED, "");
@@ -329,9 +392,13 @@ impl Worker {
                 due: now,
                 stirred: true,
                 pending,
-                only_from: None,
+                ufrag: ufrag.clone(),
+                peer,
+                pinned: None,
+                checked: Vec::new(),
             },
         );
+        self.by_ufrag.insert(ufrag, id);
     }
 
     fn answer(&mut self, id: u64, sdp: &str, candidate: SocketAddr) {
@@ -347,10 +414,11 @@ impl Worker {
                 .and_then(|answer| session.rtc.sdp_api().accept_answer(pending, answer).ok())
         }));
         if matches!(accepted, Ok(Some(()))) {
-            session.only_from = Some(candidate);
+            session.pinned = Some(candidate);
             session.stirred = true;
+            self.by_source.insert(candidate, id);
         } else {
-            self.sessions.remove(&id);
+            self.remove_session(id);
         }
     }
 
@@ -363,10 +431,13 @@ impl Worker {
                 let Ok(datagram) = session.to_send.try_recv() else {
                     break;
                 };
-                let written = session
-                    .rtc
-                    .channel(channel)
-                    .is_some_and(|mut open| open.write(true, &datagram).unwrap_or(false));
+                let written = catch_unwind(AssertUnwindSafe(|| {
+                    session
+                        .rtc
+                        .channel(channel)
+                        .is_some_and(|mut open| open.write(true, &datagram).unwrap_or(false))
+                }))
+                .unwrap_or(false);
                 if !written {
                     session.path.count_dropped();
                 }
@@ -380,13 +451,9 @@ impl Worker {
             match self.public.recv_from(&mut self.buffer) {
                 Ok((count, source)) => self.arrived(count, source),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => return false,
-                // Windows reports an earlier send's ICMP port-unreachable here, on a socket that is fine.
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::ConnectionReset | io::ErrorKind::Interrupted
-                    ) => {}
-                Err(_) => return false,
+                // Readiness is reported once, so a socket left before it would block could go deaf: an error, such as the
+                // port-unreachable Windows reports for an earlier send, is read past.
+                Err(_) => {}
             }
         }
         true
@@ -400,37 +467,91 @@ impl Worker {
         }
     }
 
-    /// Only a session that accepts a packet ever hears of it, and one accepts STUN only with its credentials. Anything else gets no
-    /// reply of any kind, so an unproven source can neither learn this port is here nor use it to reflect anything.
+    /// A packet goes to one session at most: a check to the one whose fragment it names, anything else to the one its source belongs
+    /// to. That session takes it only from where it may hear, and str0m only with its credentials. Anything else gets no reply of any
+    /// kind, so a source with no credentials can neither learn a session is here nor use it to reflect anything.
     fn deliver_to_session(&mut self, count: usize, source: SocketAddr) {
         let now = Instant::now();
-        let buffer = &self.buffer[..count];
-        let mut failed = None;
-        for (id, session) in &mut self.sessions {
-            if session.only_from.is_some_and(|only| only != source) {
-                continue;
-            }
-            let Ok(receive) = Receive::new(Protocol::Udp, source, session.local, buffer) else {
-                // The same bytes will parse for no session.
+        let packet = &self.buffer[..count];
+        let mut check = None;
+        let owner = if packet[0] <= 3 {
+            let Ok(Some((ufrag, nominates))) = catch_unwind(|| {
+                let message = StunMessage::parse(packet).ok()?;
+                let ufrag = message.split_username().map(|(local, _)| local.to_owned());
+                Some((
+                    ufrag,
+                    message.is_binding_request() && message.use_candidate(),
+                ))
+            }) else {
                 return;
             };
+            match ufrag {
+                Some(ufrag) => {
+                    check = Some(nominates);
+                    self.by_ufrag.get(&ufrag).copied()
+                }
+                None => self.by_source.get(&source).copied(),
+            }
+        } else {
+            self.by_source.get(&source).copied()
+        };
+        let Some(id) = owner else {
+            return;
+        };
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        let may_hear = match session.pinned {
+            Some(pinned) => pinned == source,
+            None => {
+                (self.settings.any_candidate
+                    || session
+                        .peer
+                        .is_none_or(|peer| peer == source.ip().to_canonical()))
+                    && self.by_source.get(&source).is_none_or(|owner| *owner == id)
+            }
+        };
+        if !may_hear {
+            return;
+        }
+        let handled = catch_unwind(AssertUnwindSafe(|| {
+            let receive = Receive::new(Protocol::Udp, source, session.local, packet).ok()?;
             let input = Input::Receive(now, receive);
-            match catch_unwind(AssertUnwindSafe(|| {
+            Some(
                 session
                     .rtc
                     .accepts(&input)
-                    .then(|| session.rtc.handle_input(input))
-            })) {
-                Ok(None) => continue,
-                Ok(Some(Ok(()))) => session.stirred = true,
-                Ok(Some(Err(_))) | Err(_) => failed = Some(*id),
+                    .then(|| session.rtc.handle_input(input).is_ok()),
+            )
+        }));
+        match handled {
+            Ok(None | Some(None)) => {}
+            Ok(Some(Some(true))) => {
+                session.stirred = true;
+                // An authenticated check: its source may now send this session the rest, and a nomination is the only one it
+                // will hear from again.
+                if let Some(nominates) = check
+                    && session.pinned.is_none()
+                {
+                    if nominates {
+                        session.pinned = Some(source);
+                        let others = core::mem::take(&mut session.checked);
+                        for other in others.into_iter().filter(|other| *other != source) {
+                            self.by_source.remove(&other);
+                        }
+                        self.by_source.insert(source, id);
+                    } else if !session.checked.contains(&source) && session.checked.len() < CHECKED
+                    {
+                        session.checked.push(source);
+                        self.by_source.insert(source, id);
+                    }
+                }
             }
-            break;
-        }
-        if let Some(id) = failed
-            && let Some(session) = self.sessions.remove(&id)
-        {
-            session.path.ended();
+            Ok(Some(Some(false))) | Err(_) => {
+                if let Some(session) = self.remove_session(id) {
+                    session.path.ended();
+                }
+            }
         }
     }
 
@@ -447,8 +568,8 @@ impl Worker {
                 None => return,
             },
         };
-        if let Some(relay) = self.relay_by_token.get_mut(&token) {
-            relay.last = now;
+        // Only the listener's side keeps a relay alive: a source cannot, by sending.
+        if let Some(relay) = self.relay_by_token.get(&token) {
             let _ = relay.socket.send(&self.buffer[..count]);
         }
     }
@@ -460,7 +581,16 @@ impl Worker {
             || self.relay_by_token.len() < self.settings.max_relays / 2
     }
 
+    /// A relay's address is a loopback port the system hands out, so one can come back for another source. A Retry token names the
+    /// address and lasts seconds: to use one there, a source must have been sent another's, which went only to that other.
     fn new_relay(&mut self, source: SocketAddr, quic: SocketAddr, now: Instant) -> Option<Token> {
+        let address = source.ip().to_canonical();
+        if self.relays_per_address.get(&address).copied().unwrap_or(0)
+            >= self.settings.max_per_address
+            && !self.evict_unproven_from(address, now)
+        {
+            return None;
+        }
         if self.relay_by_token.len() >= self.settings.max_relays && !self.evict_unproven(now) {
             return None;
         }
@@ -477,6 +607,10 @@ impl Worker {
             .ok()?;
         self.relays.insert(address, source);
         self.relay_by_source.insert(source, token);
+        *self
+            .relays_per_address
+            .entry(source.ip().to_canonical())
+            .or_default() += 1;
         self.relay_by_token.insert(
             token,
             Relay {
@@ -514,11 +648,36 @@ impl Worker {
         false
     }
 
+    /// Replaces the oldest relay of `address` that has completed no handshake, if it has had its chance to.
+    fn evict_unproven_from(&mut self, address: IpAddr, now: Instant) -> bool {
+        let oldest = self
+            .relay_by_token
+            .iter()
+            .filter(|(_, relay)| {
+                !relay.proven
+                    && relay.source.ip().to_canonical() == address
+                    && now.saturating_duration_since(relay.born) >= YOUNG
+            })
+            .min_by_key(|(_, relay)| relay.born)
+            .map(|(token, _)| *token);
+        oldest.is_some_and(|token| {
+            self.remove_relay(token);
+            true
+        })
+    }
+
     fn remove_relay(&mut self, token: Token) {
         if let Some(mut relay) = self.relay_by_token.remove(&token) {
             let _ = self.poll.registry().deregister(&mut relay.socket);
             self.relays.remove(relay.address);
             self.relay_by_source.remove(&relay.source);
+            let address = relay.source.ip().to_canonical();
+            if let Some(held) = self.relays_per_address.get_mut(&address) {
+                *held -= 1;
+                if *held == 0 {
+                    self.relays_per_address.remove(&address);
+                }
+            }
         }
     }
 
@@ -531,17 +690,11 @@ impl Worker {
             match relay.socket.recv(&mut self.buffer) {
                 Ok(count) => {
                     relay.last = now;
-                    relay.proven |= count >= PROVEN_REPLY;
                     let _ = self.public.send_to(&self.buffer[..count], relay.source);
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => return false,
-                // The listener has gone. Its port-unreachable arrives here on Windows.
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::ConnectionReset | io::ErrorKind::Interrupted
-                    ) => {}
-                Err(_) => return false,
+                // Read past, as on the public socket: the listener's port-unreachable, if it has gone, arrives here on Windows.
+                Err(_) => {}
             }
         }
         true
@@ -602,8 +755,8 @@ impl Worker {
             soonest = Some(soonest.map_or(due, |next| next.min(due)));
         }
         for id in &ended {
-            if let Some(mut session) = self.sessions.remove(id) {
-                session.close(public);
+            if let Some(mut session) = self.remove_session(*id) {
+                session.close(&self.public);
                 session.path.ended();
             }
         }
@@ -621,10 +774,16 @@ fn provider() -> Arc<str0m::config::CryptoProvider> {
 
 type Built = (Rtc, SocketAddr, String, Option<SdpPendingOffer>);
 
-fn answering(now: Instant, offer: &str, candidate: SocketAddr) -> Option<Built> {
+fn answering(
+    now: Instant,
+    offer: &str,
+    candidate: SocketAddr,
+    credentials: IceCreds,
+) -> Option<Built> {
     let offer = SdpOffer::from_sdp_string(offer).ok()?;
     let mut rtc = Rtc::builder()
         .set_crypto_provider(provider())
+        .set_local_ice_credentials(credentials)
         .set_ice_lite(true)
         .build(now);
     rtc.add_local_candidate(Candidate::host(candidate, "udp").ok()?)?;
@@ -632,8 +791,11 @@ fn answering(now: Instant, offer: &str, candidate: SocketAddr) -> Option<Built> 
     Some((rtc, candidate, answer.to_sdp_string(), None))
 }
 
-fn offering(now: Instant, local: SocketAddr) -> Option<Built> {
-    let mut rtc = Rtc::builder().set_crypto_provider(provider()).build(now);
+fn offering(now: Instant, local: SocketAddr, credentials: IceCreds) -> Option<Built> {
+    let mut rtc = Rtc::builder()
+        .set_crypto_provider(provider())
+        .set_local_ice_credentials(credentials)
+        .build(now);
     rtc.add_local_candidate(Candidate::host(local, "udp").ok()?)?;
     let mut api = rtc.sdp_api();
     api.add_channel_with_config(ChannelConfig {
