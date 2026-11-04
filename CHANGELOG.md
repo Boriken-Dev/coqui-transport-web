@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   than `Failure::PathLost`. `connect` therefore no longer falls back to WebSocket after such a refusal. The refusal is QUIC's
   CONNECTION_REFUSED, which any QUIC server may send and anyone who saw the client's first packet can forge.
 - Breaking for a Dart class that implements these: `WebDatagrams.changes` and `DatagramWebChannel.carriedSignals` are new abstract members.
+- `Limits::pending` is exact: a driver holds at most that many messages its reader has not taken. A WebSocket held one more, in its
+  worker, and WebTransport one more, in its read loop.
 
 ### Fixed
 
@@ -42,9 +44,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A WebTransport client whose certificate the server refuses, or which presented none to a server requiring one, fails with
   `Failure::Certificate` rather than `Failure::PathLost`, so `connect` does not fall back to WebSocket after it. The refusal arrives
   as the server's close of the connection, carrying the TLS alert, which was read only when this side raised it.
+- A WebTransport channel whose reader is behind no longer wakes every 5 ms to look for room: its read loop sleeps until the reader
+  takes a message.
 
 ### Added
 
+- `Channel::set_pending(messages)` changes how far one channel reads ahead of its reader: the driver holds at most `messages` that
+  `receive` has not yet returned and reads nothing more from the peer until the reader takes one, so the peer's sends wait. A channel
+  starts at its driver's `Limits::pending`, so a listener can start every channel at 1 and a link can raise one once its peer is
+  proved, holding a stranger to a single message rather than 64. A new limit governs only reading not yet done: a lower one drops
+  nothing, and a higher one lets the driver read on at once. Each message is still judged by the bound for its position, staged or
+  not. 0 is 1. The WebSocket and WebTransport drivers return `Ok`; the default changes nothing and returns `Failure::Unsupported`, and
+  `Box<dyn Channel>` forwards it.
 - `websocket::Dialer::with_local_addr` and `webtransport::Dialer::with_local_addr` bind the dialer's socket to a chosen local
   address before it connects, so a listener's admission sees the connection come from there, as a test of per-source rules from a
   second loopback address needs. Only endpoint addresses of its family are tried. An address this host cannot bind, or an endpoint

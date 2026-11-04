@@ -211,6 +211,112 @@ fn a_boxed_channel_stages_a_bound_through_its_driver() {
     a_large_message_in_place_of_the_small_one_is_refused(&client, &server);
 }
 
+/// Each large message a client sends behind a small one, and the bound a server then lowers to, under it.
+const LARGE: usize = 8 * 1024;
+const LOWERED: usize = 1024;
+
+/// The client sends a small message and `large` large ones at once, and the server's reader waits so its driver can read as far
+/// ahead as it may.
+fn small_then_large(client: &impl Channel, large: usize) {
+    client.send(&[1; 32]).unwrap();
+    for _ in 0..large {
+        client.send(&[7; LARGE]).unwrap();
+    }
+    thread::sleep(Duration::from_millis(200));
+}
+
+/// The server lowers its bound under the large messages and reads up to `most`: a message its driver read before the lowering
+/// is delivered, and the first it reads after is refused, so what is delivered is what the driver had read ahead.
+fn delivered_after_lowering(server: &impl Channel, most: usize) -> Vec<Result<usize, Failure>> {
+    server.set_max_receive(LOWERED);
+    let mut read = Vec::new();
+    while read.len() < most && read.last().is_none_or(Result::is_ok) {
+        read.push(length(server));
+    }
+    read
+}
+
+/// At a read-ahead of one, the driver holds the small message and reads nothing more until the reader takes it.
+fn one_message_ahead(client: &impl Channel, server: &impl Channel, pending: usize) {
+    server.set_pending(pending).unwrap();
+    small_then_large(client, 3);
+    assert_eq!(
+        delivered_after_lowering(server, 4),
+        [Ok(32), Err(Failure::Protocol)]
+    );
+}
+
+/// A server that started at one message ahead raises it while its reader waits: the driver reads the backlog without the
+/// reader taking anything.
+fn a_raised_read_ahead_lets_the_backlog_flow(client: &impl Channel, server: &impl Channel) {
+    small_then_large(client, 3);
+    server.set_pending(8).unwrap();
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        delivered_after_lowering(server, 4),
+        [Ok(32), Ok(LARGE), Ok(LARGE), Ok(LARGE)]
+    );
+}
+
+#[test]
+fn a_websocket_reads_one_message_ahead_when_set_to() {
+    let (client, server) = websocket_pair(Limits::default(), Limits::default());
+    one_message_ahead(&client, &server, 1);
+}
+
+#[test]
+fn a_webtransport_channel_reads_one_message_ahead_when_set_to() {
+    let (client, server) = webtransport_pair(Limits::default(), Limits::default());
+    one_message_ahead(&client, &server, 1);
+}
+
+#[test]
+fn a_read_ahead_of_0_is_one_message() {
+    let (client, server) = websocket_pair(Limits::default(), Limits::default());
+    one_message_ahead(&client, &server, 0);
+    let (client, server) = webtransport_pair(Limits::default(), Limits::default());
+    one_message_ahead(&client, &server, 0);
+}
+
+#[test]
+fn a_websocket_raising_its_read_ahead_lets_the_backlog_flow() {
+    let (client, server) = websocket_pair(Limits::default(), Limits::default().with_pending(1));
+    a_raised_read_ahead_lets_the_backlog_flow(&client, &server);
+}
+
+#[test]
+fn a_webtransport_channel_raising_its_read_ahead_lets_the_backlog_flow() {
+    let (client, server) = webtransport_pair(Limits::default(), Limits::default().with_pending(1));
+    a_raised_read_ahead_lets_the_backlog_flow(&client, &server);
+}
+
+#[test]
+fn a_boxed_channel_bounds_its_read_ahead_through_its_driver() {
+    let (client, server) = websocket_pair(Limits::default(), Limits::default());
+    let server: Box<dyn Channel> = Box::new(server);
+    one_message_ahead(&client, &server, 1);
+    let (client, server) = webtransport_pair(Limits::default(), Limits::default());
+    let server: Box<dyn Channel> = Box::new(server);
+    one_message_ahead(&client, &server, 1);
+}
+
+/// A staged bound judges each message by its position, so reading one message ahead changes no judgement.
+#[test]
+fn a_staged_bound_judges_the_same_at_one_message_ahead() {
+    let (client, server) = websocket_pair(Limits::default(), Limits::default());
+    server.set_pending(1).unwrap();
+    a_large_message_right_after_the_small_one_is_taken(&client, &server);
+    let (client, server) = websocket_pair(Limits::default(), Limits::default());
+    server.set_pending(1).unwrap();
+    a_large_message_in_place_of_the_small_one_is_refused(&client, &server);
+    let (client, server) = webtransport_pair(Limits::default(), Limits::default());
+    server.set_pending(1).unwrap();
+    a_large_message_right_after_the_small_one_is_taken(&client, &server);
+    let (client, server) = webtransport_pair(Limits::default(), Limits::default());
+    server.set_pending(1).unwrap();
+    a_large_message_in_place_of_the_small_one_is_refused(&client, &server);
+}
+
 #[test]
 fn a_boxed_channel_passes_both_bounds_on() {
     let (client, server) = websocket_pair(Limits::default(), Limits::default());
@@ -341,6 +447,29 @@ fn a_websocket_reader_stalled_past_the_idle_limit_is_not_taken_for_gone() {
         Limits::default().with_idle(idle),
         Limits::default().with_idle(idle).with_pending(1),
     );
+    for n in 0..4 {
+        client.send(&[n; 16]).unwrap();
+    }
+    thread::sleep(idle * 6);
+    for n in 0..4 {
+        assert_eq!(server.receive(Some(WAIT)), Ok(Some(vec![n; 16])));
+    }
+    client.send(b"after").unwrap();
+    assert_eq!(server.receive(Some(WAIT)), Ok(Some(b"after".to_vec())));
+    server.send(b"back").unwrap();
+    assert_eq!(client.receive(Some(WAIT)), Ok(Some(b"back".to_vec())));
+}
+
+/// A channel lowered to one message ahead holds the rest back as a stalled reader does, and still pings, so neither end takes
+/// the other for gone.
+#[test]
+fn a_websocket_held_at_its_read_ahead_is_not_taken_for_gone() {
+    let idle = Duration::from_millis(200);
+    let (client, server) = websocket_pair(
+        Limits::default().with_idle(idle),
+        Limits::default().with_idle(idle),
+    );
+    server.set_pending(1).unwrap();
     for n in 0..4 {
         client.send(&[n; 16]).unwrap();
     }

@@ -12,7 +12,7 @@ use core::net::SocketAddr;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 use std::io;
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::mpsc::{self, Sender, SyncSender};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use rustls::{ClientConfig, ServerConfig};
@@ -34,9 +34,7 @@ use crate::channel::{self, Datagrams, Delivery, Kind};
 use crate::endpoints::CertificatePin;
 use crate::failure::Failure;
 use crate::frame::{self, Decoder};
-use crate::pump::{
-    Abandon, Admission, Cancel, Inbox, Limits, ReceiveBound, Received, bind_failure,
-};
+use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, Reading, Received, bind_failure};
 #[cfg(feature = "webrtc")]
 use crate::webrtc::Port;
 
@@ -134,8 +132,10 @@ pub struct Channel {
     send: Mutex<Option<SendStream>>,
     reader: AbortHandle,
     handle: Handle,
-    // The largest message read, by position; the reader applies it.
-    max_message: Arc<ReceiveBound>,
+    // The largest message read, by position, and how far ahead of the reader; the read loop applies both.
+    reading: Arc<Reading>,
+    // Wakes a read loop held at its read-ahead: a take, or a raised limit.
+    room: Arc<Notify>,
     max_send: AtomicUsize,
     send_limit: Duration,
     pending_datagrams: usize,
@@ -152,7 +152,7 @@ impl fmt::Debug for Channel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Channel")
             .field("remote", &self.remote())
-            .field("max_message", &self.max_message.current())
+            .field("max_message", &self.reading.current())
             .field("max_send", &self.max_send.load(Ordering::SeqCst))
             .finish_non_exhaustive()
     }
@@ -177,11 +177,18 @@ impl Channel {
         runtime: Arc<Runtime>,
         #[cfg(feature = "webrtc")] port: Option<Port>,
     ) -> Self {
-        let (to_reader, inbox) = mpsc::sync_channel::<Received>(limits.pending.max(1));
+        // Holds no more than the read loop may read ahead, and the failure that ends it.
+        let (to_reader, inbox) = mpsc::channel::<Received>();
         let handle = runtime.handle().clone();
-        let max_message = Arc::new(ReceiveBound::new(limits.max_message));
+        let reading = Arc::new(Reading::new(limits.max_message, limits.pending));
+        let room = Arc::new(Notify::new());
         let reader = handle
-            .spawn(read_loop(recv, Arc::clone(&max_message), to_reader))
+            .spawn(read_loop(
+                recv,
+                Arc::clone(&reading),
+                Arc::clone(&room),
+                to_reader,
+            ))
             .abort_handle();
         let peer_certificates = connection
             .peer_identity()
@@ -210,7 +217,8 @@ impl Channel {
             send: Mutex::new(Some(send)),
             reader,
             handle,
-            max_message,
+            reading,
+            room,
             max_send: AtomicUsize::new(limits.max_message),
             send_limit: limits.send,
             pending_datagrams: limits.pending_datagrams,
@@ -296,51 +304,47 @@ impl Datagrams for QuicDatagrams {
     }
 }
 
-/// Decodes the stream into messages, each under the bound for its position. A full queue parks this task, so QUIC flow control
-/// tells the peer to slow down rather than memory growing.
-async fn read_loop(mut recv: RecvStream, maximum: Arc<ReceiveBound>, inbox: SyncSender<Received>) {
+/// Decodes the stream into messages, each under the bound for its position. Holding as many as the reader allows, it neither decodes
+/// nor reads until `room` says the reader took one or the limit rose, so QUIC flow control tells the peer to slow down rather than
+/// memory growing.
+async fn read_loop(
+    mut recv: RecvStream,
+    reading: Arc<Reading>,
+    room: Arc<Notify>,
+    inbox: Sender<Received>,
+) {
     let mut read = 0_u64;
-    let mut decoder = Decoder::new(maximum.at(read));
+    let mut decoder = Decoder::new(reading.at(read));
     let mut chunk = vec![0_u8; READ_CHUNK];
     loop {
+        // A notification given before this waits is kept for it, so none is missed.
+        while !reading.may_read(read) {
+            room.notified().await;
+        }
+        decoder.set_maximum(reading.at(read));
+        match decoder.next_frame() {
+            Ok(Some(message)) => {
+                read += 1;
+                if inbox.send(Ok(message)).is_err() {
+                    return;
+                }
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                let _ = inbox.send(Err(Failure::Protocol));
+                return;
+            }
+        }
         let count = match recv.read(&mut chunk).await {
             Ok(Some(count)) => count,
             Ok(None) => return,
             Err(_) => {
-                let _ = deliver(&inbox, Err(Failure::PathLost)).await;
+                let _ = inbox.send(Err(Failure::PathLost));
                 return;
             }
         };
         decoder.push(&chunk[..count]);
-        loop {
-            decoder.set_maximum(maximum.at(read));
-            match decoder.next_frame() {
-                Ok(Some(message)) => {
-                    read += 1;
-                    if !deliver(&inbox, Ok(message)).await {
-                        return;
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => {
-                    let _ = deliver(&inbox, Err(Failure::Protocol)).await;
-                    return;
-                }
-            }
-        }
-    }
-}
-
-async fn deliver(inbox: &SyncSender<Received>, mut item: Received) -> bool {
-    loop {
-        match inbox.try_send(item) {
-            Ok(()) => return true,
-            Err(mpsc::TrySendError::Disconnected(_)) => return false,
-            Err(mpsc::TrySendError::Full(back)) => {
-                item = back;
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        }
     }
 }
 
@@ -393,7 +397,8 @@ impl channel::Channel for Channel {
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
         let next = self.inbox.receive(timeout);
         if matches!(next, Ok(Some(_))) {
-            self.max_message.taken();
+            self.reading.taken();
+            self.room.notify_one();
         }
         next
     }
@@ -404,11 +409,17 @@ impl channel::Channel for Channel {
     }
 
     fn set_max_receive(&self, bytes: usize) {
-        self.max_message.set(bytes);
+        self.reading.set(bytes);
     }
 
     fn set_max_receive_after(&self, messages: usize, bytes: usize) -> Result<(), Failure> {
-        self.max_message.stage(messages, bytes);
+        self.reading.stage(messages, bytes);
+        Ok(())
+    }
+
+    fn set_pending(&self, messages: usize) -> Result<(), Failure> {
+        self.reading.set_ahead(messages);
+        self.room.notify_one();
         Ok(())
     }
 

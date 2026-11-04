@@ -15,7 +15,7 @@ proves nothing about who the peer is: identity is a separate step, on the channe
 
 - A `Channel` of whole, ordered messages, readable and writable from different threads, with its own bound on each direction. A
   change to the read bound can be staged by position: the next message under a small bound, everything after it under the full one,
-  however far the driver reads ahead.
+  however far the driver reads ahead. How far it reads ahead is set per channel, so a peer not yet proved can be held to one message.
 - A send that waits for room as long as its caller says, rather than being refused when the queue is full.
 - `connect`: WebTransport first, WebSocket when the path fails or the server does not offer it. A certificate, proof or permission failure never falls back, and a
   pinned endpoint never downgrades.

@@ -15,7 +15,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 use core::time::Duration;
 use std::io::{self, IoSlice, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Sender, SyncSender, TrySendError};
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::Instant;
@@ -34,13 +34,11 @@ use url::Url;
 use crate::channel::{self, Datagrams, Delivery, Kind};
 use crate::failure::Failure;
 use crate::frame::{self, WS_DATAGRAMS_PROTOCOL, WsPart};
-use crate::pump::{
-    Abandon, Admission, Cancel, Inbox, Limits, ReceiveBound, Received, bind_failure,
-};
+use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, Reading, Received, bind_failure};
 #[cfg(feature = "webrtc")]
 use crate::webrtc::{Climb, Plan, Port, Settings};
 
-/// How often a listener looks for a connection, and an ending worker for room in a full inbox to report in.
+/// How often a listener looks for a connection.
 const POLL: Duration = Duration::from_millis(10);
 /// What wakes a worker: its socket, or a caller with something for it.
 const SOCKET: Token = Token(0);
@@ -372,12 +370,12 @@ pub struct Channel {
     queued_limit: usize,
     room: Arc<Room>,
     waker: Arc<Waker>,
-    // Set by a worker that found the inbox full.
+    // Set by a worker holding as many messages as the reader lets it, so a take or a raised limit wakes it.
     behind: Arc<AtomicBool>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     frames: Frames,
-    // The largest message read, by position; the worker applies it.
-    max_message: Arc<ReceiveBound>,
+    // The largest message read, by position, and how far ahead of the reader; the worker applies both.
+    reading: Arc<Reading>,
     max_send: AtomicUsize,
     datagrams: Option<WsDatagrams>,
     peer_certificates: Option<Vec<Vec<u8>>>,
@@ -505,7 +503,7 @@ impl fmt::Debug for Channel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Channel")
             .field("frames", &self.frames)
-            .field("max_message", &self.max_message.current())
+            .field("max_message", &self.reading.current())
             .field("max_send", &self.max_send.load(Ordering::SeqCst))
             .finish_non_exhaustive()
     }
@@ -527,7 +525,8 @@ impl Channel {
             .register(poll.registry())
             .map_err(|e| io_failure(&e))?;
         let waker = Arc::new(Waker::new(poll.registry(), CALLER).map_err(|e| io_failure(&e))?);
-        let (to_reader, inbox) = mpsc::sync_channel::<Received>(limits.pending.max(1));
+        // Holds no more than the worker may read ahead, and the failure that ends it.
+        let (to_reader, inbox) = mpsc::channel::<Received>();
         let (to_worker, outgoing) = mpsc::sync_channel::<Vec<u8>>(OUTGOING);
         let queued = Arc::new(AtomicUsize::new(0));
         let draining = Arc::clone(&queued);
@@ -535,8 +534,8 @@ impl Channel {
         let making_room = Arc::clone(&room);
         let behind = Arc::new(AtomicBool::new(false));
         let noting = Arc::clone(&behind);
-        let max_message = Arc::new(ReceiveBound::new(limits.max_message));
-        let current = Arc::clone(&max_message);
+        let reading = Arc::new(Reading::new(limits.max_message, limits.pending));
+        let current = Arc::clone(&reading);
         let (datagrams, for_worker) = if tagged {
             let pending = limits.pending_datagrams.max(1);
             let (send, to_send) = mpsc::sync_channel(pending);
@@ -607,11 +606,10 @@ impl Channel {
                     queued: draining,
                     room: Arc::clone(&making_room),
                     limits,
-                    max_message: current,
+                    reading: current,
                     applied: limits.max_message,
                     read: 0,
                     datagrams: for_worker,
-                    waiting: None,
                     heard: Instant::now(),
                     pinged: false,
                     unsent: None,
@@ -634,7 +632,7 @@ impl Channel {
             behind,
             worker: Mutex::new(Some(worker)),
             frames,
-            max_message,
+            reading,
             max_send: AtomicUsize::new(limits.max_message),
             datagrams,
             peer_certificates,
@@ -643,6 +641,15 @@ impl Channel {
 }
 
 impl Channel {
+    /// Wakes a worker held at its read-ahead, after a take or a raised limit.
+    fn room_made(&self) {
+        // Pairs with the worker's fence in `behind`: either it sees the room made, or this sees it waiting.
+        fence(Ordering::SeqCst);
+        if self.behind.swap(false, Ordering::SeqCst) {
+            let _ = self.waker.wake();
+        }
+    }
+
     fn check(&self, message: &[u8]) -> Result<(), Failure> {
         if message.is_empty() || message.len() > self.max_send.load(Ordering::SeqCst) {
             return Err(Failure::Protocol);
@@ -737,13 +744,9 @@ impl channel::Channel for Channel {
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
         let next = self.inbox.receive(timeout);
         if matches!(next, Ok(Some(_))) {
-            self.max_message.taken();
+            self.reading.taken();
         }
-        // Pairs with the worker's fence in `deliver`: either it sees the room this take made, or this sees it behind.
-        fence(Ordering::SeqCst);
-        if self.behind.swap(false, Ordering::SeqCst) {
-            let _ = self.waker.wake();
-        }
+        self.room_made();
         next
     }
 
@@ -753,11 +756,17 @@ impl channel::Channel for Channel {
     }
 
     fn set_max_receive(&self, bytes: usize) {
-        self.max_message.set(bytes);
+        self.reading.set(bytes);
     }
 
     fn set_max_receive_after(&self, messages: usize, bytes: usize) -> Result<(), Failure> {
-        self.max_message.stage(messages, bytes);
+        self.reading.stage(messages, bytes);
+        Ok(())
+    }
+
+    fn set_pending(&self, messages: usize) -> Result<(), Failure> {
+        self.reading.set_ahead(messages);
+        self.room_made();
         Ok(())
     }
 
@@ -909,20 +918,19 @@ struct Worker {
     socket: WebSocket<Stream>,
     poll: Poll,
     events: Events,
-    inbox: SyncSender<Received>,
+    inbox: Sender<Received>,
     behind: Arc<AtomicBool>,
     outgoing: mpsc::Receiver<Vec<u8>>,
     frames: Frames,
     queued: Arc<AtomicUsize>,
     room: Arc<Room>,
     limits: Limits,
-    max_message: Arc<ReceiveBound>,
+    reading: Arc<Reading>,
     // What the socket was built with: the shared value may already have moved on.
     applied: usize,
     // Messages read for the reader: the position of the next.
     read: u64,
     datagrams: Option<WorkerDatagrams>,
-    waiting: Option<Received>,
     heard: Instant,
     pinged: bool,
     // When the socket stopped taking what there is to send.
@@ -984,7 +992,7 @@ impl Worker {
         let more = self.write_queued()?;
         // Writing stops when the socket is full, and if that has passed, nothing will say so.
         let was_unsent = self.unsent.is_some();
-        let behind = self.deliver()?;
+        let behind = self.behind();
         self.keep_alive(behind)?;
         let read = !behind && self.read_one()?;
         let retry = self.flush()?;
@@ -1085,34 +1093,22 @@ impl Worker {
         Ok(())
     }
 
-    /// Whether the reader is still behind, and the message it has not taken still waits here.
-    fn deliver(&mut self) -> Result<bool, Stop> {
-        let Some(held) = self.waiting.take() else {
-            return Ok(false);
-        };
-        let held = match self.inbox.try_send(held) {
-            Ok(()) => return Ok(false),
-            Err(TrySendError::Full(held)) => held,
-            Err(TrySendError::Disconnected(_)) => return Err(Stop::Closing),
-        };
-        // Said before looking again, so a reader taking one from here on wakes this worker, which can then sleep until it does.
+    /// Whether the reader holds as many messages as it lets this read ahead, so reading waits for it.
+    fn behind(&self) -> bool {
+        if self.reading.may_read(self.read) {
+            return false;
+        }
+        // Said before looking again, so a take or a raised limit from here on wakes this worker, which can then sleep until one.
         self.behind.store(true, Ordering::SeqCst);
         fence(Ordering::SeqCst);
-        match self.inbox.try_send(held) {
-            Ok(()) => Ok(false),
-            Err(TrySendError::Full(held)) => {
-                self.waiting = Some(held);
-                Ok(true)
-            }
-            Err(TrySendError::Disconnected(_)) => Err(Stop::Closing),
-        }
+        !self.reading.may_read(self.read)
     }
 
     /// Whether a message came in, in which case there may be another.
     fn read_one(&mut self) -> Result<bool, Stop> {
         // Looked at after this turn's writes: a peer answering one of them meets the limit its sender had set. A frame read now
         // belongs to the next message, whose position fixes its bound.
-        let wanted = self.max_message.at(self.read);
+        let wanted = self.reading.at(self.read);
         if wanted != self.applied {
             self.applied = wanted;
             let limit = wanted + self.tag();
@@ -1136,7 +1132,7 @@ impl Worker {
         self.heard = Instant::now();
         self.pinged = false;
         match message {
-            Message::Text(text) => self.arrived(text.as_bytes().to_vec()),
+            Message::Text(text) => self.arrived(text.as_bytes().to_vec())?,
             #[cfg(feature = "webrtc")]
             Message::Binary(body) if self.climbs() && frame::ws_signal_part(&body).is_some() => {
                 if let (Some(climb), Some(signal)) = (
@@ -1153,12 +1149,12 @@ impl Worker {
                     }
                 }
                 Ok(WsPart::Message(message)) if self.frames == Frames::Binary => {
-                    self.arrived(message.to_vec());
+                    self.arrived(message.to_vec())?;
                 }
                 _ => return Err(Stop::FailedClosing(Failure::Protocol, CloseCode::Protocol)),
             },
             Message::Binary(body) if self.frames == Frames::Binary => {
-                self.arrived(body.to_vec());
+                self.arrived(body.to_vec())?;
             }
             Message::Binary(_) => {
                 return Err(Stop::FailedClosing(
@@ -1176,9 +1172,9 @@ impl Worker {
         Ok(true)
     }
 
-    fn arrived(&mut self, message: Vec<u8>) {
-        self.waiting = Some(Ok(message));
+    fn arrived(&mut self, message: Vec<u8>) -> Result<(), Stop> {
         self.read += 1;
+        self.inbox.send(Ok(message)).map_err(|_| Stop::Closing)
     }
 
     /// Sends what it can. A peer that takes nothing for `Limits::send` while there is something to send ends the channel.
@@ -1238,26 +1234,9 @@ impl Worker {
         }
     }
 
-    /// What came in before the failure, then the failure, for a reader that may be behind. A channel being closed has
-    /// no reader left to wait for.
-    fn report(&mut self, failure: Failure) {
-        let held = self.waiting.take();
-        for item in held.into_iter().chain([Err(failure)]) {
-            let mut item = item;
-            while let Err(TrySendError::Full(back)) = self.inbox.try_send(item) {
-                item = back;
-                loop {
-                    match self.outgoing.try_recv() {
-                        Ok(_) => {}
-                        Err(mpsc::TryRecvError::Empty) => break,
-                        Err(mpsc::TryRecvError::Disconnected) => return,
-                    }
-                }
-                if self.sleep(Some(POLL)).is_err() {
-                    return;
-                }
-            }
-        }
+    /// The failure, behind what came in before it. A channel being closed has no reader left to tell.
+    fn report(&self, failure: Failure) {
+        let _ = self.inbox.send(Err(failure));
     }
 
     /// Whether everything got to the socket, for as long as the peer keeps taking it.

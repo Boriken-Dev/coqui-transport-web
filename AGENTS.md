@@ -35,6 +35,7 @@ pub trait Channel: Send + Sync {
     fn set_max_message(&self, _bytes: usize) {}   // both ways, from the next read; a peer's answer to anything sent after this call meets it; default ignores it
     fn set_max_receive(&self, _bytes: usize) {}   // what it reads only, as above
     fn set_max_receive_after(&self, messages: usize, bytes: usize) -> Result<(), Failure> { /* 0: set_max_receive; else Err(Unsupported) */ }
+    fn set_pending(&self, _messages: usize) -> Result<(), Failure> { Err(Failure::Unsupported) }   // how many unread messages the driver holds; 0 is 1
     fn set_max_send(&self, _bytes: usize) {}      // what it sends only: a side reading under a small bound can still answer up to the peer's
     fn send_timeout(&self, message: &[u8], _timeout: Option<Duration>) -> Result<(), Failure> { self.send(message) }   // waits for room
     fn datagrams(&self) -> Option<&dyn Datagrams> { None }   // Some on WebTransport; a WebSocket, or a channel wrapping another, has none
@@ -45,6 +46,8 @@ pub trait Channel: Send + Sync {
 A reliable, ordered channel of whole messages. `peer_certificates` is the chain the peer presented and this side's rustls configuration accepted: the server's on a client, the client's on a server whose configuration asked for one. `None` without TLS, or when the peer presented none, as a client does when not asked. It proves what that configuration's verifier checked, and nothing about a channel wrapping this one.
 
 `set_max_receive_after(n, bytes)` stages the read bound by position: the next `n` messages `receive` has not yet returned are held to the bound in force now, and every one after them to `bytes`. Both drivers judge each message by its position as they read it, however far they have read ahead of the reader, so the bound for message k does not depend on timing: a large message right behind the small one is taken, and one in its place is refused as any message over its bound is (on a WebSocket, a close with 1009 and `Failure::Protocol` at both ends). Positions count from what `receive` has returned at the call, so stage before the peer can send what the stage is for. A message already read when the call is made keeps its judgement. A later `set_max_receive_after`, `set_max_receive` or `set_max_message` replaces a stage not yet reached. Both drivers return `Ok`; the default, for a channel that cannot stage, changes nothing and returns `Failure::Unsupported`, except `n` = 0, which is `set_max_receive`. `Box<dyn Channel>` forwards it.
+
+`set_pending(n)` sets how far one channel reads ahead of its reader: the driver holds at most `n` messages `receive` has not yet returned, and reads nothing more from the peer until the reader takes one, which holds the peer's sends back exactly as a slow reader does (on a WebSocket it still pings every `idle`, and neither end is taken for gone). A channel starts at its driver's `Limits::pending`; 0 is 1. A new limit governs only reading not yet done: a message already read stays, a lower limit drops nothing and holds the driver until the reader is below it, and a higher one wakes the driver at once. The bound for each message is still fixed by its position, staged or not, so the two combine in any order. Both drivers return `Ok`; the default, for a channel that cannot bound its read-ahead, changes nothing and returns `Failure::Unsupported`. `Box<dyn Channel>` forwards it.
 
 `send_timeout` queues as `send` does but waits up to `timeout` for room rather than refusing; `None` waits as long as the channel lives. `Failure::Timeout` means no room in time: nothing was sent and the channel goes on. Each driver's own terms are in its section.
 
@@ -236,7 +239,8 @@ pub const fn with_idle(self, limit: Duration) -> Self
 ```
 
 `#[non_exhaustive]`. Defaults: 1 MiB, 64 messages, 10 s in total for a handshake, 64 MiB queued to send, 30 s for a WebSocket peer to take nothing while there is something to send, which ends the channel with `Failure::NoProgress`, a ping after 60 s of silence and `Failure::NoProgress` after 120 s. A message over `max_message` ends the channel with `Failure::Protocol`. When `pending`
-messages wait for a slow reader, the driver stops reading from the peer, which holds the peer's sends back. A WebSocket that has
+messages wait for a slow reader, the driver stops reading from the peer, which holds the peer's sends back; `pending` is where each
+channel starts, `Channel::set_pending` changes it for one, and 0 is 1. A WebSocket that has
 stopped reading does not count the peer's silence, which it cannot hear, and pings the peer every `idle`, so neither end takes a
 stalled reader for gone. The sending end still ends the channel with `Failure::NoProgress` once the peer has taken nothing for `send`.
 
@@ -353,11 +357,18 @@ A WebSocket with `Dialer::with_webrtc` asks for `coqui-web-ladder.1` and `coqui-
   none of its family, fails the dial with `Failure::Unsupported` before anything is sent (`Failure::Permission` when the address
   is taken or not allowed). A second loopback address such as `127.0.0.2` works only where the system binds it and routes it to
   loopback; where it cannot be bound, the dial is that `Failure::Unsupported`.
-- A WebSocket or WebTransport channel reads ahead of its reader, up to `pending` messages, and judges each by the receive bound
-  in force when it reads it. A bound raised just before `receive` does not
+- A WebSocket or WebTransport channel reads ahead of its reader, up to `pending` messages or what `set_pending` set, and judges
+  each by the receive bound in force when it reads it. A bound raised just before `receive` does not
   reach a message already being read: raise it before the peer can send larger, or that message ends the channel with
   `Failure::Protocol` at both ends. To read the next message under a small bound and the rest under a larger one, as with a peer
   that still owes a proof, stage it with `set_max_receive_after(1, larger)` before the peer can send either.
+- `set_pending` after a handshake reaches only what the driver has not read yet, and a driver starts reading as soon as the channel
+  opens: up to `Limits::pending` messages (64 by default) may already be held by then. To hold a peer that still owes a proof to one
+  message from its first, give the listener `Limits::with_pending(1)` and call `set_pending` with a larger value on each channel once
+  its peer is proved. Besides those messages, a channel holds only bytes below them, none of which `max_message` multiplies: what
+  its last read brought in beyond the message (under tungstenite's 128 KiB read buffer on a WebSocket, under 16 KiB on WebTransport),
+  what TLS has decrypted, and the transport's own window: the system's TCP receive buffer, or QUIC's stream window (quinn's default,
+  1,250,000 bytes).
 - A data channel's `max_size` is at most 1100 bytes, and less for a smaller `path_mtu`: a fragmented unreliable message is lost when any fragment is. The peer's own limit is not read.
 - An empty datagram sent from Rust on a data channel is refused with `Failure::Protocol`: `str0m` writes nothing for one. One arriving from a browser is delivered.
 - A datagram sent from a data channel's end before the other end has switched still arrives: each end listens on both paths.

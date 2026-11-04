@@ -14,7 +14,8 @@ use crate::frame::DEFAULT_MAX_MESSAGE;
 pub struct Limits {
     /// The largest message accepted or sent, in bytes. Larger ends the channel.
     pub max_message: usize,
-    /// Messages held for a slow reader, after which the driver stops reading from the peer.
+    /// Messages read and held for a slow reader, after which the driver stops reading from the peer. Each channel starts here,
+    /// and [`Channel::set_pending`](crate::Channel::set_pending) changes it for one. 0 is 1.
     pub pending: usize,
     /// How long opening may take in total: TCP or QUIC, TLS, and the HTTP upgrade.
     pub handshake: Duration,
@@ -203,13 +204,16 @@ impl Drop for Finishing<'_> {
     }
 }
 
-/// The largest message a channel reads, by the message's position in the stream: a staged change takes effect at a position fixed
-/// when it is staged, however far the driver has read ahead of the reader.
+/// What a channel's reader lets its driver read: the largest message, by the message's position in the stream, and how many
+/// messages ahead of the reader. A staged bound takes effect at a position fixed when it is staged, however far the driver has
+/// read ahead.
 #[derive(Debug)]
-pub(crate) struct ReceiveBound {
+pub(crate) struct Reading {
     bounds: Mutex<Bounds>,
     // Messages the reader has taken: the position the next `receive` returns.
     taken: core::sync::atomic::AtomicU64,
+    // Messages read that the reader has not taken, past which the driver reads nothing more. At least 1.
+    ahead: core::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug)]
@@ -219,15 +223,30 @@ struct Bounds {
     staged: Option<(u64, usize)>,
 }
 
-impl ReceiveBound {
-    pub(crate) const fn new(bytes: usize) -> Self {
+impl Reading {
+    pub(crate) const fn new(bytes: usize, ahead: usize) -> Self {
         Self {
             bounds: Mutex::new(Bounds {
                 now: bytes,
                 staged: None,
             }),
             taken: core::sync::atomic::AtomicU64::new(0),
+            ahead: core::sync::atomic::AtomicUsize::new(at_least_one(ahead)),
         }
+    }
+
+    /// Sets how many messages the driver may hold for the reader. 0 is 1: a message is read before `receive` returns it.
+    pub(crate) fn set_ahead(&self, messages: usize) {
+        self.ahead
+            .store(at_least_one(messages), core::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the driver may read the message at `position`, counted from the first it read: whether it holds fewer than the
+    /// limit for the reader.
+    pub(crate) fn may_read(&self, position: u64) -> bool {
+        let held = position.saturating_sub(self.taken.load(core::sync::atomic::Ordering::SeqCst));
+        let ahead = self.ahead.load(core::sync::atomic::Ordering::SeqCst);
+        held < u64::try_from(ahead).unwrap_or(u64::MAX)
     }
 
     /// Replaces the bound for every message not yet read, and any staged change.
@@ -273,6 +292,10 @@ impl ReceiveBound {
             .unwrap_or_else(PoisonError::into_inner)
             .now
     }
+}
+
+const fn at_least_one(messages: usize) -> usize {
+    if messages == 0 { 1 } else { messages }
 }
 
 /// Why a local address could not be bound: taken or not allowed, or not this host's to bind.
@@ -337,11 +360,11 @@ impl Inbox {
 
 #[cfg(test)]
 mod tests {
-    use super::ReceiveBound;
+    use super::Reading;
 
     #[test]
     fn a_staged_bound_starts_at_its_position_counted_from_what_the_reader_took() {
-        let bound = ReceiveBound::new(10);
+        let bound = Reading::new(10, 64);
         bound.taken();
         bound.stage(1, 99);
         // The driver may ask in any order of time, but only ever for a later position.
@@ -354,11 +377,40 @@ mod tests {
 
     #[test]
     fn setting_a_bound_replaces_a_staged_one() {
-        let bound = ReceiveBound::new(10);
+        let bound = Reading::new(10, 64);
         bound.stage(2, 99);
         bound.set(20);
         assert_eq!(bound.at(5), 20);
         bound.stage(0, 30);
         assert_eq!(bound.at(5), 30);
+    }
+
+    #[test]
+    fn a_driver_reads_ahead_only_as_far_as_the_reader_allows() {
+        let reading = Reading::new(10, 1);
+        assert!(reading.may_read(0));
+        assert!(!reading.may_read(1));
+        reading.taken();
+        assert!(reading.may_read(1));
+        reading.set_ahead(3);
+        assert!(reading.may_read(3));
+        assert!(!reading.may_read(4));
+        // Lowered below what is held: nothing more is read until the reader has taken enough.
+        reading.set_ahead(1);
+        assert!(!reading.may_read(3));
+        reading.taken();
+        assert!(!reading.may_read(3));
+        reading.taken();
+        assert!(reading.may_read(3));
+    }
+
+    #[test]
+    fn a_read_ahead_of_0_is_1() {
+        let reading = Reading::new(10, 0);
+        assert!(reading.may_read(0));
+        assert!(!reading.may_read(1));
+        reading.set_ahead(0);
+        assert!(reading.may_read(0));
+        assert!(!reading.may_read(1));
     }
 }

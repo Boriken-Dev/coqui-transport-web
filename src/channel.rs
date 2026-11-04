@@ -70,6 +70,21 @@ pub trait Channel: Send + Sync {
         Err(Failure::Unsupported)
     }
 
+    /// Changes how far this channel reads ahead of its reader: the driver holds at most `messages` that `receive` has not yet
+    /// returned, and reads nothing more from the peer until the reader takes one, so the peer's sends wait. A channel starts at its
+    /// driver's `Limits::pending`. 0 is 1, as there: a message is read before `receive` can return it.
+    ///
+    /// It governs only reading not yet done. A message already read stays, so a lower limit drops nothing and holds the driver
+    /// until the reader is below it, and a higher one lets the driver read on at once. Each message is still judged by the bound
+    /// for its position, staged or not, however far ahead it is read.
+    ///
+    /// # Errors
+    ///
+    /// [`Failure::Unsupported`] from a channel that cannot bound what it reads ahead, which then changes nothing: the default.
+    fn set_pending(&self, _messages: usize) -> Result<(), Failure> {
+        Err(Failure::Unsupported)
+    }
+
     /// Changes the largest message this channel sends from now on, leaving what it reads as it was, so a side that reads under a
     /// small limit can still answer up to the peer's. A channel with no limit of its own ignores it.
     fn set_max_send(&self, _bytes: usize) {}
@@ -172,6 +187,10 @@ impl Channel for alloc::boxed::Box<dyn Channel> {
 
     fn set_max_receive_after(&self, messages: usize, bytes: usize) -> Result<(), Failure> {
         (**self).set_max_receive_after(messages, bytes)
+    }
+
+    fn set_pending(&self, messages: usize) -> Result<(), Failure> {
+        (**self).set_pending(messages)
     }
 
     fn set_max_send(&self, bytes: usize) {
@@ -476,7 +495,7 @@ mod tests {
         assert_eq!(logged(&log), ["dial:WebTransport".to_string()]);
     }
 
-    /// A driver of its own that stages a bound, which the default would refuse.
+    /// A driver of its own that stages a bound and limits its read-ahead, which the default would refuse.
     struct Staging;
 
     impl Channel for Staging {
@@ -488,6 +507,9 @@ mod tests {
         }
         fn close(&self) {}
         fn set_max_receive_after(&self, _: usize, _: usize) -> Result<(), Failure> {
+            Ok(())
+        }
+        fn set_pending(&self, _: usize) -> Result<(), Failure> {
             Ok(())
         }
     }
@@ -522,6 +544,18 @@ mod tests {
     fn a_boxed_channel_stages_through_its_driver() {
         let boxed: alloc::boxed::Box<dyn Channel> = alloc::boxed::Box::new(Staging);
         assert_eq!(Channel::set_max_receive_after(&boxed, 2, 7), Ok(()));
+    }
+
+    #[test]
+    fn a_channel_that_cannot_bound_its_read_ahead_refuses_every_limit() {
+        let plain = Plain(5.into());
+        for messages in [0, 1, 64] {
+            assert_eq!(plain.set_pending(messages), Err(Failure::Unsupported));
+        }
+        let boxed: alloc::boxed::Box<dyn Channel> = alloc::boxed::Box::new(plain);
+        assert_eq!(Channel::set_pending(&boxed, 1), Err(Failure::Unsupported));
+        let boxed: alloc::boxed::Box<dyn Channel> = alloc::boxed::Box::new(Staging);
+        assert_eq!(Channel::set_pending(&boxed, 1), Ok(()));
     }
 
     #[test]
