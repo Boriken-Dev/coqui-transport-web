@@ -34,7 +34,7 @@ use crate::channel::{self, Datagrams, Delivery, Kind};
 use crate::endpoints::CertificatePin;
 use crate::failure::Failure;
 use crate::frame::{self, Decoder};
-use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, Received};
+use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, ReceiveBound, Received};
 #[cfg(feature = "webrtc")]
 use crate::webrtc::Port;
 
@@ -132,8 +132,8 @@ pub struct Channel {
     send: Mutex<Option<SendStream>>,
     reader: AbortHandle,
     handle: Handle,
-    // The largest message read; the reader applies it.
-    max_message: Arc<AtomicUsize>,
+    // The largest message read, by position; the reader applies it.
+    max_message: Arc<ReceiveBound>,
     max_send: AtomicUsize,
     send_limit: Duration,
     pending_datagrams: usize,
@@ -150,7 +150,7 @@ impl fmt::Debug for Channel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Channel")
             .field("remote", &self.remote())
-            .field("max_message", &self.max_message.load(Ordering::SeqCst))
+            .field("max_message", &self.max_message.current())
             .field("max_send", &self.max_send.load(Ordering::SeqCst))
             .finish_non_exhaustive()
     }
@@ -177,7 +177,7 @@ impl Channel {
     ) -> Self {
         let (to_reader, inbox) = mpsc::sync_channel::<Received>(limits.pending.max(1));
         let handle = runtime.handle().clone();
-        let max_message = Arc::new(AtomicUsize::new(limits.max_message));
+        let max_message = Arc::new(ReceiveBound::new(limits.max_message));
         let reader = handle
             .spawn(read_loop(recv, Arc::clone(&max_message), to_reader))
             .abort_handle();
@@ -294,10 +294,11 @@ impl Datagrams for QuicDatagrams {
     }
 }
 
-/// Decodes the stream into messages. A full queue parks this task, so QUIC flow control tells the
-/// peer to slow down rather than memory growing.
-async fn read_loop(mut recv: RecvStream, maximum: Arc<AtomicUsize>, inbox: SyncSender<Received>) {
-    let mut decoder = Decoder::new(maximum.load(Ordering::SeqCst));
+/// Decodes the stream into messages, each under the bound for its position. A full queue parks this task, so QUIC flow control
+/// tells the peer to slow down rather than memory growing.
+async fn read_loop(mut recv: RecvStream, maximum: Arc<ReceiveBound>, inbox: SyncSender<Received>) {
+    let mut read = 0_u64;
+    let mut decoder = Decoder::new(maximum.at(read));
     let mut chunk = vec![0_u8; READ_CHUNK];
     loop {
         let count = match recv.read(&mut chunk).await {
@@ -308,11 +309,12 @@ async fn read_loop(mut recv: RecvStream, maximum: Arc<AtomicUsize>, inbox: SyncS
                 return;
             }
         };
-        decoder.set_maximum(maximum.load(Ordering::SeqCst));
         decoder.push(&chunk[..count]);
         loop {
+            decoder.set_maximum(maximum.at(read));
             match decoder.next_frame() {
                 Ok(Some(message)) => {
+                    read += 1;
                     if !deliver(&inbox, Ok(message)).await {
                         return;
                     }
@@ -387,7 +389,11 @@ impl channel::Channel for Channel {
     }
 
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
-        self.inbox.receive(timeout)
+        let next = self.inbox.receive(timeout);
+        if matches!(next, Ok(Some(_))) {
+            self.max_message.taken();
+        }
+        next
     }
 
     fn set_max_message(&self, bytes: usize) {
@@ -396,7 +402,12 @@ impl channel::Channel for Channel {
     }
 
     fn set_max_receive(&self, bytes: usize) {
-        self.max_message.store(bytes, Ordering::SeqCst);
+        self.max_message.set(bytes);
+    }
+
+    fn set_max_receive_after(&self, messages: usize, bytes: usize) -> Result<(), Failure> {
+        self.max_message.stage(messages, bytes);
+        Ok(())
     }
 
     fn set_max_send(&self, bytes: usize) {

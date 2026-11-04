@@ -50,6 +50,26 @@ pub trait Channel: Send + Sync {
     /// sent after this call meets it. A channel with no limit of its own ignores it.
     fn set_max_receive(&self, _bytes: usize) {}
 
+    /// Stages a change to the largest message this channel reads, fixed by position: the next `messages` that `receive` has not yet
+    /// returned are held to the bound in force now, and every one after them to `bytes`. A driver reading ahead judges each message
+    /// by its position, so a peer cannot slip a larger one in early, and one the bound allows is not refused for arriving early.
+    ///
+    /// Positions count from what `receive` has returned when this is called. A message the driver had already read before this
+    /// call keeps the judgement it had. A later call to this, [`set_max_receive`](Self::set_max_receive) or
+    /// [`set_max_message`](Self::set_max_message) replaces a change that has not taken effect yet.
+    ///
+    /// # Errors
+    ///
+    /// [`Failure::Unsupported`] from a channel that cannot stage one, which then changes nothing: the default, for any `messages`
+    /// but 0, which is [`set_max_receive`](Self::set_max_receive).
+    fn set_max_receive_after(&self, messages: usize, bytes: usize) -> Result<(), Failure> {
+        if messages == 0 {
+            self.set_max_receive(bytes);
+            return Ok(());
+        }
+        Err(Failure::Unsupported)
+    }
+
     /// Changes the largest message this channel sends from now on, leaving what it reads as it was, so a side that reads under a
     /// small limit can still answer up to the peer's. A channel with no limit of its own ignores it.
     fn set_max_send(&self, _bytes: usize) {}
@@ -148,6 +168,10 @@ impl Channel for alloc::boxed::Box<dyn Channel> {
 
     fn set_max_receive(&self, bytes: usize) {
         (**self).set_max_receive(bytes);
+    }
+
+    fn set_max_receive_after(&self, messages: usize, bytes: usize) -> Result<(), Failure> {
+        (**self).set_max_receive_after(messages, bytes)
     }
 
     fn set_max_send(&self, bytes: usize) {
@@ -450,6 +474,54 @@ mod tests {
         );
         assert!(matches!(result, Err(Failure::Timeout)));
         assert_eq!(logged(&log), ["dial:WebTransport".to_string()]);
+    }
+
+    /// A driver of its own that stages a bound, which the default would refuse.
+    struct Staging;
+
+    impl Channel for Staging {
+        fn send(&self, _: &[u8]) -> Result<(), Failure> {
+            Ok(())
+        }
+        fn receive(&self, _: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
+            Ok(None)
+        }
+        fn close(&self) {}
+        fn set_max_receive_after(&self, _: usize, _: usize) -> Result<(), Failure> {
+            Ok(())
+        }
+    }
+
+    /// A channel that only says what it reads.
+    struct Plain(core::sync::atomic::AtomicUsize);
+
+    impl Channel for Plain {
+        fn send(&self, _: &[u8]) -> Result<(), Failure> {
+            Ok(())
+        }
+        fn receive(&self, _: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
+            Ok(None)
+        }
+        fn close(&self) {}
+        fn set_max_receive(&self, bytes: usize) {
+            self.0.store(bytes, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_channel_that_cannot_stage_a_bound_refuses_and_changes_nothing() {
+        let plain = Plain(5.into());
+        assert_eq!(plain.set_max_receive_after(1, 9), Err(Failure::Unsupported));
+        assert_eq!(plain.0.load(core::sync::atomic::Ordering::SeqCst), 5);
+        // No message waits under the old bound: that is the bound itself.
+        assert_eq!(plain.set_max_receive_after(0, 9), Ok(()));
+        assert_eq!(plain.0.load(core::sync::atomic::Ordering::SeqCst), 9);
+    }
+
+    #[test]
+    fn a_boxed_channel_stages_through_its_driver() {
+        let boxed: alloc::boxed::Box<dyn Channel> = alloc::boxed::Box::new(Staging);
+        assert_eq!(Channel::set_max_receive_after(&boxed, 2, 7), Ok(()));
     }
 
     #[test]

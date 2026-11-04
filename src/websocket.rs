@@ -34,7 +34,7 @@ use url::Url;
 use crate::channel::{self, Datagrams, Delivery, Kind};
 use crate::failure::Failure;
 use crate::frame::{self, WS_DATAGRAMS_PROTOCOL, WsPart};
-use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, Received};
+use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, ReceiveBound, Received};
 #[cfg(feature = "webrtc")]
 use crate::webrtc::{Climb, Plan, Port, Settings};
 
@@ -374,8 +374,8 @@ pub struct Channel {
     behind: Arc<AtomicBool>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     frames: Frames,
-    // The largest message read; the worker applies it.
-    max_message: Arc<AtomicUsize>,
+    // The largest message read, by position; the worker applies it.
+    max_message: Arc<ReceiveBound>,
     max_send: AtomicUsize,
     datagrams: Option<WsDatagrams>,
     peer_certificates: Option<Vec<Vec<u8>>>,
@@ -503,7 +503,7 @@ impl fmt::Debug for Channel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Channel")
             .field("frames", &self.frames)
-            .field("max_message", &self.max_message.load(Ordering::SeqCst))
+            .field("max_message", &self.max_message.current())
             .field("max_send", &self.max_send.load(Ordering::SeqCst))
             .finish_non_exhaustive()
     }
@@ -533,7 +533,7 @@ impl Channel {
         let making_room = Arc::clone(&room);
         let behind = Arc::new(AtomicBool::new(false));
         let noting = Arc::clone(&behind);
-        let max_message = Arc::new(AtomicUsize::new(limits.max_message));
+        let max_message = Arc::new(ReceiveBound::new(limits.max_message));
         let current = Arc::clone(&max_message);
         let (datagrams, for_worker) = if tagged {
             let pending = limits.pending_datagrams.max(1);
@@ -607,6 +607,7 @@ impl Channel {
                     limits,
                     max_message: current,
                     applied: limits.max_message,
+                    read: 0,
                     datagrams: for_worker,
                     waiting: None,
                     heard: Instant::now(),
@@ -733,6 +734,9 @@ impl channel::Channel for Channel {
 
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
         let next = self.inbox.receive(timeout);
+        if matches!(next, Ok(Some(_))) {
+            self.max_message.taken();
+        }
         // Pairs with the worker's fence in `deliver`: either it sees the room this take made, or this sees it behind.
         fence(Ordering::SeqCst);
         if self.behind.swap(false, Ordering::SeqCst) {
@@ -747,7 +751,12 @@ impl channel::Channel for Channel {
     }
 
     fn set_max_receive(&self, bytes: usize) {
-        self.max_message.store(bytes, Ordering::SeqCst);
+        self.max_message.set(bytes);
+    }
+
+    fn set_max_receive_after(&self, messages: usize, bytes: usize) -> Result<(), Failure> {
+        self.max_message.stage(messages, bytes);
+        Ok(())
     }
 
     fn set_max_send(&self, bytes: usize) {
@@ -905,9 +914,11 @@ struct Worker {
     queued: Arc<AtomicUsize>,
     room: Arc<Room>,
     limits: Limits,
-    max_message: Arc<AtomicUsize>,
+    max_message: Arc<ReceiveBound>,
     // What the socket was built with: the shared value may already have moved on.
     applied: usize,
+    // Messages read for the reader: the position of the next.
+    read: u64,
     datagrams: Option<WorkerDatagrams>,
     waiting: Option<Received>,
     heard: Instant,
@@ -1097,8 +1108,9 @@ impl Worker {
 
     /// Whether a message came in, in which case there may be another.
     fn read_one(&mut self) -> Result<bool, Stop> {
-        // Looked at after this turn's writes: a peer answering one of them meets the limit its sender had set.
-        let wanted = self.max_message.load(Ordering::SeqCst);
+        // Looked at after this turn's writes: a peer answering one of them meets the limit its sender had set. A frame read now
+        // belongs to the next message, whose position fixes its bound.
+        let wanted = self.max_message.at(self.read);
         if wanted != self.applied {
             self.applied = wanted;
             let limit = wanted + self.tag();
@@ -1122,7 +1134,7 @@ impl Worker {
         self.heard = Instant::now();
         self.pinged = false;
         match message {
-            Message::Text(text) => self.waiting = Some(Ok(text.as_bytes().to_vec())),
+            Message::Text(text) => self.arrived(text.as_bytes().to_vec()),
             #[cfg(feature = "webrtc")]
             Message::Binary(body) if self.climbs() && frame::ws_signal_part(&body).is_some() => {
                 if let (Some(climb), Some(signal)) = (
@@ -1139,12 +1151,12 @@ impl Worker {
                     }
                 }
                 Ok(WsPart::Message(message)) if self.frames == Frames::Binary => {
-                    self.waiting = Some(Ok(message.to_vec()));
+                    self.arrived(message.to_vec());
                 }
                 _ => return Err(Stop::FailedClosing(Failure::Protocol, CloseCode::Protocol)),
             },
             Message::Binary(body) if self.frames == Frames::Binary => {
-                self.waiting = Some(Ok(body.to_vec()));
+                self.arrived(body.to_vec());
             }
             Message::Binary(_) => {
                 return Err(Stop::FailedClosing(
@@ -1160,6 +1172,11 @@ impl Worker {
             _ => {}
         }
         Ok(true)
+    }
+
+    fn arrived(&mut self, message: Vec<u8>) {
+        self.waiting = Some(Ok(message));
+        self.read += 1;
     }
 
     /// Sends what it can. A peer that takes nothing for `Limits::send` while there is something to send ends the channel.

@@ -203,6 +203,78 @@ impl Drop for Finishing<'_> {
     }
 }
 
+/// The largest message a channel reads, by the message's position in the stream: a staged change takes effect at a position fixed
+/// when it is staged, however far the driver has read ahead of the reader.
+#[derive(Debug)]
+pub(crate) struct ReceiveBound {
+    bounds: Mutex<Bounds>,
+    // Messages the reader has taken: the position the next `receive` returns.
+    taken: core::sync::atomic::AtomicU64,
+}
+
+#[derive(Debug)]
+struct Bounds {
+    now: usize,
+    // From this position on, this bound.
+    staged: Option<(u64, usize)>,
+}
+
+impl ReceiveBound {
+    pub(crate) const fn new(bytes: usize) -> Self {
+        Self {
+            bounds: Mutex::new(Bounds {
+                now: bytes,
+                staged: None,
+            }),
+            taken: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Replaces the bound for every message not yet read, and any staged change.
+    pub(crate) fn set(&self, bytes: usize) {
+        let mut bounds = self.bounds.lock().unwrap_or_else(PoisonError::into_inner);
+        bounds.now = bytes;
+        bounds.staged = None;
+    }
+
+    /// The next `messages` the reader has not taken keep the bound in force; those after them are held to `bytes`.
+    pub(crate) fn stage(&self, messages: usize, bytes: usize) {
+        let from = self
+            .taken
+            .load(core::sync::atomic::Ordering::SeqCst)
+            .saturating_add(u64::try_from(messages).unwrap_or(u64::MAX));
+        let mut bounds = self.bounds.lock().unwrap_or_else(PoisonError::into_inner);
+        bounds.staged = Some((from, bytes));
+    }
+
+    /// Called by the reader for each message `receive` returns.
+    pub(crate) fn taken(&self) {
+        self.taken
+            .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The bound for the message at `position`, counted from the first the channel read. Positions only grow, so a staged change
+    /// is made the bound in force once reached.
+    pub(crate) fn at(&self, position: u64) -> usize {
+        let mut bounds = self.bounds.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((from, bytes)) = bounds.staged
+            && position >= from
+        {
+            bounds.now = bytes;
+            bounds.staged = None;
+        }
+        bounds.now
+    }
+
+    /// The bound in force now, for `Debug`.
+    pub(crate) fn current(&self) -> usize {
+        self.bounds
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .now
+    }
+}
+
 /// Decides whether a source address may start a handshake.
 #[cfg(any(feature = "websocket", feature = "webtransport"))]
 pub(crate) type Admission = alloc::sync::Arc<dyn Fn(core::net::SocketAddr) -> bool + Send + Sync>;
@@ -252,5 +324,33 @@ impl Inbox {
                 Ok(None)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReceiveBound;
+
+    #[test]
+    fn a_staged_bound_starts_at_its_position_counted_from_what_the_reader_took() {
+        let bound = ReceiveBound::new(10);
+        bound.taken();
+        bound.stage(1, 99);
+        // The driver may ask in any order of time, but only ever for a later position.
+        assert_eq!(bound.at(1), 10);
+        assert_eq!(bound.at(1), 10);
+        assert_eq!(bound.at(2), 99);
+        assert_eq!(bound.at(3), 99);
+        assert_eq!(bound.current(), 99);
+    }
+
+    #[test]
+    fn setting_a_bound_replaces_a_staged_one() {
+        let bound = ReceiveBound::new(10);
+        bound.stage(2, 99);
+        bound.set(20);
+        assert_eq!(bound.at(5), 20);
+        bound.stage(0, 30);
+        assert_eq!(bound.at(5), 30);
     }
 }

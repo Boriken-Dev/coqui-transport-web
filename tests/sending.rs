@@ -119,6 +119,98 @@ fn a_webtransport_channel_bounds_what_it_reads_and_what_it_sends_apart() {
     bounds_go_each_way(&client, &server);
 }
 
+/// The bound a server reads a hello under, while the peer still owes a proof.
+const SMALL: usize = 64 * 1024;
+/// The bound for everything after the proof.
+const FULL: usize = 1 << 20;
+
+/// A server reads a hello under the small bound, stages the full bound to start after one more message, and replies. The client then
+/// sends `first` and, when given, `second` at once, and the server's reader waits so its driver can read both ahead of it.
+fn after_a_staged_bound(
+    client: &impl Channel,
+    server: &impl Channel,
+    first: &[u8],
+    second: Option<&[u8]>,
+) -> Vec<Result<usize, Failure>> {
+    server.set_max_receive(SMALL);
+    client.send(b"hello").unwrap();
+    assert_eq!(server.receive(Some(WAIT)), Ok(Some(b"hello".to_vec())));
+    server.set_max_receive_after(1, FULL).unwrap();
+    server.send(b"reply").unwrap();
+    assert_eq!(client.receive(Some(WAIT)), Ok(Some(b"reply".to_vec())));
+    client.send(first).unwrap();
+    if let Some(second) = second {
+        client.send(second).unwrap();
+    }
+    thread::sleep(Duration::from_millis(100));
+    let mut read = vec![length(server)];
+    if second.is_some() && read[0].is_ok() {
+        read.push(length(server));
+    }
+    read
+}
+
+/// The large message comes right behind the small one, and the driver reads it before the reader has taken the small one: it is
+/// still judged by its own position, under the full bound.
+fn a_large_message_right_after_the_small_one_is_taken(
+    client: &impl Channel,
+    server: &impl Channel,
+) {
+    let large = vec![7; FULL];
+    assert_eq!(
+        after_a_staged_bound(client, server, &[1; 32], Some(&large)),
+        [Ok(32), Ok(FULL)]
+    );
+}
+
+/// The large message comes in place of the small one, so it is judged under the small bound.
+fn a_large_message_in_place_of_the_small_one_is_refused(
+    client: &impl Channel,
+    server: &impl Channel,
+) {
+    let large = vec![7; FULL];
+    assert_eq!(
+        after_a_staged_bound(client, server, &large, None),
+        [Err(Failure::Protocol)]
+    );
+}
+
+#[test]
+fn a_websocket_takes_a_large_message_right_after_the_small_one_under_a_staged_bound() {
+    let (client, server) = websocket_pair(Limits::default(), Limits::default());
+    a_large_message_right_after_the_small_one_is_taken(&client, &server);
+}
+
+#[test]
+fn a_webtransport_channel_takes_a_large_message_right_after_the_small_one_under_a_staged_bound() {
+    let (client, server) = webtransport_pair(Limits::default(), Limits::default());
+    a_large_message_right_after_the_small_one_is_taken(&client, &server);
+}
+
+#[test]
+fn a_websocket_refuses_a_large_message_in_place_of_the_small_one_under_a_staged_bound() {
+    let (client, server) = websocket_pair(Limits::default(), Limits::default());
+    a_large_message_in_place_of_the_small_one_is_refused(&client, &server);
+    // Refused as any message over its bound is: a close with 1009, which the sender reads as refused rather than lost.
+    assert_eq!(client.receive(Some(WAIT)), Err(Failure::Protocol));
+}
+
+#[test]
+fn a_webtransport_channel_refuses_a_large_message_in_place_of_the_small_one_under_a_staged_bound() {
+    let (client, server) = webtransport_pair(Limits::default(), Limits::default());
+    a_large_message_in_place_of_the_small_one_is_refused(&client, &server);
+}
+
+#[test]
+fn a_boxed_channel_stages_a_bound_through_its_driver() {
+    let (client, server) = websocket_pair(Limits::default(), Limits::default());
+    let server: Box<dyn Channel> = Box::new(server);
+    a_large_message_right_after_the_small_one_is_taken(&client, &server);
+    let (client, server) = webtransport_pair(Limits::default(), Limits::default());
+    let server: Box<dyn Channel> = Box::new(server);
+    a_large_message_in_place_of_the_small_one_is_refused(&client, &server);
+}
+
 #[test]
 fn a_boxed_channel_passes_both_bounds_on() {
     let (client, server) = websocket_pair(Limits::default(), Limits::default());

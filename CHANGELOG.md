@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Channel::set_max_receive_after(messages, bytes)` stages a change to the read bound by position: the next `messages` that `receive`
+  has not yet returned are held to the bound in force, and every one after them to `bytes`. The WebSocket and WebTransport drivers
+  judge each message by its position as they read it, so a link can read a peer's proof under the handshake's bound and a large call
+  right behind it under the full one, with no race against the driver's read-ahead. A message over its own bound is refused as before.
+  The default changes nothing and returns `Failure::Unsupported`, unless `messages` is 0, which is `set_max_receive`; `Box<dyn Channel>`
+  forwards it.
 - `Channel::peer_certificates`: the DER chain the peer presented and this side's rustls configuration accepted, on a TLS WebSocket and on
   WebTransport, the server's on a client and the client's on a server that asked for one. `None` by default, on a plain WebSocket, and
   when the peer presented none.
