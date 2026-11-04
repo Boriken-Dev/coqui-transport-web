@@ -24,6 +24,7 @@ proves nothing about who the peer is: identity is a separate step, on the channe
   cancel.
 - The certificate chain TLS accepted from the peer, on either end of a channel, for a peer proof or a pin to decide on.
 - Plain WebSocket beyond loopback only by a deliberate choice, which the listener or dialer reports.
+- A dialer bound to a chosen local address, so a listener's per-source rules can be tested from more than one source.
 - Raw datagrams beside the messages, on a ladder: WebTransport's own, a WebRTC data channel on the same UDP port (`webrtc` feature), then
   inside the WebSocket. A blocked UDP path costs only the attempt.
 - The same wire in Rust and Dart, held together by shared vectors.
@@ -38,7 +39,7 @@ cargo add coqui-web --features websocket
 
 | Feature | Adds | Default |
 | --- | --- | --- |
-| `websocket` | `websocket::{Dialer, Listener}`, on `tungstenite`, `rustls` and `mio` | off |
+| `websocket` | `websocket::{Dialer, Listener}`, on `tungstenite`, `rustls`, `mio` and `socket2` | off |
 | `webtransport` | `webtransport::{Dialer, Listener}`, on `wtransport`, with a small runtime inside the driver | off |
 | `webrtc` | `webrtc::Port`, and a WebSocket channel that climbs onto a data channel on it, on `str0m`. Implies the other two | off |
 

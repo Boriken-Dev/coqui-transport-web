@@ -21,7 +21,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default = []
 # `websocket::{Dialer, Listener}`: blocking WebSocket drivers, with TLS from the caller's rustls config.
-websocket = ["dep:tungstenite", "dep:rustls", "dep:mio"]
+websocket = ["dep:tungstenite", "dep:rustls", "dep:mio", "dep:socket2"]
 # `webtransport::{Dialer, Listener}`: WebTransport drivers over a small runtime inside the driver.
 webtransport = ["dep:wtransport", "dep:tokio", "dep:rustls"]
 # `webrtc::Port`: one UDP port for WebTransport and WebRTC data channels, and a WebSocket channel that climbs onto one.
@@ -37,6 +37,8 @@ rustls = { version = "0.23", optional = true, default-features = false, features
 # A worker waits on its socket and on callers at once, with no wake-up of its own on an idle channel. Safe to register, which
 # `polling` is not, and already beneath quinn.
 mio = { version = "1", optional = true, default-features = false, features = ["os-poll", "net"] }
+# A dialer bound to a chosen local address: std cannot bind a TCP socket before connecting it. Already beneath tokio.
+socket2 = { version = "0.6", optional = true }
 # Pre-1.0: the only maintained HTTP/3 WebTransport session crate on quinn that browsers interoperate with.
 wtransport = { version = "0.7.2", optional = true, default-features = false, features = ["quinn", "ring"] }
 tokio = { version = "1", optional = true, default-features = false, features = ["rt-multi-thread", "time", "sync", "macros"] }

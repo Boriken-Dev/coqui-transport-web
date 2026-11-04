@@ -45,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `websocket::Dialer::with_local_addr` and `webtransport::Dialer::with_local_addr` bind the dialer's socket to a chosen local
+  address before it connects, so a listener's admission sees the connection come from there, as a test of per-source rules from a
+  second loopback address needs. Only endpoint addresses of its family are tried. An address this host cannot bind, or an endpoint
+  with none of its family, fails the dial with `Failure::Unsupported` (`Failure::Permission` when it is taken or not allowed). The
+  `websocket` feature now depends on `socket2`, which `webtransport` already pulled in.
 - `Channel::set_max_receive_after(messages, bytes)` stages a change to the read bound by position: the next `messages` that `receive`
   has not yet returned are held to the bound in force, and every one after them to `bytes`. The WebSocket and WebTransport drivers
   judge each message by its position as they read it, so a link can read a peer's proof under the handshake's bound and a large call

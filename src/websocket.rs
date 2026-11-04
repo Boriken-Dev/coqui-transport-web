@@ -34,7 +34,9 @@ use url::Url;
 use crate::channel::{self, Datagrams, Delivery, Kind};
 use crate::failure::Failure;
 use crate::frame::{self, WS_DATAGRAMS_PROTOCOL, WsPart};
-use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, ReceiveBound, Received};
+use crate::pump::{
+    Abandon, Admission, Cancel, Inbox, Limits, ReceiveBound, Received, bind_failure,
+};
 #[cfg(feature = "webrtc")]
 use crate::webrtc::{Climb, Plan, Port, Settings};
 
@@ -1334,6 +1336,7 @@ pub struct Dialer {
     frames: Frames,
     datagrams: bool,
     plain_beyond_loopback: bool,
+    local: Option<SocketAddr>,
     #[cfg(feature = "webrtc")]
     webrtc: Option<Settings>,
 }
@@ -1346,6 +1349,7 @@ impl fmt::Debug for Dialer {
             .field("frames", &self.frames)
             .field("headers", &self.headers.len())
             .field("plain_beyond_loopback", &self.plain_beyond_loopback)
+            .field("local", &self.local)
             .finish()
     }
 }
@@ -1382,6 +1386,16 @@ impl Dialer {
     #[must_use]
     pub const fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Binds each connection's socket to `address` before it connects, rather than to what the system picks, so a listener sees
+    /// the connection come from there. Give port 0 for any free port. Only endpoint addresses of its family are tried; an address
+    /// this host cannot bind, or an endpoint with none of its family, fails the dial with [`Failure::Unsupported`], or
+    /// [`Failure::Permission`] when the address is taken or not allowed.
+    #[must_use]
+    pub const fn with_local_addr(mut self, address: SocketAddr) -> Self {
+        self.local = Some(address);
         self
     }
 
@@ -1432,7 +1446,11 @@ impl Dialer {
         WS_DATAGRAMS_PROTOCOL
     }
 
-    fn open_tcp(url: &Url, deadline: Instant) -> Result<TcpStream, Failure> {
+    fn open_tcp(
+        url: &Url,
+        deadline: Instant,
+        local: Option<SocketAddr>,
+    ) -> Result<TcpStream, Failure> {
         let host = url.host_str().ok_or(Failure::Protocol)?;
         let port = url.port_or_known_default().ok_or(Failure::Protocol)?;
         // IPv6 hosts come bracketed from the URL; a resolver wants them bare.
@@ -1441,18 +1459,50 @@ impl Dialer {
             .to_socket_addrs()
             .map_err(|_| Failure::PathLost)?;
         let mut last = Failure::PathLost;
+        let mut tried = false;
         for address in addresses {
+            if local.is_some_and(|local| local.is_ipv4() != address.is_ipv4()) {
+                continue;
+            }
+            tried = true;
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err(Failure::Timeout);
             }
-            match TcpStream::connect_timeout(&address, left) {
+            let connected = match local {
+                Some(local) => connect_from(local, address, left)?,
+                None => TcpStream::connect_timeout(&address, left),
+            };
+            match connected {
                 Ok(stream) => return Ok(stream),
                 Err(error) => last = io_failure(&error),
             }
         }
+        if !tried {
+            return Err(Failure::Unsupported);
+        }
         Err(last)
     }
+}
+
+/// A socket bound to `local`, connecting to `address`. A failure to bind is this host's and ends the dial; one to connect is the
+/// path's, and the next address may still be tried.
+fn connect_from(
+    local: SocketAddr,
+    address: SocketAddr,
+    limit: Duration,
+) -> Result<io::Result<TcpStream>, Failure> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(
+        Domain::for_address(local),
+        Type::STREAM,
+        Some(Protocol::TCP),
+    )
+    .map_err(|_| Failure::Unsupported)?;
+    socket.bind(&local.into()).map_err(|e| bind_failure(&e))?;
+    Ok(socket
+        .connect_timeout(&address.into(), limit)
+        .map(|()| TcpStream::from(socket)))
 }
 
 /// What a dialer that climbs offers, the one it prefers first.
@@ -1485,7 +1535,7 @@ impl channel::Dialer for Dialer {
         {
             return Err(Failure::Permission);
         }
-        let tcp = Self::open_tcp(endpoint, deadline)?;
+        let tcp = Self::open_tcp(endpoint, deadline, self.local)?;
         #[cfg(feature = "webrtc")]
         let addresses = tcp
             .local_addr()

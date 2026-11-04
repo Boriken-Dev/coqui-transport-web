@@ -34,7 +34,9 @@ use crate::channel::{self, Datagrams, Delivery, Kind};
 use crate::endpoints::CertificatePin;
 use crate::failure::Failure;
 use crate::frame::{self, Decoder};
-use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, ReceiveBound, Received};
+use crate::pump::{
+    Abandon, Admission, Cancel, Inbox, Limits, ReceiveBound, Received, bind_failure,
+};
 #[cfg(feature = "webrtc")]
 use crate::webrtc::Port;
 
@@ -453,6 +455,7 @@ impl Drop for Channel {
 pub struct Dialer {
     tls: Tls,
     limits: Limits,
+    local: Option<SocketAddr>,
     runtime: Arc<Runtime>,
 }
 
@@ -465,6 +468,7 @@ impl fmt::Debug for Dialer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Dialer")
             .field("limits", &self.limits)
+            .field("local", &self.local)
             .finish_non_exhaustive()
     }
 }
@@ -484,6 +488,7 @@ impl Dialer {
                     .collect(),
             ),
             limits: Limits::default(),
+            local: None,
             runtime: runtime()?,
         })
     }
@@ -497,6 +502,7 @@ impl Dialer {
         Ok(Self {
             tls: Tls::Custom(tls),
             limits: Limits::default(),
+            local: None,
             runtime: runtime()?,
         })
     }
@@ -508,9 +514,23 @@ impl Dialer {
         self
     }
 
+    /// Binds the dialer's UDP socket to `address` rather than to what the system picks, so a listener sees the session come from
+    /// there. Give port 0 for any free port: each address a host name resolves to is tried from a socket of its own. Only endpoint
+    /// addresses of its family are tried; an address this host cannot bind, or an endpoint with none of its family, fails the dial
+    /// with [`Failure::Unsupported`], or [`Failure::Permission`] when the address is taken or not allowed.
+    #[must_use]
+    pub const fn with_local_addr(mut self, address: SocketAddr) -> Self {
+        self.local = Some(address);
+        self
+    }
+
     /// A client endpoint, which sends a name's session to `address` when given one.
     fn endpoint(&self, address: Option<SocketAddr>) -> Result<Endpoint<Client>, Failure> {
-        let builder = wtransport::ClientConfig::builder().with_bind_default();
+        let builder = match self.local {
+            Some(local) => wtransport::ClientConfig::builder()
+                .with_bind_socket(std::net::UdpSocket::bind(local).map_err(|e| bind_failure(&e))?),
+            None => wtransport::ClientConfig::builder().with_bind_default(),
+        };
         let mut config = match &self.tls {
             Tls::Pinned(pins) => builder.with_server_certificate_hashes(pins.clone()).build(),
             Tls::Custom(tls) => {
@@ -602,7 +622,21 @@ impl channel::Dialer for Dialer {
             return Err(Failure::Unsupported);
         }
         let url = endpoint.to_string();
-        let addresses = addresses(endpoint)?;
+        let mut addresses = addresses(endpoint)?;
+        if let Some(local) = self.local {
+            // A literal gives no addresses to choose from, so its own family is what must match.
+            let reachable = match endpoint.host() {
+                Some(url::Host::Ipv4(_)) => local.is_ipv4(),
+                Some(url::Host::Ipv6(_)) => local.is_ipv6(),
+                _ => {
+                    addresses.retain(|address| address.is_ipv4() == local.is_ipv4());
+                    !addresses.is_empty()
+                }
+            };
+            if !reachable {
+                return Err(Failure::Unsupported);
+            }
+        }
         let mut attempts = tokio::task::JoinSet::new();
         if addresses.is_empty() {
             attempts.spawn_on(

@@ -4,7 +4,7 @@ Header-file-style reference for the `coqui-web` crate: every public item with it
 
 | Feature | Adds | Default |
 | --- | --- | --- |
-| `websocket` | `websocket::{Channel, Dialer, Frames, Listener}`, on `tungstenite`, `rustls` and `mio` | off |
+| `websocket` | `websocket::{Channel, Dialer, Frames, Listener}`, on `tungstenite`, `rustls`, `mio` and `socket2` | off |
 | `webtransport` | `webtransport::{Channel, Dialer, Listener}`, on `wtransport`, with a small runtime inside | off |
 | `webrtc` | `webrtc::{Port, Settings, Signaling}`, and a WebSocket channel that climbs onto a data channel, on `str0m`; implies both others | off |
 
@@ -257,6 +257,7 @@ pub struct Channel                          // implements coqui_web::Channel
 pub fn Dialer::new() -> Self                // no TLS: reaches only ws://; wss:// fails with Failure::Certificate
 pub fn Dialer::with_tls(self, tls: Arc<rustls::ClientConfig>) -> Self
 pub const fn Dialer::with_limits(self, limits: Limits) -> Self
+pub const fn Dialer::with_local_addr(self, address: SocketAddr) -> Self    // binds each connection's socket there first
 pub const fn Dialer::with_frames(self, frames: Frames) -> Self
 pub const fn Dialer::with_datagrams(self) -> Self                       // asks the server to agree; one that does not makes the dial Failure::Unsupported
 pub const fn Dialer::with_webrtc(self, settings: webrtc::Settings) -> Self  // feature webrtc; datagrams too, and a climb where the listener can
@@ -290,6 +291,7 @@ pub struct Channel                          // implements coqui_web::Channel
 pub fn Dialer::pinned(pins: &[CertificatePin]) -> Result<Self, Failure>
 pub fn Dialer::with_tls(tls: Arc<rustls::ClientConfig>) -> Result<Self, Failure>
 pub const fn Dialer::with_limits(self, limits: Limits) -> Self
+pub const fn Dialer::with_local_addr(self, address: SocketAddr) -> Self    // binds the UDP socket there, one per address tried
 pub fn Listener::bind(address: SocketAddr, tls: Arc<rustls::ServerConfig>) -> Result<Self, Failure>
 pub fn Listener::on_port(port: &webrtc::Port, tls: Arc<rustls::ServerConfig>) -> Result<Self, Failure>  // feature webrtc; one per port, a second is Failure::Permission
 pub const fn Listener::with_limits(self, limits: Limits) -> Self
@@ -346,6 +348,11 @@ A WebSocket with `Dialer::with_webrtc` asks for `coqui-web-ladder.1` and `coqui-
 - A pin needs a certificate valid for at most 14 days, ECDSA P-256, in browsers and in `Dialer::pinned` alike. Otherwise it is refused as `Failure::Certificate`.
 - A WebTransport dialer given a host name tries every address it resolves to, the families taking turns from the resolver's first, a new attempt every 250 ms beside those still opening (RFC 8305); the first to open wins. A failure that is not about the path, such as a rejected certificate, ends the dial at once, whichever address gave it. The name is resolved by the system before the dial's timeout starts, as a WebSocket dialer's is. An address literal is dialled as it is.
 - WebSocket `Text` frames: `Channel::send` refuses bytes that are not UTF-8 before they reach the wire.
+- `Dialer::with_local_addr` (both drivers) binds before connecting, so a listener's admission and `Pending::peer_addr` see that
+  address. Give port 0. Only endpoint addresses of its family are tried. An address this host cannot bind, or an endpoint with
+  none of its family, fails the dial with `Failure::Unsupported` before anything is sent (`Failure::Permission` when the address
+  is taken or not allowed). A second loopback address such as `127.0.0.2` works only where the system binds it and routes it to
+  loopback; where it cannot be bound, the dial is that `Failure::Unsupported`.
 - A WebSocket or WebTransport channel reads ahead of its reader, up to `pending` messages, and judges each by the receive bound
   in force when it reads it. A bound raised just before `receive` does not
   reach a message already being read: raise it before the peer can send larger, or that message ends the channel with

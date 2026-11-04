@@ -275,6 +275,14 @@ impl ReceiveBound {
     }
 }
 
+/// Why a local address could not be bound: taken or not allowed, or not this host's to bind.
+pub(crate) fn bind_failure(error: &std::io::Error) -> Failure {
+    match error.kind() {
+        std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied => Failure::Permission,
+        _ => Failure::Unsupported,
+    }
+}
+
 /// Decides whether a source address may start a handshake.
 #[cfg(any(feature = "websocket", feature = "webtransport"))]
 pub(crate) type Admission = alloc::sync::Arc<dyn Fn(core::net::SocketAddr) -> bool + Send + Sync>;

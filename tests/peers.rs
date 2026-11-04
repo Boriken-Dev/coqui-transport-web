@@ -270,6 +270,97 @@ fn a_pending_webtransport_session_names_the_source_it_admitted() {
     client.join().unwrap();
 }
 
+/// A loopback address other than the listener's, as a client resuming from a second source would have.
+fn second_loopback() -> SocketAddr {
+    "127.0.0.2:0".parse().unwrap()
+}
+
+/// An address on no host (RFC 5737), which no socket here can be bound to.
+fn not_here() -> SocketAddr {
+    "192.0.2.1:0".parse().unwrap()
+}
+
+#[test]
+fn a_websocket_dialer_bound_to_a_local_address_is_admitted_from_it() {
+    let (noted, admit) = noting();
+    let listener = websocket::Listener::bind(loopback(), None)
+        .unwrap()
+        .with_admission(admit);
+    let url = Url::parse(&format!("ws://{}/", listener.local_addr().unwrap())).unwrap();
+    let client = thread::spawn(move || {
+        let near = websocket::Dialer::new()
+            .with_local_addr(second_loopback())
+            .dial(Kind::WebSocket, &url, WAIT)
+            .unwrap();
+        near.send(b"open").unwrap();
+        near
+    });
+    let pending = listener.next(Some(WAIT)).unwrap();
+    assert_eq!(pending.peer_addr().ip(), second_loopback().ip());
+    assert_eq!(*noted.lock().unwrap(), [pending.peer_addr()]);
+    let far = pending.handshake().unwrap();
+    assert_eq!(far.receive(Some(WAIT)), Ok(Some(b"open".to_vec())));
+    drop(client.join().unwrap());
+}
+
+#[test]
+fn a_webtransport_dialer_bound_to_a_local_address_is_admitted_from_it() {
+    let id = Identity::new();
+    let (noted, admit) = noting();
+    let listener = webtransport::Listener::bind(loopback(), server_tls(&id, &id, Ask::Nothing))
+        .unwrap()
+        .with_admission(admit);
+    let url = Url::parse(&format!(
+        "https://127.0.0.1:{}/",
+        listener.local_addr().port()
+    ))
+    .unwrap();
+    let client = thread::spawn(move || {
+        let near = webtransport::Dialer::pinned(&[id.pin()])
+            .unwrap()
+            .with_local_addr(second_loopback())
+            .dial(Kind::WebTransport, &url, WAIT)
+            .unwrap();
+        near.send(b"open").unwrap();
+        near
+    });
+    let pending = listener.next(Some(WAIT)).unwrap();
+    assert_eq!(pending.peer_addr().ip(), second_loopback().ip());
+    assert_eq!(*noted.lock().unwrap(), [pending.peer_addr()]);
+    let far = pending.handshake().unwrap();
+    assert_eq!(far.receive(Some(WAIT)), Ok(Some(b"open".to_vec())));
+    drop(client.join().unwrap());
+}
+
+/// A local address this host does not have, or of the other family from the endpoint, fails the dial before anything is sent.
+#[test]
+fn a_dialer_whose_local_address_cannot_reach_the_endpoint_says_so() {
+    let id = Identity::new();
+    let listener = websocket::Listener::bind(loopback(), None).unwrap();
+    let url = Url::parse(&format!("ws://{}/", listener.local_addr().unwrap())).unwrap();
+    for local in [not_here(), "[::1]:0".parse().unwrap()] {
+        let dialed =
+            websocket::Dialer::new()
+                .with_local_addr(local)
+                .dial(Kind::WebSocket, &url, WAIT);
+        assert_eq!(dialed.err(), Some(Failure::Unsupported), "{local}");
+    }
+    assert_eq!(
+        listener.next(Some(Duration::from_millis(200))).err(),
+        Some(Failure::Timeout)
+    );
+    let quic =
+        webtransport::Listener::bind(loopback(), server_tls(&id, &id, Ask::Nothing)).unwrap();
+    let url = Url::parse(&format!("https://127.0.0.1:{}/", quic.local_addr().port())).unwrap();
+    for local in [not_here(), "[::1]:0".parse().unwrap()] {
+        let dialed = webtransport::Dialer::pinned(&[id.pin()])
+            .unwrap()
+            .with_local_addr(local)
+            .dial(Kind::WebTransport, &url, Duration::from_secs(3));
+        assert_eq!(dialed.err(), Some(Failure::Unsupported), "{local}");
+    }
+}
+
 #[cfg(feature = "webrtc")]
 #[test]
 fn a_pending_session_on_a_port_names_the_client_and_not_its_relay() {
