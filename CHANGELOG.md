@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Renamed: the crate is `coqui-web-channel` (`coqui_web_channel::`) and the Dart package `coqui_web_channel`, at <https://github.com/Boriken-Dev/coqui-web-channel>; modules, types and wire identifiers keep their names.
 - A server's WebSocket handshake waits on the socket's readiness rather than in blocking reads, and starts no watchdog thread. Its
   limit still bounds it in total.
 - A WebTransport dialer refused by the server, as a listener's admission refuses a source, fails with `Failure::Permission` rather

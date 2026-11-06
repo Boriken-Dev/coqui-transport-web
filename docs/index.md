@@ -1,4 +1,4 @@
-# coqui-web
+# coqui-web-channel
 
 A reliable message channel a browser can open natively, and the native peer for it. WebTransport first, WebSocket as an explicit
 fallback. The library knows nothing of the application above it and proves nothing about who the peer is.

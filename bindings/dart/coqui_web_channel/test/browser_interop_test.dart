@@ -6,7 +6,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:coqui_web/coqui_web.dart';
+import 'package:coqui_web_channel/coqui_web_channel.dart';
 import 'package:test/test.dart';
 
 /// A real browser against the Rust drivers, over real sockets: `dart test -p chrome`.

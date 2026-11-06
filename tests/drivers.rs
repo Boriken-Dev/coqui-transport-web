@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use coqui_web::websocket::{self, Frames};
-use coqui_web::{
+use coqui_web_channel::websocket::{self, Frames};
+use coqui_web_channel::{
     CertificatePin, Channel, Dialer, Endpoints, Failure, Kind, Limits, NoPreflight, Phase,
     Recovery, webtransport,
 };
@@ -601,7 +601,9 @@ fn webtransport_carries_ordered_messages_with_a_pinned_certificate() {
 }
 
 /// A connected WebTransport pair with `limits` on the listening side.
-fn webtransport_pair(limits: coqui_web::Limits) -> (webtransport::Channel, webtransport::Channel) {
+fn webtransport_pair(
+    limits: coqui_web_channel::Limits,
+) -> (webtransport::Channel, webtransport::Channel) {
     let id = identity();
     let listener = webtransport::Listener::bind(loopback(), server_tls(&id))
         .unwrap()
@@ -625,10 +627,10 @@ fn webtransport_pair(limits: coqui_web::Limits) -> (webtransport::Channel, webtr
 
 #[test]
 fn webtransport_datagrams_go_both_ways_beside_the_messages() {
-    let (client, server) = webtransport_pair(coqui_web::Limits::default());
+    let (client, server) = webtransport_pair(coqui_web_channel::Limits::default());
     let (near, far) = (client.datagrams().unwrap(), server.datagrams().unwrap());
     assert!(near.max_size().unwrap() > 1000, "{:?}", near.max_size());
-    assert_eq!(near.delivery(), coqui_web::Delivery::Unreliable);
+    assert_eq!(near.delivery(), coqui_web_channel::Delivery::Unreliable);
     // Sent until one arrives: losing one is what they may do, even here.
     let until = std::time::Instant::now() + WAIT;
     let arrived = loop {
@@ -648,7 +650,7 @@ fn webtransport_datagrams_go_both_ways_beside_the_messages() {
 
 #[test]
 fn a_datagram_too_large_is_refused_and_the_channel_goes_on() {
-    let (client, server) = webtransport_pair(coqui_web::Limits::default());
+    let (client, server) = webtransport_pair(coqui_web_channel::Limits::default());
     let datagrams = client.datagrams().unwrap();
     let largest = datagrams.max_size().unwrap();
     assert_eq!(
@@ -663,7 +665,7 @@ fn a_datagram_too_large_is_refused_and_the_channel_goes_on() {
 #[test]
 fn a_reader_behind_loses_datagrams_and_can_see_how_many() {
     let (client, server) =
-        webtransport_pair(coqui_web::Limits::default().with_pending_datagrams(2));
+        webtransport_pair(coqui_web_channel::Limits::default().with_pending_datagrams(2));
     let (near, far) = (client.datagrams().unwrap(), server.datagrams().unwrap());
     let until = std::time::Instant::now() + WAIT;
     while far.dropped() == 0 {
@@ -684,7 +686,7 @@ fn a_reader_behind_loses_datagrams_and_can_see_how_many() {
 
 #[test]
 fn datagrams_end_with_the_channel() {
-    let (client, server) = webtransport_pair(coqui_web::Limits::default());
+    let (client, server) = webtransport_pair(coqui_web_channel::Limits::default());
     let far = server.datagrams().unwrap();
     client.close();
     let until = std::time::Instant::now() + WAIT;
@@ -701,7 +703,7 @@ fn datagrams_end_with_the_channel() {
 
 /// A connected WebSocket pair, with each end's dialer as `dialer` makes it.
 fn websocket_pair(
-    limits: coqui_web::Limits,
+    limits: coqui_web_channel::Limits,
     frames: Frames,
     dialer: impl FnOnce(websocket::Dialer) -> websocket::Dialer,
 ) -> (websocket::Channel, websocket::Channel) {
@@ -727,9 +729,11 @@ fn websocket_pair(
 
 #[test]
 fn a_websocket_has_no_datagrams_unless_asked_and_its_wire_is_unchanged() {
-    let (client, server) = websocket_pair(coqui_web::Limits::default(), Frames::Binary, |dialer| {
-        dialer
-    });
+    let (client, server) = websocket_pair(
+        coqui_web_channel::Limits::default(),
+        Frames::Binary,
+        |dialer| dialer,
+    );
     assert!(client.datagrams().is_none());
     assert!(server.datagrams().is_none());
     let boxed: Box<dyn Channel> = Box::new(client);
@@ -754,12 +758,12 @@ fn a_websocket_has_no_datagrams_unless_asked_and_its_wire_is_unchanged() {
 fn websocket_datagrams_go_both_ways_beside_the_messages_in_either_frame_kind() {
     for frames in [Frames::Binary, Frames::Text] {
         let (client, server) = websocket_pair(
-            coqui_web::Limits::default(),
+            coqui_web_channel::Limits::default(),
             frames,
             websocket::Dialer::with_datagrams,
         );
         let (near, far) = (client.datagrams().unwrap(), server.datagrams().unwrap());
-        assert_eq!(near.delivery(), coqui_web::Delivery::OverStream);
+        assert_eq!(near.delivery(), coqui_web_channel::Delivery::OverStream);
         assert_eq!(near.max_size(), Some(64 * 1024));
         client.send(b"a message").unwrap();
         near.send(b"\xff\x00raw").unwrap();
@@ -776,7 +780,7 @@ fn websocket_datagrams_go_both_ways_beside_the_messages_in_either_frame_kind() {
 
 #[test]
 fn a_websocket_message_at_its_limit_still_fits_with_the_tag() {
-    let limits = coqui_web::Limits::default().with_max_message(5);
+    let limits = coqui_web_channel::Limits::default().with_max_message(5);
     let (client, server) =
         websocket_pair(limits, Frames::Binary, websocket::Dialer::with_datagrams);
     client.send(b"12345").unwrap();
@@ -786,7 +790,7 @@ fn a_websocket_message_at_its_limit_still_fits_with_the_tag() {
 
 #[test]
 fn a_websocket_datagram_size_is_a_setting_with_no_floor_and_it_binds_both_ways() {
-    let limits = coqui_web::Limits::default().with_websocket_datagram(4);
+    let limits = coqui_web_channel::Limits::default().with_websocket_datagram(4);
     let (client, server) =
         websocket_pair(limits, Frames::Binary, websocket::Dialer::with_datagrams);
     let (near, far) = (client.datagrams().unwrap(), server.datagrams().unwrap());
@@ -796,7 +800,7 @@ fn a_websocket_datagram_size_is_a_setting_with_no_floor_and_it_binds_both_ways()
     assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), b"still here");
 
     // A peer whose own setting is larger: the extra is discarded and counted, and nothing else is harmed.
-    let wide = coqui_web::Limits::default();
+    let wide = coqui_web_channel::Limits::default();
     let listener = websocket::Listener::bind(loopback(), None)
         .unwrap()
         .with_limits(limits)
@@ -821,7 +825,7 @@ fn a_websocket_datagram_size_is_a_setting_with_no_floor_and_it_binds_both_ways()
     assert_eq!(there.dropped(), 1);
     assert_eq!(far.dropped(), 0);
 
-    let none = coqui_web::Limits::default().with_websocket_datagram(0);
+    let none = coqui_web_channel::Limits::default().with_websocket_datagram(0);
     let (client, _server) = websocket_pair(none, Frames::Binary, websocket::Dialer::with_datagrams);
     let datagrams = client.datagrams().unwrap();
     assert_eq!(datagrams.send(b"x"), Err(Failure::Protocol));
@@ -831,7 +835,7 @@ fn a_websocket_datagram_size_is_a_setting_with_no_floor_and_it_binds_both_ways()
 #[test]
 fn websocket_datagrams_nobody_asked_for_are_not_held() {
     let (client, server) = websocket_pair(
-        coqui_web::Limits::default().with_pending_datagrams(1),
+        coqui_web_channel::Limits::default().with_pending_datagrams(1),
         Frames::Binary,
         websocket::Dialer::with_datagrams,
     );
@@ -869,7 +873,9 @@ fn a_datagram_from_a_peer_cannot_arrive_as_a_message_or_break_the_channel() {
     .unwrap();
     request.headers_mut().insert(
         "sec-websocket-protocol",
-        tungstenite::http::HeaderValue::from_static(coqui_web::frame::WS_DATAGRAMS_PROTOCOL),
+        tungstenite::http::HeaderValue::from_static(
+            coqui_web_channel::frame::WS_DATAGRAMS_PROTOCOL,
+        ),
     );
     let (mut raw, _) = tungstenite::connect(request).unwrap();
     let server = accepted.join().unwrap();
@@ -903,7 +909,7 @@ fn a_server_that_does_not_agree_is_a_failure_a_caller_can_read() {
 #[test]
 fn websocket_datagrams_end_with_the_channel() {
     let (client, server) = websocket_pair(
-        coqui_web::Limits::default(),
+        coqui_web_channel::Limits::default(),
         Frames::Binary,
         websocket::Dialer::with_datagrams,
     );
@@ -1117,7 +1123,7 @@ fn a_blocked_webtransport_path_falls_back_to_websocket() {
         webtransport: webtransport::Dialer::with_tls(client_tls(&identity())).unwrap(),
     };
     let started = Instant::now();
-    let link = coqui_web::connect(
+    let link = coqui_web_channel::connect(
         &endpoints,
         &mut dialer,
         &mut NoPreflight,

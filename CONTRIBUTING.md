@@ -1,4 +1,4 @@
-# Contributing to coqui-web
+# Contributing to coqui-web-channel
 
 ## Licence
 
@@ -18,7 +18,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo clippy --no-default-features -- -D warnings
 cargo test --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
-(cd bindings/dart/coqui_web && dart analyze && dart test)
+(cd bindings/dart/coqui_web_channel && dart analyze && dart test)
 ```
 
 A change to the wire format changes `vectors/frames.json`, which both suites run. [`AGENTS.md`](AGENTS.md) is the

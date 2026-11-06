@@ -1,8 +1,8 @@
-# coqui_web
+# coqui_web_channel
 
 Reliable message channels a browser can open natively: WebTransport first, WebSocket as an explicit
 fallback, and a policy that never downgrades after a security failure. The Dart side of
-[coqui-web](https://github.com/Boriken-Dev/coqui-web).
+[coqui-web-channel](https://github.com/Boriken-Dev/coqui-web-channel).
 
 A channel is open, not trusted: run the peer's identity proof with `StagedChannel.nextSetupMessage`, then
 call `allowApplicationMessages`. A method whose handshake is binary, such as Noise, reads each message with `nextSetupBytes`

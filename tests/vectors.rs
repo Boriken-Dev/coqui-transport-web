@@ -1,6 +1,6 @@
 //! The wire vectors the Rust and Dart suites both run, so the two implementations cannot drift.
 
-use coqui_web::frame::{self, Decoder, FrameError};
+use coqui_web_channel::frame::{self, Decoder, FrameError};
 use proptest::prelude::*;
 use serde_json::Value;
 

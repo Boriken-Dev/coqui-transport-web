@@ -1,7 +1,7 @@
-name: coqui_web
+name: coqui_web_channel
 description: Reliable message channels a browser can open natively, WebTransport first with an explicit WebSocket fallback.
 version: 0.0.0-alpha.0
-repository: https://github.com/Boriken-Dev/coqui-web
+repository: https://github.com/Boriken-Dev/coqui-web-channel
 publish_to: none
 
 environment:

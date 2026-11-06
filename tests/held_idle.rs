@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use coqui_web::{CertificatePin, Channel, Dialer, Kind, Limits, websocket, webtransport};
+use coqui_web_channel::{CertificatePin, Channel, Dialer, Kind, Limits, websocket, webtransport};
 use cpu::process_cpu;
 use rustls::pki_types::PrivatePkcs8KeyDer;
 use url::Url;

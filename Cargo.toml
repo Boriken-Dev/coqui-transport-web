@@ -1,13 +1,13 @@
 [package]
-name = "coqui-web"
+name = "coqui-web-channel"
 version = "0.0.0-alpha.0"
 description = "Reliable message channels a browser can open natively, and their native peers: WebTransport, WebSocket and a safe fallback between them"
 readme = "README.md"
 edition = "2024"
 rust-version = "1.89"
 license = "MPL-2.0"
-repository = "https://github.com/Boriken-Dev/coqui-web"
-homepage = "https://boriken-dev.github.io/coqui-web/"
+repository = "https://github.com/Boriken-Dev/coqui-web-channel"
+homepage = "https://boriken-dev.github.io/coqui-web-channel/"
 keywords = ["webtransport", "websocket", "fallback", "framing", "browser"]
 categories = ["network-programming", "web-programming::websocket"]
 exclude = [".*", "*.local.*", "/bindings/", "/tools/"]

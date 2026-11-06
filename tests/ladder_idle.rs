@@ -9,9 +9,9 @@ use std::net::SocketAddr;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use coqui_web::webrtc::{Port, Settings};
-use coqui_web::websocket::{self, Frames};
-use coqui_web::{Channel, Delivery, Dialer, Kind};
+use coqui_web_channel::webrtc::{Port, Settings};
+use coqui_web_channel::websocket::{self, Frames};
+use coqui_web_channel::{Channel, Delivery, Dialer, Kind};
 use url::Url;
 
 mod cpu;

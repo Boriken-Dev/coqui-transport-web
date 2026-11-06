@@ -7,7 +7,7 @@ import 'dart:convert';
 import 'dart:js_interop';
 import 'dart:typed_data';
 
-import 'package:coqui_web/coqui_web.dart';
+import 'package:coqui_web_channel/coqui_web_channel.dart';
 import 'package:test/test.dart';
 
 @JS('eval')

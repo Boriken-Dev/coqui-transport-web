@@ -1,6 +1,6 @@
 # Contributor License Agreement
 
-Thank you for your interest in contributing to **coqui-web** (the "Project"),
+Thank you for your interest in contributing to **coqui-web-channel** (the "Project"),
 maintained by Boriken-Dev (the "Maintainer").
 
 This agreement documents the rights granted by contributors to the

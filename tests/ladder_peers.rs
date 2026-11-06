@@ -14,9 +14,9 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use coqui_web::webrtc::{Port, Settings, Signaling};
-use coqui_web::websocket::{self, Frames};
-use coqui_web::{
+use coqui_web_channel::webrtc::{Port, Settings, Signaling};
+use coqui_web_channel::websocket::{self, Frames};
+use coqui_web_channel::{
     CertificatePin, Channel, Datagrams, Delivery, Dialer, Failure, Kind, webtransport,
 };
 use hmac::{Hmac, Mac};

@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:coqui_web/coqui_web.dart';
+import 'package:coqui_web_channel/coqui_web_channel.dart';
 import 'package:test/test.dart';
 
 final class FakeConnection implements WebChannel {

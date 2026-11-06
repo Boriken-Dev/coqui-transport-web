@@ -21,9 +21,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use coqui_web::webrtc::{Port, Settings, Signaling};
-use coqui_web::websocket::{self, Frames};
-use coqui_web::{CertificatePin, Channel, webtransport};
+use coqui_web_channel::webrtc::{Port, Settings, Signaling};
+use coqui_web_channel::websocket::{self, Frames};
+use coqui_web_channel::{CertificatePin, Channel, webtransport};
 use rustls::pki_types::PrivatePkcs8KeyDer;
 
 const LARGE: usize = 1000;
@@ -185,7 +185,9 @@ fn act<C: Channel>(channel: &C, path: &Path, command: &str) -> String {
 }
 
 /// A port and a WebSocket listener on one number.
-fn on_one_number(settings: Settings) -> Result<(Port, websocket::Listener), coqui_web::Failure> {
+fn on_one_number(
+    settings: Settings,
+) -> Result<(Port, websocket::Listener), coqui_web_channel::Failure> {
     let loopback: SocketAddr = "127.0.0.1:0".parse().expect("an address");
     for _ in 0..64 {
         let port = Port::bind(loopback, settings)?;
@@ -196,7 +198,7 @@ fn on_one_number(settings: Settings) -> Result<(Port, websocket::Listener), coqu
             return Ok((port, listener));
         }
     }
-    Err(coqui_web::Failure::Unsupported)
+    Err(coqui_web_channel::Failure::Unsupported)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
