@@ -110,3 +110,79 @@ proptest! {
         prop_assert_eq!(message, body);
     }
 }
+
+/// The held bytes of a WebTransport stream's frames, which `coqui_transport`'s length-prefix codec has to produce and read
+/// exactly as the crate this one came from did.
+mod webtransport_frame {
+    use super::{bytes, hex, max};
+    use coqui_transport::frame::{Codec, Decode, FrameError, LengthPrefix};
+    use coqui_transport_web::frame::WEBTRANSPORT;
+    use serde_json::Value;
+
+    fn held() -> Value {
+        serde_json::from_str(include_str!("vectors/webtransport_frame.json"))
+            .expect("the vectors are JSON")
+    }
+
+    #[test]
+    fn the_stream_framing_is_a_little_endian_u32_that_refuses_an_empty_body() {
+        assert_eq!(WEBTRANSPORT, LengthPrefix::u32_le().refuse_empty());
+        assert_eq!(held()["codec"], "WebTransportFrame");
+    }
+
+    #[test]
+    fn every_held_encode_vector_holds() {
+        for case in held()["encode"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let body = match case.get("body") {
+                Some(body) => bytes(body.as_str().unwrap()),
+                None => case["text"].as_str().unwrap().as_bytes().to_vec(),
+            };
+            let got = WEBTRANSPORT.encode(&body, max(case));
+            if case["error"].as_bool() == Some(true) {
+                assert_eq!(got, Err(FrameError::Size), "{name}");
+            } else {
+                assert_eq!(hex(&got.unwrap()), case["hex"].as_str().unwrap(), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_held_decode_vector_holds() {
+        for case in held()["decode"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let mut decoder = WEBTRANSPORT.decoder(max(case));
+            let mut got = Vec::new();
+            let mut failed = false;
+            for chunk in case["chunks"].as_array().unwrap() {
+                decoder.push(&bytes(chunk.as_str().unwrap()));
+                loop {
+                    match decoder.next_frame() {
+                        Ok(Some(message)) => got.push(hex(&message)),
+                        Ok(None) => break,
+                        Err(FrameError::Size) => {
+                            failed = true;
+                            break;
+                        }
+                        Err(other) => panic!("{name}: {other:?}"),
+                    }
+                }
+            }
+            let expected: Vec<&str> = case["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|message| message.as_str().unwrap())
+                .collect();
+            assert_eq!(got, expected, "{name}");
+            assert_eq!(failed, case["error"].as_bool() == Some(true), "{name}");
+            if !failed {
+                assert_eq!(
+                    decoder.buffered() > 0,
+                    case["truncated"].as_bool() == Some(true),
+                    "{name}"
+                );
+            }
+        }
+    }
+}

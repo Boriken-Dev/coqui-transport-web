@@ -1,0 +1,35 @@
+{
+  "codec": "WebTransportFrame",
+  "wire": "little-endian u32 body length, then the body; a body is non-empty and at most `max` bytes",
+  "source": "coqui-web-channel 0b5b05c9af3417f6b13edc0fc7d9c86c02a63eca (frame::encode, frame::Decoder)",
+  "encode": [
+    {"hex":"0500000068656c6c6f","max":10,"name":"a short body","text":"hello"},
+    {"hex":"0500000068656c6c6f","max":5,"name":"exactly the limit","text":"hello"},
+    {"hex":"180000007b226a736f6e727063223a22322e30222c226964223a317d","max":1048576,"name":"a JSON-RPC message","text":"{\"jsonrpc\":\"2.0\",\"id\":1}"},
+    {"hex":"05000000636166c3a9","max":10,"name":"multi-byte text counts bytes","text":"café"},
+    {"error":true,"max":10,"name":"an empty body","text":""},
+    {"error":true,"max":4,"name":"one byte over the limit","text":"hello"},
+    {"body":"00ff0a0d1a","hex":"0500000000ff0a0d1a","max":10,"name":"binary bytes"},
+    {"body":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fa000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30","hex":"2c010000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fa000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30","max":1048576,"name":"a 300-byte body"},
+    {"body":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fa000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30","error":true,"max":299,"name":"a 300-byte body one over the limit"}
+  ],
+  "decode": [
+    {"chunks":["0500000068656c6c6f"],"error":false,"max":10,"messages":["68656c6c6f"],"name":"one frame whole","truncated":false},
+    {"chunks":["0500","000068656c6c6f"],"error":false,"max":10,"messages":["68656c6c6f"],"name":"split inside the prefix","truncated":false},
+    {"chunks":["0500000068","656c6c6f"],"error":false,"max":10,"messages":["68656c6c6f"],"name":"split inside the body","truncated":false},
+    {"chunks":["05","00","00","00","68","65","6c","6c","6f"],"error":false,"max":10,"messages":["68656c6c6f"],"name":"one byte at a time","truncated":false},
+    {"chunks":["0500000068656c6c6f05000000776f726c64"],"error":false,"max":10,"messages":["68656c6c6f","776f726c64"],"name":"two frames coalesced","truncated":false},
+    {"chunks":["0500000068656c6c6f0500","0000776f726c64"],"error":false,"max":10,"messages":["68656c6c6f","776f726c64"],"name":"coalesced then split","truncated":false},
+    {"chunks":["0500000068"],"error":false,"max":10,"messages":[],"name":"an incomplete frame waits","truncated":true},
+    {"chunks":["050000"],"error":false,"max":10,"messages":[],"name":"an incomplete prefix waits","truncated":true},
+    {"chunks":["0500000068656c6c6f"],"error":false,"max":5,"messages":["68656c6c6f"],"name":"exactly the limit","truncated":false},
+    {"chunks":["0b000000"],"error":true,"max":10,"messages":[],"name":"an oversized header","truncated":false},
+    {"chunks":["ffffffff"],"error":true,"max":10,"messages":[],"name":"a huge header, the high bit set","truncated":false},
+    {"chunks":["0500000068656c6c6f0b000000"],"error":true,"max":10,"messages":["68656c6c6f"],"name":"a good frame before a bad header","truncated":false},
+    {"chunks":["0500000068656c6c6f","0b000000"],"error":true,"max":10,"messages":["68656c6c6f"],"name":"a good frame before a bad header, later chunk","truncated":false},
+    {"chunks":["0b0000000500000068656c6c6f"],"error":true,"max":10,"messages":[],"name":"a bad header stops what follows it","truncated":false},
+    {"chunks":["00000000"],"error":true,"max":10,"messages":[],"name":"an empty frame","truncated":false},
+    {"chunks":["01000000ff"],"error":false,"max":10,"messages":["ff"],"name":"invalid UTF-8 is a message like any other","truncated":false},
+    {"chunks":["0000000568656c6c6f"],"error":true,"max":1048576,"messages":[],"name":"a big-endian frame declares more than the limit here","truncated":false}
+  ]
+}

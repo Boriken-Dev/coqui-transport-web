@@ -113,6 +113,20 @@ impl<C: Channel> Preflight<C> for NoPreflight {
 
 /// A channel that is open and **not yet trusted**. Run the peer's identity proof on it before
 /// delivering any application message. Neither a URL, a host name nor TLS alone proves a peer.
+///
+/// [`connect`] returns this and never a bare channel, so a channel that was merely dialled cannot
+/// be handed on as an authenticated peer without a call that says the proof ran:
+///
+/// ```compile_fail
+/// use coqui_transport_web::{Channel, Endpoints, NoPreflight, Unverified, connect};
+///
+/// fn deliver_to_the_application(_: impl Channel) {}
+///
+/// fn dialled<D: coqui_transport_web::Dialer>(endpoints: &Endpoints, dialer: &mut D) {
+///     let link = connect(endpoints, dialer, &mut NoPreflight, std::time::Duration::ZERO).unwrap();
+///     deliver_to_the_application(link);
+/// }
+/// ```
 #[derive(Debug)]
 #[must_use = "an opened channel does nothing until its peer is proven"]
 pub struct Unverified<C: Channel> {
@@ -437,6 +451,128 @@ mod tests {
         assert_eq!(
             Failure::PathLost.recovery(Kind::WebTransport, Phase::Active, false),
             Recovery::Deny
+        );
+    }
+
+    /// A dialer that fails each kind as told and remembers every dial.
+    struct Scripted {
+        log: Log,
+        webtransport: Result<(), Failure>,
+        websocket: Result<(), Failure>,
+    }
+
+    impl Dialer for Scripted {
+        type Connection = TestChannel;
+
+        fn dial(&mut self, kind: Kind, _: &Url, _: Duration) -> Result<TestChannel, Failure> {
+            self.log.borrow_mut().push(format!("dial:{kind:?}"));
+            match kind {
+                Kind::WebTransport => self.webtransport?,
+                Kind::WebSocket => self.websocket?,
+            }
+            Ok(TestChannel { closed: 0.into() })
+        }
+    }
+
+    #[test]
+    fn a_failure_about_the_peer_never_reaches_websocket_whether_the_dial_or_the_probe_gave_it() {
+        for failure in PEER {
+            let dial_log = log();
+            let mut dialer = Scripted {
+                log: dial_log.clone(),
+                webtransport: Err(failure),
+                websocket: Ok(()),
+            };
+            let result = connect(
+                &both(),
+                &mut dialer,
+                &mut NoPreflight,
+                Duration::from_secs(1),
+            );
+            assert!(
+                matches!(result, Err(reason) if reason == failure),
+                "{failure:?}"
+            );
+            assert_eq!(logged(&dial_log), ["dial:WebTransport"], "{failure:?}");
+
+            let probe_log = log();
+            let mut dialer = TestDialer {
+                log: probe_log.clone(),
+                webtransport: Ok(()),
+            };
+            let mut probe = TestProbe {
+                log: probe_log.clone(),
+                problem: failure,
+            };
+            let result = connect(&both(), &mut dialer, &mut probe, Duration::from_secs(1));
+            assert!(
+                matches!(result, Err(reason) if reason == failure),
+                "{failure:?}"
+            );
+            assert_eq!(
+                logged(&probe_log),
+                ["dial:WebTransport", "probe:WebTransport"],
+                "{failure:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_kind_is_dialled_at_most_once_and_nothing_is_retried_after_the_last() {
+        let log = log();
+        let mut dialer = Scripted {
+            log: log.clone(),
+            webtransport: Err(Failure::PathLost),
+            websocket: Err(Failure::Timeout),
+        };
+        let result = connect(
+            &both(),
+            &mut dialer,
+            &mut NoPreflight,
+            Duration::from_secs(1),
+        );
+        assert!(matches!(result, Err(Failure::Timeout)));
+        assert_eq!(logged(&log), ["dial:WebTransport", "dial:WebSocket"]);
+    }
+
+    #[test]
+    fn a_websocket_is_never_derived_from_a_webtransport_endpoint() {
+        let only = Endpoints::builder()
+            .webtransport("https://peer.example:4433/")
+            .build()
+            .unwrap();
+        let log = log();
+        let mut dialer = Scripted {
+            log: log.clone(),
+            webtransport: Err(Failure::PathLost),
+            websocket: Ok(()),
+        };
+        let result = connect(&only, &mut dialer, &mut NoPreflight, Duration::from_secs(1));
+        assert!(matches!(result, Err(Failure::PathLost)));
+        assert_eq!(logged(&log), ["dial:WebTransport"]);
+    }
+
+    #[test]
+    fn a_suspected_mtu_is_only_what_a_probe_says_and_a_plain_timeout_is_not_one() {
+        // A dial that timed out reports the timeout; the fallback it allows is the same, but it never claims an MTU.
+        let log = log();
+        let mut dialer = Scripted {
+            log: log.clone(),
+            webtransport: Err(Failure::Timeout),
+            websocket: Ok(()),
+        };
+        let link = connect(
+            &both(),
+            &mut dialer,
+            &mut NoPreflight,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(link.kind(), Kind::WebSocket);
+        assert_ne!(Failure::Timeout, Failure::SuspectedMtu);
+        assert_eq!(
+            Failure::Timeout.recovery(Kind::WebTransport, Phase::Opening, true),
+            Recovery::VerifyFallback
         );
     }
 }

@@ -1,1 +1,4 @@
 * text=auto eol=lf
+
+# Vectors are recorded bytes, kept as they were made.
+/tests/vectors/** -text
