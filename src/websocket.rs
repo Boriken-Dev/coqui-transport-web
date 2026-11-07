@@ -31,8 +31,10 @@ use tungstenite::protocol::{CloseFrame, WebSocketConfig};
 use tungstenite::{HandshakeError, Message, WebSocket};
 use url::Url;
 
-use crate::channel::{self, Datagrams, Delivery, Kind};
-use crate::failure::Failure;
+use coqui_transport::{Datagrams, Delivery};
+
+use crate::fallback::Kind;
+use coqui_transport::Failure;
 use crate::frame::{self, WS_DATAGRAMS_PROTOCOL, WsPart};
 use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, Reading, Received, bind_failure};
 #[cfg(feature = "webrtc")]
@@ -690,7 +692,7 @@ impl Channel {
     }
 }
 
-impl channel::Channel for Channel {
+impl coqui_transport::Channel for Channel {
     fn send(&self, message: &[u8]) -> Result<(), Failure> {
         self.check(message)?;
         match self.queue(message)? {
@@ -847,7 +849,7 @@ impl Channel {
 
 impl Drop for Channel {
     fn drop(&mut self) {
-        channel::Channel::close(self);
+        coqui_transport::Channel::close(self);
     }
 }
 
@@ -1385,7 +1387,7 @@ impl Dialer {
         self
     }
 
-    /// Asks the listener to agree to datagrams on this channel, so [`Channel::datagrams`](channel::Channel::datagrams) answers. A
+    /// Asks the listener to agree to datagrams on this channel, so [`Channel::datagrams`](coqui_transport::Channel::datagrams) answers. A
     /// server that does not agree makes the dial fail with [`Failure::Unsupported`], so try again without this for one that may
     /// not offer them.
     #[must_use]
@@ -1396,7 +1398,7 @@ impl Dialer {
 
     /// Asks the listener to agree to datagrams on this channel, as [`with_datagrams`](Self::with_datagrams) does, and to let them climb
     /// onto a data channel on the same address when it can. A listener that cannot still gives plain datagrams, and an attempt that
-    /// fails leaves them where they are. The attempt starts when [`datagrams`](channel::Channel::datagrams) is first called.
+    /// fails leaves them where they are. The attempt starts when [`datagrams`](coqui_transport::Channel::datagrams) is first called.
     #[cfg(feature = "webrtc")]
     #[must_use]
     pub const fn with_webrtc(mut self, settings: Settings) -> Self {
@@ -1495,7 +1497,7 @@ fn agreed_to_ladder(headers: &tungstenite::http::HeaderMap) -> bool {
         .is_some_and(|value| value.as_bytes() == frame::WS_LADDER_PROTOCOL.as_bytes())
 }
 
-impl channel::Dialer for Dialer {
+impl crate::Dialer for Dialer {
     type Connection = Channel;
 
     fn dial(&mut self, kind: Kind, endpoint: &Url, timeout: Duration) -> Result<Channel, Failure> {

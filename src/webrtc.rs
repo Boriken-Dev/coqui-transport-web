@@ -25,7 +25,7 @@ use mio::{Poll, Waker};
 
 pub(crate) use climb::{Climb, Plan};
 
-use crate::failure::Failure;
+use coqui_transport::Failure;
 use worker::{Command, Relays, WAKER, Worker};
 
 /// How an offer and its answer reach the other end.

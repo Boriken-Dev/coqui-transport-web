@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 
-use coqui_web_channel::websocket;
-use coqui_web_channel::{CertificatePin, Channel, webtransport};
+use coqui_transport_web::websocket;
+use coqui_transport_web::{CertificatePin, Channel, webtransport};
 use rustls::pki_types::PrivatePkcs8KeyDer;
 
 fn echo<C: Channel>(channel: &C) {

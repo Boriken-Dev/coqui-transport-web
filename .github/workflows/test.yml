@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: bindings/dart/coqui_web_channel
+        working-directory: bindings/dart/coqui_transport_web
     steps:
       - uses: actions/checkout@v4
         with:

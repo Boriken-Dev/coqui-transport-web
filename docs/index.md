@@ -1,4 +1,4 @@
-# coqui-web-channel
+# coqui-transport-web
 
 A reliable message channel a browser can open natively, and the native peer for it. WebTransport first, WebSocket as an explicit
 fallback. The library knows nothing of the application above it and proves nothing about who the peer is.
@@ -12,7 +12,7 @@ fallback. The library knows nothing of the application above it and proves nothi
   the body. Non-empty, at most 1 MiB unless the application chooses otherwise. Raw datagrams may go beside it.
 - **WebSocket**: one application message per WebSocket message, with no prefix. Text by default.
 
-`vectors/frames.json` holds the wire as data; the Rust and Dart suites both run it.
+`tests/vectors/frames.json` holds the wire as data; the Rust and Dart suites both run it.
 
 ## A channel is open, not trusted
 

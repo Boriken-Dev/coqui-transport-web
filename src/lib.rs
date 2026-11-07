@@ -4,9 +4,8 @@
 
 extern crate alloc;
 
-mod channel;
-mod endpoints;
-mod failure;
+mod endpoint;
+mod fallback;
 pub mod frame;
 #[cfg(any(feature = "websocket", feature = "webtransport"))]
 mod pump;
@@ -20,11 +19,11 @@ pub mod websocket;
 #[cfg_attr(docsrs, doc(cfg(feature = "webtransport")))]
 pub mod webtransport;
 
-pub use channel::{
-    Channel, Datagrams, Delivery, Dialer, Kind, NoPreflight, Preflight, Unverified, connect,
+pub use coqui_transport::{Capabilities, Carrier, Channel, Datagrams, Delivery, Failure};
+pub use endpoint::{CertificatePin, EndpointError, Endpoints, EndpointsBuilder};
+pub use fallback::{
+    Dialer, FailureExt, Kind, NoPreflight, Phase, Preflight, Recovery, Unverified, connect,
 };
-pub use endpoints::{CertificatePin, EndpointError, Endpoints, EndpointsBuilder};
-pub use failure::{Failure, Phase, Recovery};
 #[cfg(any(feature = "websocket", feature = "webtransport"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "websocket", feature = "webtransport"))))]
 pub use pump::{Cancel, Limits};

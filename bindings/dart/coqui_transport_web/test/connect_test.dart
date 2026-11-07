@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:coqui_web_channel/coqui_web_channel.dart';
+import 'package:coqui_transport_web/coqui_transport_web.dart';
 import 'package:test/test.dart';
 
 class FakeLink implements WebChannel {

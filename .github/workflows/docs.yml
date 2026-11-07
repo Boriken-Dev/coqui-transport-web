@@ -80,7 +80,7 @@ jobs:
         run: |
           mkdir -p site/rust
           cp -r target/doc/. site/rust/
-          printf '%s' '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=coqui_web_channel/index.html"><title>coqui-web-channel Rust API</title><a href="coqui_web_channel/index.html">coqui-web-channel Rust API</a>' > site/rust/index.html
+          printf '%s' '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=coqui_transport_web/index.html"><title>coqui-transport-web Rust API</title><a href="coqui_transport_web/index.html">coqui-transport-web Rust API</a>' > site/rust/index.html
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site/

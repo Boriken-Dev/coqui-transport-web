@@ -1,11 +1,11 @@
 //! The wire vectors the Rust and Dart suites both run, so the two implementations cannot drift.
 
-use coqui_web_channel::frame::{self, Decoder, FrameError};
+use coqui_transport_web::frame::{self, Decoder, FrameError};
 use proptest::prelude::*;
 use serde_json::Value;
 
 fn vectors() -> Value {
-    serde_json::from_str(include_str!("../vectors/frames.json")).expect("the vectors are JSON")
+    serde_json::from_str(include_str!("vectors/frames.json")).expect("the vectors are JSON")
 }
 
 fn bytes(hex: &str) -> Vec<u8> {

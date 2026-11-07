@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use coqui_web_channel::{CertificatePin, Channel, Dialer, Failure, Kind, websocket, webtransport};
+use coqui_transport_web::{
+    CertificatePin, Channel, Dialer, Failure, Kind, websocket, webtransport,
+};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use url::Url;
 
@@ -364,7 +366,7 @@ fn a_dialer_whose_local_address_cannot_reach_the_endpoint_says_so() {
 #[cfg(feature = "webrtc")]
 #[test]
 fn a_pending_session_on_a_port_names_the_client_and_not_its_relay() {
-    use coqui_web_channel::webrtc::{Port, Settings};
+    use coqui_transport_web::webrtc::{Port, Settings};
     let id = Identity::new();
     let (noted, admit) = noting();
     let port = Port::bind(loopback(), Settings::default()).unwrap();
@@ -493,7 +495,7 @@ fn session_from(from: [u8; 4], port: u16, server: &Identity) {
             .await
             .unwrap();
         let (mut send, _recv) = session.open_bi().await.unwrap().await.unwrap();
-        send.write_all(&coqui_web_channel::frame::encode(b"open", 1024).unwrap())
+        send.write_all(&coqui_transport_web::frame::encode(b"open", 1024).unwrap())
             .await
             .unwrap();
         // Held open until the server has the session.

@@ -1,4 +1,4 @@
-# Contributing to coqui-web-channel
+# Contributing to coqui-transport-web
 
 ## Licence
 
@@ -18,8 +18,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo clippy --no-default-features -- -D warnings
 cargo test --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
-(cd bindings/dart/coqui_web_channel && dart analyze && dart test)
+(cd bindings/dart/coqui_transport_web && dart analyze && dart test)
 ```
 
-A change to the wire format changes `vectors/frames.json`, which both suites run. [`AGENTS.md`](AGENTS.md) is the
+A change to the wire format changes `tests/vectors/frames.json`, which both suites run. [`AGENTS.md`](AGENTS.md) is the
 crate's API header and ships in the package; keep it current in the same commit. Files are LF, on every platform.

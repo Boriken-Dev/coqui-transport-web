@@ -16,7 +16,7 @@ CLAUDE*
 
 # Dart
 .dart_tool/
-/bindings/dart/coqui_web_channel/pubspec.lock
+/bindings/dart/coqui_transport_web/pubspec.lock
 
 # Docs build
 /site/

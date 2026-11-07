@@ -7,7 +7,7 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use coqui_web_channel::{
+use coqui_transport_web::{
     CertificatePin, Channel, Dialer, Failure, Kind, Limits, websocket, webtransport,
 };
 use rustls::pki_types::PrivatePkcs8KeyDer;

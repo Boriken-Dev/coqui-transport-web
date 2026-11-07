@@ -1,6 +1,6 @@
-# `coqui-web-channel` — API header
+# `coqui-transport-web` â€” API header
 
-Header-file-style reference for the `coqui-web-channel` crate: every public item with its signature, contract and gotchas, so the crate can be used without reading its source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-web-channel>.
+Header-file-style reference for the `coqui-transport-web` crate: every public item with its signature, contract and gotchas, so the crate can be used without reading its source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-transport-web>.
 
 | Feature | Adds | Default |
 | --- | --- | --- |
@@ -180,7 +180,7 @@ pub enum Recovery {
 
 What a failed channel allows next.
 
-## Framing (coqui_web_channel::frame)
+## Framing (coqui_transport_web::frame)
 
 ```rust
 pub const DEFAULT_MAX_MESSAGE: usize = 1024 * 1024;
@@ -253,11 +253,11 @@ pub fn cancel(&self) -> bool          // whether this call stopped a handshake t
 
 A cancel before or during `Pending::handshake`, from any thread, makes it return `Failure::Cancelled` at once and closes the connection: a WebSocket's socket, or a WebTransport session (one not yet accepted is refused, which its dialer reads as `Failure::Permission`). Once the handshake has finished, a cancel does nothing and returns `false`. A server WebSocket handshake waits on the socket's readiness, its deadline and a cancel together, on the caller's thread and no other.
 
-## WebSocket (`coqui_web_channel::websocket`, feature `websocket`)
+## WebSocket (`coqui_transport_web::websocket`, feature `websocket`)
 
 ```rust
 pub enum Frames { Text, Binary }            // default Text; a binary message on a Text channel is Failure::Protocol
-pub struct Channel                          // implements coqui_web_channel::Channel
+pub struct Channel                          // implements coqui_transport_web::Channel
 pub fn Dialer::new() -> Self                // no TLS: reaches only ws://; wss:// fails with Failure::Certificate
 pub fn Dialer::with_tls(self, tls: Arc<rustls::ClientConfig>) -> Self
 pub const fn Dialer::with_limits(self, limits: Limits) -> Self
@@ -288,10 +288,10 @@ pub fn Channel::deliver_signal(&self, signal: &[u8]) -> Result<(), Failure>     
 
 `bind` with no TLS on a non-loopback address is `Failure::Permission`; `bind_plain` is the deliberate choice of one. A dialer refuses `ws://` beyond loopback with `Failure::Permission` before connecting, unless `with_plain_beyond_loopback`. A listener or dialer that allows it says so in `plain_beyond_loopback()` and in its `Debug`, for the host to show; neither prints. `Endpoints` still takes `ws://` only on loopback. `accept` runs one handshake, bounded in total by `Limits::handshake`. `Listener::next` returns a `Pending` before its handshake, for a server that runs `Pending::handshake` on threads of its own so one slow peer cannot hold up others. `send` answers `Failure::NoProgress` at once while `Limits::queued_bytes`, or 256 messages, wait to be sent; `send_timeout` waits for room instead, woken by the worker only while a sender waits, and answers why the worker ended once it has: `Failure::Protocol` when either end refused what the other sent, otherwise `Failure::PathLost`. A message over the bound a reader set, or one that breaks the wire, ends the channel with a close code saying so (1009, 1002, 1003 or 1007): the reading end reports `Failure::Protocol`, and so does the sending end once the close arrives, to its reader and its senders. The reading end then reads and discards what the peer still sends until the peer closes, for up to 500 ms, so the close is not lost to a reset. `close` returns once what was queued has gone, or the peer has taken nothing for `Limits::send`. Each channel has a worker thread that sleeps on its socket and on its callers, so an idle channel takes no CPU and a message goes as soon as it is sent; the wait holds up to two file handles beside the socket. `Failure::Certificate` means a certificate was rejected, by this side or the peer's; any other TLS error is `Failure::Protocol`, since one forged record can cause it.
 
-## WebTransport (`coqui_web_channel::webtransport`, feature `webtransport`)
+## WebTransport (`coqui_transport_web::webtransport`, feature `webtransport`)
 
 ```rust
-pub struct Channel                          // implements coqui_web_channel::Channel
+pub struct Channel                          // implements coqui_transport_web::Channel
 pub fn Dialer::pinned(pins: &[CertificatePin]) -> Result<Self, Failure>
 pub fn Dialer::with_tls(tls: Arc<rustls::ClientConfig>) -> Result<Self, Failure>
 pub const fn Dialer::with_limits(self, limits: Limits) -> Self
@@ -317,7 +317,7 @@ pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Fai
 
 `send` waits up to `Limits::send` for the peer's flow control, then ends the stream with `Failure::NoProgress`. `send_timeout(Some(t))` waits `t` instead: `Failure::Timeout` if nothing of the message went, and the channel goes on; `Failure::NoProgress` if part of it went, and the stream ends, since nothing can follow half a frame. Flow control often takes part of a message before it stops, so expect either. `send_timeout(None)` is `send`.
 
-## The ladder (`coqui_web_channel::webrtc`, feature `webrtc`)
+## The ladder (`coqui_transport_web::webrtc`, feature `webrtc`)
 
 ```rust
 pub struct Settings { pub enabled: bool, pub attempt: Duration, pub path_mtu: usize, pub public_address: Option<SocketAddr>, pub any_candidate: bool, pub signaling: Signaling, pub max_sessions: usize, pub max_relays: usize, pub max_per_address: usize, pub relay_idle: Duration }

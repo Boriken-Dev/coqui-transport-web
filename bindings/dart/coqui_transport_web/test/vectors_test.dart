@@ -5,7 +5,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:coqui_web_channel/coqui_web_channel.dart';
+import 'package:coqui_transport_web/coqui_transport_web.dart';
 import 'package:test/test.dart';
 
 Uint8List _bytes(String hex) => Uint8List.fromList([
@@ -18,7 +18,7 @@ String _hex(List<int> bytes) =>
 
 void main() {
   final vectors =
-      jsonDecode(File('../../../vectors/frames.json').readAsStringSync())
+      jsonDecode(File('../../../tests/vectors/frames.json').readAsStringSync())
           as Map<String, dynamic>;
 
   for (final raw in vectors['encode'] as List<dynamic>) {

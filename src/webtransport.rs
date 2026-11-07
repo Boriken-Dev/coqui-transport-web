@@ -30,9 +30,11 @@ use wtransport::quinn::{self, Incoming};
 use wtransport::tls::{Sha256Digest, WEBTRANSPORT_ALPN};
 use wtransport::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 
-use crate::channel::{self, Datagrams, Delivery, Kind};
-use crate::endpoints::CertificatePin;
-use crate::failure::Failure;
+use coqui_transport::{Datagrams, Delivery};
+
+use crate::fallback::Kind;
+use crate::endpoint::CertificatePin;
+use coqui_transport::Failure;
 use crate::frame::{self, Decoder};
 use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, Reading, Received, bind_failure};
 #[cfg(feature = "webrtc")]
@@ -380,7 +382,7 @@ impl Channel {
     }
 }
 
-impl channel::Channel for Channel {
+impl coqui_transport::Channel for Channel {
     fn send(&self, message: &[u8]) -> Result<(), Failure> {
         self.write(message, self.send_limit, false)
     }
@@ -458,7 +460,7 @@ impl channel::Channel for Channel {
 
 impl Drop for Channel {
     fn drop(&mut self) {
-        channel::Channel::close(self);
+        coqui_transport::Channel::close(self);
     }
 }
 
@@ -623,7 +625,7 @@ async fn attempt(
     Ok((connection, send, recv))
 }
 
-impl channel::Dialer for Dialer {
+impl crate::Dialer for Dialer {
     type Connection = Channel;
 
     /// A host name that resolves to several addresses is tried at each in turn, a new one every 250 ms beside those still

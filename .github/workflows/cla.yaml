@@ -45,7 +45,7 @@ jobs:
           path-to-signatures: signatures/version1/cla.json
           branch: cla-signatures
           # What the contributor is agreeing to.
-          path-to-document: https://github.com/Boriken-Dev/coqui-web-channel/blob/main/CLA.md
+          path-to-document: https://github.com/Boriken-Dev/coqui-transport-web/blob/main/CLA.md
           # The maintainer's own commits do not need a signature, and nor do
           # bots. Anyone else does.
           allowlist: jose-pr,bot*,dependabot[bot]
@@ -53,7 +53,7 @@ jobs:
             Thanks for the pull request. Before it can be merged we need a
             one-time contributor licence agreement, which lets this project
             be relicensed later without chasing every past contributor. Read
-            [CLA.md](https://github.com/Boriken-Dev/coqui-web-channel/blob/main/CLA.md),
+            [CLA.md](https://github.com/Boriken-Dev/coqui-transport-web/blob/main/CLA.md),
             then reply to this thread with exactly:
           custom-pr-sign-comment: I have read the CLA Document and I hereby sign the CLA
           custom-allsigned-prcomment: All contributors have signed the CLA.

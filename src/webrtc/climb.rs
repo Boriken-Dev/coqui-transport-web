@@ -9,9 +9,9 @@ use std::sync::{Mutex, PoisonError};
 
 use super::worker::{Command, Opening, Role};
 use super::{Port, Settings, Signaling, sdp};
-use crate::channel::Delivery;
-use crate::failure::Failure;
 use crate::pump::{Inbox, Received};
+use coqui_transport::Delivery;
+use coqui_transport::Failure;
 
 /// What a signal is: its first byte, before the description.
 pub(super) const OFFER: u8 = 1;

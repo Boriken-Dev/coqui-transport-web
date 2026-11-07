@@ -5,8 +5,8 @@ use core::time::Duration;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::{Mutex, PoisonError};
 
-use crate::failure::Failure;
 use crate::frame::DEFAULT_MAX_MESSAGE;
+use coqui_transport::Failure;
 
 /// The bounds a peer cannot exceed. Every value has a finite default.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

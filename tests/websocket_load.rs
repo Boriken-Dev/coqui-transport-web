@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use coqui_web_channel::websocket::{self, Frames};
-use coqui_web_channel::{Channel, Dialer, Failure, Kind, Limits};
+use coqui_transport_web::websocket::{self, Frames};
+use coqui_transport_web::{Channel, Dialer, Failure, Kind, Limits};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use url::Url;
 

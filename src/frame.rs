@@ -1,87 +1,53 @@
-//! The stream wire format: a little-endian `u32` body length, then the body.
+//! The wire formats of the web transports: a WebTransport stream's length prefix, and the tags a
+//! WebSocket carries once both ends agreed to datagrams. This module does no I/O.
 //!
-//! WebTransport bidirectional streams use it. A WebSocket message is already whole and carries no
-//! prefix, unless both ends agreed to datagrams, which tags it. This module does no I/O.
+//! A WebTransport bidirectional stream carries [`WEBTRANSPORT`] frames, the `coqui-transport`
+//! length-prefix codec set to a little-endian `u32` that refuses an empty body; this crate holds
+//! the choice, not the algorithm. A WebSocket message is already whole and carries no prefix,
+//! unless both ends agreed to datagrams, which tags it.
 
-use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use core::fmt;
 
-/// The largest body a peer may send unless the application chooses otherwise: 1 MiB.
-pub const DEFAULT_MAX_MESSAGE: usize = 1024 * 1024;
+use coqui_transport::frame::{Codec, Decode, LengthDecoder, LengthPrefix};
 
-const PREFIX: usize = 4;
+pub use coqui_transport::frame::{DEFAULT_MAX_MESSAGE, FrameError};
 
-/// A frame outside the bounds this side accepts.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum FrameError {
-    /// The body is empty or over the limit. Fatal on a stream: the framing cannot resynchronize.
-    Size,
-    /// A tag this does not know.
-    Tag,
-}
+/// The framing of a WebTransport stream: a little-endian `u32` body length, then the body, which
+/// is never empty.
+pub const WEBTRANSPORT: LengthPrefix = LengthPrefix::u32_le().refuse_empty();
 
-impl fmt::Display for FrameError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Size => "a frame is empty or over the size limit",
-            Self::Tag => "a message has a tag this does not know",
-        })
-    }
-}
-
-impl core::error::Error for FrameError {}
-
-/// Prefixes a non-empty body of at most `maximum` bytes with its length.
+/// Prefixes a non-empty body of at most `maximum` bytes with its length, as [`WEBTRANSPORT`] does.
 ///
 /// # Errors
 ///
 /// [`FrameError::Size`] when `body` is empty or over `maximum`.
 pub fn encode(body: &[u8], maximum: usize) -> Result<Vec<u8>, FrameError> {
-    if body.is_empty() || body.len() > maximum {
-        return Err(FrameError::Size);
-    }
-    let size = u32::try_from(body.len()).map_err(|_| FrameError::Size)?;
-    let mut out = Vec::with_capacity(PREFIX + body.len());
-    out.extend_from_slice(&size.to_le_bytes());
-    out.extend_from_slice(body);
-    Ok(out)
+    WEBTRANSPORT.encode(body, maximum)
 }
 
-/// An incremental decoder for fragmented or coalesced stream bytes.
+/// An incremental decoder of [`WEBTRANSPORT`] frames for fragmented or coalesced stream bytes.
 ///
 /// [`push`](Self::push) what arrived, then call [`next_frame`](Self::next_frame) until it answers
 /// `None`. Frames that were complete before a bad header are returned before the error. Once it
-/// fails, the decoder stays failed. It holds no more than one chunk beyond one maximum frame.
+/// fails, the decoder stays failed. It holds no more than one maximum frame and what arrived since.
 #[derive(Debug)]
-pub struct Decoder {
-    buffered: VecDeque<u8>,
-    maximum: usize,
-    failed: bool,
-}
+pub struct Decoder(LengthDecoder);
 
 impl Decoder {
     /// Changes the largest body accepted from the next frame on.
-    pub const fn set_maximum(&mut self, maximum: usize) {
-        self.maximum = maximum;
+    pub fn set_maximum(&mut self, maximum: usize) {
+        self.0.set_maximum(maximum);
     }
 
     /// A decoder accepting bodies of at most `maximum` bytes.
     #[must_use]
     pub const fn new(maximum: usize) -> Self {
-        Self {
-            buffered: VecDeque::new(),
-            maximum,
-            failed: false,
-        }
+        Self(LengthDecoder::new(WEBTRANSPORT, maximum))
     }
 
     /// Adds bytes as they arrived.
     pub fn push(&mut self, part: &[u8]) {
-        if !self.failed {
-            self.buffered.extend(part);
-        }
+        self.0.push(part);
     }
 
     /// The next complete frame, or `None` until more bytes arrive.
@@ -90,30 +56,7 @@ impl Decoder {
     ///
     /// [`FrameError::Size`] on an empty or oversized frame, and on every later call.
     pub fn next_frame(&mut self) -> Result<Option<Vec<u8>>, FrameError> {
-        if self.failed {
-            return Err(FrameError::Size);
-        }
-        if self.buffered.len() < PREFIX {
-            return Ok(None);
-        }
-        let mut prefix = [0_u8; PREFIX];
-        for (slot, byte) in prefix.iter_mut().zip(&self.buffered) {
-            *slot = *byte;
-        }
-        let size = u32::from_le_bytes(prefix);
-        let size = usize::try_from(size).unwrap_or(usize::MAX);
-        if size == 0 || size > self.maximum {
-            self.failed = true;
-            self.buffered = VecDeque::new();
-            return Err(FrameError::Size);
-        }
-        // `size` is at most `maximum`, and a stored frame fits in memory, so this cannot overflow
-        // for any frame that could complete.
-        if self.buffered.len() - PREFIX < size {
-            return Ok(None);
-        }
-        self.buffered.drain(..PREFIX);
-        Ok(Some(self.buffered.drain(..size).collect()))
+        self.0.next_frame()
     }
 }
 

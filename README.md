@@ -1,15 +1,15 @@
-# coqui-web-channel
+# coqui-transport-web
 
-[![Version](https://img.shields.io/crates/v/coqui-web-channel.svg)](https://crates.io/crates/coqui-web-channel)
-[![Rust version](https://img.shields.io/crates/msrv/coqui-web-channel.svg)](https://crates.io/crates/coqui-web-channel)
-[![License: MPL-2.0](https://img.shields.io/badge/license-MPL--2.0-blue.svg)](https://github.com/Boriken-Dev/coqui-web-channel/blob/main/LICENSE)
-[![Docs](https://img.shields.io/docsrs/coqui-web-channel)](https://docs.rs/coqui-web-channel)
-[![CI](https://img.shields.io/github/actions/workflow/status/Boriken-Dev/coqui-web-channel/test.yml)](https://github.com/Boriken-Dev/coqui-web-channel/actions/workflows/test.yml)
+[![Version](https://img.shields.io/crates/v/coqui-transport-web.svg)](https://crates.io/crates/coqui-transport-web)
+[![Rust version](https://img.shields.io/crates/msrv/coqui-transport-web.svg)](https://crates.io/crates/coqui-transport-web)
+[![License: MPL-2.0](https://img.shields.io/badge/license-MPL--2.0-blue.svg)](https://github.com/Boriken-Dev/coqui-transport-web/blob/main/LICENSE)
+[![Docs](https://img.shields.io/docsrs/coqui-transport-web)](https://docs.rs/coqui-transport-web)
+[![CI](https://img.shields.io/github/actions/workflow/status/Boriken-Dev/coqui-transport-web/test.yml)](https://github.com/Boriken-Dev/coqui-transport-web/actions/workflows/test.yml)
 
 **Reliable message channels a browser can open natively, and their native peers.** WebTransport first, WebSocket as an explicit
 fallback, and a policy that never downgrades after a security failure. It knows nothing of the application above it, and it
 proves nothing about who the peer is: identity is a separate step, on the channel it hands you. Documentation:
-<https://boriken-dev.github.io/coqui-web-channel/>.
+<https://boriken-dev.github.io/coqui-transport-web/>.
 
 ## Features
 
@@ -34,7 +34,7 @@ What belongs here: a channel a browser can open natively. An HTTP client, a web 
 ## Installation
 
 ```sh
-cargo add coqui-web-channel --features websocket
+cargo add coqui-transport-web --features websocket
 ```
 
 | Feature | Adds | Default |
@@ -43,12 +43,12 @@ cargo add coqui-web-channel --features websocket
 | `webtransport` | `webtransport::{Dialer, Listener}`, on `wtransport`, with a small runtime inside the driver | off |
 | `webrtc` | `webrtc::Port`, and a WebSocket channel that climbs onto a data channel on it, on `str0m`. Implies the other two | off |
 
-The Dart package is in `bindings/dart/coqui_web_channel`.
+The Dart package is in `bindings/dart/coqui_transport_web`.
 
 ## Quick start
 
 ```rust
-use coqui_web_channel::{Endpoints, Failure, Kind, Phase, Recovery};
+use coqui_transport_web::{Endpoints, Failure, FailureExt, Kind, Phase, Recovery};
 
 // One address: WebTransport on its UDP port and WebSocket on its TCP port, the same number.
 let endpoints = Endpoints::builder()
@@ -59,7 +59,7 @@ assert!(endpoints.webtransport().is_some());
 // A path failure may fall back, once the same peer is proven again. A rejected certificate never does.
 assert_eq!(Failure::Timeout.recovery(Kind::WebTransport, Phase::Opening, true), Recovery::VerifyFallback);
 assert_eq!(Failure::Certificate.recovery(Kind::WebTransport, Phase::Opening, true), Recovery::Deny);
-# Ok::<(), coqui_web_channel::EndpointError>(())
+# Ok::<(), coqui_transport_web::EndpointError>(())
 ```
 
 ## API overview
@@ -79,7 +79,7 @@ cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
-(cd bindings/dart/coqui_web_channel && dart analyze && dart test)
+(cd bindings/dart/coqui_transport_web && dart analyze && dart test)
 ```
 
 ### Releasing
@@ -89,4 +89,4 @@ registry yet: `publish = false` until a release is chosen.
 
 ## License
 
-MPL-2.0; see [LICENSE](https://github.com/Boriken-Dev/coqui-web-channel/blob/main/LICENSE).
+MPL-2.0; see [LICENSE](https://github.com/Boriken-Dev/coqui-transport-web/blob/main/LICENSE).
