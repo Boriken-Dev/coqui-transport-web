@@ -9,6 +9,7 @@ mod fallback;
 pub mod frame;
 #[cfg(any(feature = "websocket", feature = "webtransport"))]
 mod pump;
+mod report;
 #[cfg(feature = "webrtc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "webrtc")))]
 pub mod webrtc;
@@ -27,3 +28,4 @@ pub use fallback::{
 #[cfg(any(feature = "websocket", feature = "webtransport"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "websocket", feature = "webtransport"))))]
 pub use pump::{Cancel, Limits};
+pub use report::NonDefault;

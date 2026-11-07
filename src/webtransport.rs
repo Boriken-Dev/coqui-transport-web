@@ -30,15 +30,15 @@ use wtransport::quinn::{self, Incoming};
 use wtransport::tls::{Sha256Digest, WEBTRANSPORT_ALPN};
 use wtransport::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 
-use coqui_transport::{Datagrams, Delivery};
+use coqui_transport::{Capabilities, Carrier, Datagrams, Delivery};
 
-use crate::fallback::Kind;
 use crate::endpoint::CertificatePin;
-use coqui_transport::Failure;
+use crate::fallback::Kind;
 use crate::frame::{self, Decoder};
 use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, Reading, Received, bind_failure};
 #[cfg(feature = "webrtc")]
 use crate::webrtc::Port;
+use coqui_transport::Failure;
 
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -439,6 +439,26 @@ impl coqui_transport::Channel for Channel {
         self.peer_certificates.as_deref()
     }
 
+    /// Datagrams are the connection's own, so they are reported whether or not [`datagrams`](coqui_transport::Channel::datagrams) was called.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::new()
+            .with_carrier(Carrier::Stream)
+            .with_limits(self.max_send.load(Ordering::SeqCst), self.reading.current())
+            .with_datagrams(Some((
+                Delivery::Unreliable,
+                self.connection.max_datagram_size(),
+            )))
+    }
+
+    fn is_closed(&self) -> bool {
+        self.connection.quic_connection().close_reason().is_some()
+            || self
+                .send
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_none()
+    }
+
     fn close(&self) {
         let stream = self
             .send
@@ -465,6 +485,7 @@ impl Drop for Channel {
 }
 
 /// Dials WebTransport endpoints.
+#[derive(Clone)]
 pub struct Dialer {
     tls: Tls,
     limits: Limits,
@@ -472,6 +493,7 @@ pub struct Dialer {
     runtime: Arc<Runtime>,
 }
 
+#[derive(Clone)]
 enum Tls {
     Pinned(Vec<Sha256Digest>),
     Custom(Arc<ClientConfig>),
@@ -625,6 +647,37 @@ async fn attempt(
     Ok((connection, send, recv))
 }
 
+/// A [`Dialer`] and the one endpoint it opens, as a [`coqui_transport::Connector`].
+///
+/// A channel it returns is open and not yet trusted: prove the peer before delivering anything to the application.
+#[derive(Clone, Debug)]
+pub struct Connector {
+    dialer: Dialer,
+    endpoint: Url,
+}
+
+impl Connector {
+    /// A connector that opens `endpoint` with `dialer`.
+    #[must_use]
+    pub const fn new(dialer: Dialer, endpoint: Url) -> Self {
+        Self { dialer, endpoint }
+    }
+}
+
+impl coqui_transport::Connector for Connector {
+    type Connection = Channel;
+    type Error = Failure;
+
+    fn connect(&self, timeout: Duration) -> Result<Channel, Failure> {
+        crate::Dialer::dial(
+            &mut self.dialer.clone(),
+            Kind::WebTransport,
+            &self.endpoint,
+            timeout,
+        )
+    }
+}
+
 impl crate::Dialer for Dialer {
     type Connection = Channel;
 
@@ -735,6 +788,16 @@ impl fmt::Debug for Listener {
             .field("limits", &self.limits)
             .field("origins", &self.origins)
             .finish_non_exhaustive()
+    }
+}
+
+/// Waits without a limit; [`Listener::accept`] takes one. A failed handshake fails that call only: the listener goes on.
+impl coqui_transport::Listener for Listener {
+    type Connection = Channel;
+    type Error = Failure;
+
+    fn accept(&self) -> Result<Channel, Failure> {
+        Self::accept(self, None)
     }
 }
 

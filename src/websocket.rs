@@ -31,14 +31,15 @@ use tungstenite::protocol::{CloseFrame, WebSocketConfig};
 use tungstenite::{HandshakeError, Message, WebSocket};
 use url::Url;
 
-use coqui_transport::{Datagrams, Delivery};
+use coqui_transport::{Capabilities, Carrier, Datagrams, Delivery};
 
 use crate::fallback::Kind;
-use coqui_transport::Failure;
 use crate::frame::{self, WS_DATAGRAMS_PROTOCOL, WsPart};
 use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, Reading, Received, bind_failure};
+use crate::report::NonDefault;
 #[cfg(feature = "webrtc")]
 use crate::webrtc::{Climb, Plan, Port, Settings};
+use coqui_transport::Failure;
 
 /// How often a listener looks for a connection.
 const POLL: Duration = Duration::from_millis(10);
@@ -790,6 +791,27 @@ impl coqui_transport::Channel for Channel {
         self.peer_certificates.as_deref()
     }
 
+    /// Asking starts nothing: unlike [`datagrams`](coqui_transport::Channel::datagrams), it neither wants datagrams nor starts a climb.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::new()
+            .with_carrier(Carrier::Messages)
+            .with_limits(self.max_send.load(Ordering::SeqCst), self.reading.current())
+            .with_datagrams(
+                self.datagrams
+                    .as_ref()
+                    .map(|datagrams| (datagrams.delivery(), datagrams.max_size())),
+            )
+    }
+
+    fn is_closed(&self) -> bool {
+        self.room.ended.load(Ordering::SeqCst)
+            || self
+                .outgoing
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_none()
+    }
+
     fn close(&self) {
         // The worker sends what is queued, then the close frame, then releases the socket. Waiting for it means a
         // process that closes and exits has not lost what it sent.
@@ -1343,17 +1365,29 @@ impl Dialer {
     }
 
     /// Lets this dialer open `ws://` beyond loopback: unencrypted and unauthenticated, so anyone on the path reads and changes
-    /// it. A weakening of the default, which [`plain_beyond_loopback`](Self::plain_beyond_loopback) reports.
+    /// it. Not the default, and reported by [`plain_beyond_loopback`](Self::plain_beyond_loopback) and
+    /// [`non_defaults`](Self::non_defaults).
     #[must_use]
     pub const fn with_plain_beyond_loopback(mut self) -> Self {
         self.plain_beyond_loopback = true;
         self
     }
 
-    /// Whether this dialer may open `ws://` beyond loopback, so a host can show that weakening.
+    /// Whether this dialer may open `ws://` beyond loopback, so a host can show it.
     #[must_use]
     pub const fn plain_beyond_loopback(&self) -> bool {
         self.plain_beyond_loopback
+    }
+
+    /// The settings of this dialer that differ from their default, for the application to show or judge. The crate neither
+    /// logs nor warns about them. Every setting this dialer cannot honour fails the dial instead, so none is silently dropped.
+    #[must_use]
+    pub fn non_defaults(&self) -> Vec<NonDefault> {
+        let mut found = Vec::new();
+        if self.plain_beyond_loopback {
+            found.push(NonDefault::new("plain_beyond_loopback", false, true));
+        }
+        found
     }
 
     /// The TLS configuration `wss://` uses. It decides which certificates are trusted.
@@ -1497,6 +1531,37 @@ fn agreed_to_ladder(headers: &tungstenite::http::HeaderMap) -> bool {
         .is_some_and(|value| value.as_bytes() == frame::WS_LADDER_PROTOCOL.as_bytes())
 }
 
+/// A [`Dialer`] and the one endpoint it opens, as a [`coqui_transport::Connector`].
+///
+/// A channel it returns is open and not yet trusted: prove the peer before delivering anything to the application.
+#[derive(Clone, Debug)]
+pub struct Connector {
+    dialer: Dialer,
+    endpoint: Url,
+}
+
+impl Connector {
+    /// A connector that opens `endpoint` with `dialer`.
+    #[must_use]
+    pub const fn new(dialer: Dialer, endpoint: Url) -> Self {
+        Self { dialer, endpoint }
+    }
+}
+
+impl coqui_transport::Connector for Connector {
+    type Connection = Channel;
+    type Error = Failure;
+
+    fn connect(&self, timeout: Duration) -> Result<Channel, Failure> {
+        crate::Dialer::dial(
+            &mut self.dialer.clone(),
+            Kind::WebSocket,
+            &self.endpoint,
+            timeout,
+        )
+    }
+}
+
 impl crate::Dialer for Dialer {
     type Connection = Channel;
 
@@ -1611,6 +1676,16 @@ impl fmt::Debug for Listener {
     }
 }
 
+/// Waits without a limit; [`Listener::accept`] takes one. A failed handshake fails that call only: the listener goes on.
+impl coqui_transport::Listener for Listener {
+    type Connection = Channel;
+    type Error = Failure;
+
+    fn accept(&self) -> Result<Channel, Failure> {
+        Self::accept(self, None)
+    }
+}
+
 impl Listener {
     /// Binds `address`. With no TLS configuration only a loopback address is accepted: a plain
     /// socket on any other is refused, as plain WebSocket is for local development unless
@@ -1627,8 +1702,8 @@ impl Listener {
     }
 
     /// Binds `address` with no TLS, loopback or not, such as `0.0.0.0` for a trusted network. Beyond loopback that is
-    /// unencrypted and unauthenticated, so anyone on the path reads and changes it: a weakening of the default, which
-    /// [`plain_beyond_loopback`](Self::plain_beyond_loopback) reports.
+    /// unencrypted and unauthenticated, so anyone on the path reads and changes it. Not the default, and reported by
+    /// [`plain_beyond_loopback`](Self::plain_beyond_loopback) and [`non_defaults`](Self::non_defaults).
     ///
     /// # Errors
     ///
@@ -1637,7 +1712,7 @@ impl Listener {
         Self::open(address, None)
     }
 
-    /// Whether this listener serves plain WebSocket beyond loopback, so a host can show that weakening.
+    /// Whether this listener serves plain WebSocket beyond loopback, so a host can show it.
     #[must_use]
     pub fn plain_beyond_loopback(&self) -> bool {
         self.tls.is_none()
@@ -1645,6 +1720,17 @@ impl Listener {
                 .socket
                 .local_addr()
                 .is_ok_and(|address| address.ip().is_loopback())
+    }
+
+    /// The settings of this listener that differ from their default, for the application to show or judge. The crate
+    /// neither logs nor warns about them.
+    #[must_use]
+    pub fn non_defaults(&self) -> Vec<NonDefault> {
+        let mut found = Vec::new();
+        if self.plain_beyond_loopback() {
+            found.push(NonDefault::new("plain_beyond_loopback", false, true));
+        }
+        found
     }
 
     fn open(address: SocketAddr, tls: Option<Arc<ServerConfig>>) -> Result<Self, Failure> {
