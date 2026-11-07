@@ -15,11 +15,15 @@ A first pull request needs a one-time signature. The bot will comment with the e
 ```bash
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo clippy --no-default-features -- -D warnings
+cargo clippy --all-targets --no-default-features -- -D warnings
 cargo test --all-features
+cargo test --no-default-features
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+cargo check --target wasm32-unknown-unknown
 (cd bindings/dart/coqui_transport_web && dart analyze && dart test)
 ```
 
-A change to the wire format changes `tests/vectors/frames.json`, which both suites run. [`AGENTS.md`](AGENTS.md) is the
-crate's API header and ships in the package; keep it current in the same commit. Files are LF, on every platform.
+A change to the wire format changes `tests/vectors/frames.json`, which both suites run, and the held bytes in
+`tests/vectors/webtransport_frame.json` must not change at all. [`AGENTS.md`](AGENTS.md) is the crate's API header and ships in
+the package; keep it current with the public API in the same commit, and regenerate `tools/public-api.txt` (the command is in
+`.github/workflows/test.yml`). Files are LF, on every platform.

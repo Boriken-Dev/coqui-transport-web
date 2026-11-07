@@ -1,5 +1,5 @@
 site_name: coqui-transport-web
-site_description: Reliable message channels a browser can open natively, and their native peers.
+site_description: WebSocket, WebTransport and WebRTC data channels as coqui-transport channels a browser can open natively.
 site_url: https://boriken-dev.github.io/coqui-transport-web/
 repo_url: https://github.com/Boriken-Dev/coqui-transport-web
 repo_name: Boriken-Dev/coqui-transport-web

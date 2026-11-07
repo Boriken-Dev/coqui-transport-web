@@ -6,13 +6,18 @@
 [![Docs](https://img.shields.io/docsrs/coqui-transport-web)](https://docs.rs/coqui-transport-web)
 [![CI](https://img.shields.io/github/actions/workflow/status/Boriken-Dev/coqui-transport-web/test.yml)](https://github.com/Boriken-Dev/coqui-transport-web/actions/workflows/test.yml)
 
-**Reliable message channels a browser can open natively, and their native peers.** WebTransport first, WebSocket as an explicit
-fallback, and a policy that never downgrades after a security failure. It knows nothing of the application above it, and it
-proves nothing about who the peer is: identity is a separate step, on the channel it hands you. Documentation:
-<https://boriken-dev.github.io/coqui-transport-web/>.
+**WebSocket, WebTransport and WebRTC data channels as [`coqui-transport`](https://github.com/Boriken-Dev/coqui-transport)
+channels, which a browser can open natively.** WebTransport first, WebSocket as an explicit fallback, and a policy that never
+downgrades after a security failure. It knows nothing of the application above it, and it proves nothing about who the peer is:
+identity is a separate step, on the channel it hands you. It was `coqui-web-channel`, which is now a deprecated crate that
+re-exports this one. Documentation: <https://boriken-dev.github.io/coqui-transport-web/>.
 
 ## Features
 
+- `coqui_transport::Channel`, `Datagrams`, `Connector` and `Listener` implemented by the WebSocket and WebTransport drivers, so
+  an application written against `coqui-transport` runs over a browser-reachable transport as it does over a pipe or a socket.
+  `capabilities()` says what carries the messages (`Messages` for a WebSocket, a `Stream` for WebTransport), the limits as they
+  stand, and how datagrams travel now, without starting anything; `is_closed()` says whether this side knows the end.
 - A `Channel` of whole, ordered messages, readable and writable from different threads, with its own bound on each direction. A
   change to the read bound can be staged by position: the next message under a small bound, everything after it under the full one,
   however far the driver reads ahead. How far it reads ahead is set per channel, so a peer not yet proved can be held to one message.
@@ -23,11 +28,13 @@ proves nothing about who the peer is: identity is a separate step, on the channe
 - Blocking drivers for WebTransport and WebSocket, with a bound on every size and handshake, and a server handshake another thread can
   cancel.
 - The certificate chain TLS accepted from the peer, on either end of a channel, for a peer proof or a pin to decide on.
-- Plain WebSocket beyond loopback only by a deliberate choice, which the listener or dialer reports.
+- Plain WebSocket beyond loopback only by a deliberate choice, which the listener or dialer reports as data
+  (`non_defaults()`) and never logs or warns about: whether it was meant is the application's to judge.
 - A dialer bound to a chosen local address, so a listener's per-source rules can be tested from more than one source.
 - Raw datagrams beside the messages, on a ladder: WebTransport's own, a WebRTC data channel on the same UDP port (`webrtc` feature), then
   inside the WebSocket. A blocked UDP path costs only the attempt.
-- The same wire in Rust and Dart, held together by shared vectors.
+- The same wire in Rust and Dart, held together by shared vectors. A WebTransport stream is framed by `coqui-transport`'s
+  `LengthPrefix` (a little-endian `u32`, an empty body refused), checked against the bytes the crate always produced.
 
 What belongs here: a channel a browser can open natively. An HTTP client, a web framework or an application protocol does not.
 
@@ -66,11 +73,28 @@ assert_eq!(Failure::Certificate.recovery(Kind::WebTransport, Phase::Opening, tru
 
 | Module | Purpose |
 | --- | --- |
-| root | `Channel`, `Dialer`, `connect`, `Unverified`, `Endpoints`, `Failure`, `Recovery`, `Limits` |
-| `frame` | the stream wire format, with no I/O |
+| root | `Channel`, `Datagrams`, `Delivery`, `Failure` (from `coqui-transport`), `Dialer`, `connect`, `Unverified`, `Endpoints`, `FailureExt`, `Recovery`, `NonDefault`, `Limits` |
+| `frame` | the stream wire format and the WebSocket tags, with no I/O |
 | `websocket` | the WebSocket driver |
 | `webtransport` | the WebTransport driver |
 | `webrtc` | one UDP port for WebTransport and data channels |
+
+## Security boundaries
+
+- A channel `connect` or a dialer returns is open and **not authenticated**: `connect` hands it back as `Unverified`, and
+  the application proves the peer before delivering anything to the application above.
+- A certificate, pin, peer-proof or permission failure never falls back to another transport, and a pinned endpoint never
+  downgrades. A WebSocket endpoint is never derived from a WebTransport one.
+- Nothing is retried once a channel is returned: after a failure, `FailureExt::recovery` says whether to dial again and prove the
+  peer again, and the application reconciles its own session. An operation of uncertain outcome is never replayed here.
+- A setting that differs from its default is reported by `non_defaults()` and is the application's to show or judge. One this
+  crate cannot honour fails the dial or the bind; none is silently dropped.
+
+## Migration from `coqui-web-channel`
+
+`coqui-web-channel` re-exports this crate and `coqui-transport`, so a dependent compiles unchanged. To move off it, depend on
+`coqui-transport-web` and import from `coqui_transport_web`. Two differences: `Failure::recovery` is the `FailureExt`
+trait's method (import the trait), and the Dart package is `coqui_transport_web`.
 
 ## Development
 

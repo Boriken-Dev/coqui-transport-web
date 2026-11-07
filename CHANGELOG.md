@@ -7,9 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `coqui_transport::Connector` and `Listener` for both drivers (`websocket::Connector`, `webtransport::Connector`, and the
+  listeners), and `capabilities()` and `is_closed()` on both channels. `capabilities()` never starts datagram reading or a
+  data-channel attempt.
+- `NonDefault` and `websocket::{Dialer, Listener}::non_defaults()`: the settings that differ from their default, as data. The crate
+  neither logs nor warns about them.
+- `frame::WEBTRANSPORT`, the stream framing as a `coqui_transport::frame::LengthPrefix`, and the held wire vectors
+  (`tests/vectors/webtransport_frame.json`) it is checked against.
+
 ### Changed
 
-- Renamed: the crate is `coqui-web-channel` (`coqui_web_channel::`) and the Dart package `coqui_web_channel`, at <https://github.com/Boriken-Dev/coqui-web-channel>; modules, types and wire identifiers keep their names.
+- The crate is `coqui-transport-web` (it was `coqui-web-channel`), in the `coqui-transport` family: the repository is
+  `Boriken-Dev/coqui-transport-web` with the history of the old one, the library `coqui_transport_web`, the Dart package
+  `coqui_transport_web`. `coqui-web-channel` is a deprecated crate that re-exports this one.
+- `Channel`, `Datagrams`, `Delivery` and `Failure` are `coqui-transport`'s, unchanged in meaning and re-exported at this crate's
+  root, so one trait is shared by every transport. The module `endpoints` is `endpoint`; `Dialer`, `Preflight`, `Kind`, `Phase`,
+  `Recovery`, `Unverified` and `connect` live in `fallback` and are exported at the root.
+- `Failure::recovery` is the method of the `FailureExt` trait (an inherent method cannot be added to a type of another crate).
+- `frame::encode` and `frame::Decoder` delegate to `coqui-transport`'s length-prefix codec. The bytes are unchanged.
+- Renamed (as `coqui-web-channel`): the crate is `coqui-web-channel` (`coqui_web_channel::`) and the Dart package `coqui_web_channel`, at <https://github.com/Boriken-Dev/coqui-web-channel>; modules, types and wire identifiers keep their names.
 - A server's WebSocket handshake waits on the socket's readiness rather than in blocking reads, and starts no watchdog thread. Its
   limit still bounds it in total.
 - A WebTransport dialer refused by the server, as a listener's admission refuses a source, fails with `Failure::Permission` rather

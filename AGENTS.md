@@ -1,4 +1,4 @@
-# `coqui-transport-web` â€” API header
+# `coqui-transport-web` — API header
 
 Header-file-style reference for the `coqui-transport-web` crate: every public item with its signature, contract and gotchas, so the crate can be used without reading its source. It ships inside the package and is self-contained. Development documentation lives with the source at <https://github.com/Boriken-Dev/coqui-transport-web>.
 
@@ -8,11 +8,15 @@ Header-file-style reference for the `coqui-transport-web` crate: every public it
 | `webtransport` | `webtransport::{Channel, Dialer, Listener}`, on `wtransport`, with a small runtime inside | off |
 | `webrtc` | `webrtc::{Port, Settings, Signaling}`, and a WebSocket channel that climbs onto a data channel, on `str0m`; implies both others | off |
 
-MSRV Rust 1.89. A default build depends on `url` alone. Version `0.0.0-alpha.0`, not published; the API may change in any
-release before 1.0.
+MSRV Rust 1.89. A default build depends on `url` and `coqui-transport` (by git revision: the family has no releases yet). Version
+`0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
 
-Imports: the crate root holds the channel contract, `connect`, `Endpoints`, `Failure` and, with a driver feature, `Limits` and `Cancel`.
-Public modules: `frame`, `webrtc`, `websocket`, `webtransport`.
+Imports: the crate root holds the channel contract (`Channel`, `Datagrams`, `Delivery`, `Failure`, `Capabilities`, `Carrier`,
+re-exported from `coqui-transport`, which defines them), `connect`, `Dialer`, `FailureExt`, `Endpoints`, `NonDefault` and, with a
+driver feature, `Limits` and `Cancel`. Public modules: `frame`, `webrtc`, `websocket`, `webtransport`.
+
+It was `coqui-web-channel`, now a deprecated crate that re-exports this one and `coqui-transport`. A name that crate had is
+here, except that `Failure::recovery` is a method of the `FailureExt` trait: import it.
 
 No `unsafe` code (`#![forbid(unsafe_code)]`). No process-wide state. A dialer holds no trust roots: TLS is the caller's.
 
@@ -27,6 +31,9 @@ pub enum Kind {
 
 A transport a channel runs over.
 
+The contract below is `coqui_transport::Channel`, `Datagrams`, `Delivery` and `Failure`, re-exported unchanged. Both drivers
+implement it, and `capabilities()` and `is_closed()` too.
+
 ```rust
 pub trait Channel: Send + Sync {
     fn send(&self, message: &[u8]) -> Result<(), Failure>;
@@ -40,8 +47,16 @@ pub trait Channel: Send + Sync {
     fn send_timeout(&self, message: &[u8], _timeout: Option<Duration>) -> Result<(), Failure> { self.send(message) }   // waits for room
     fn datagrams(&self) -> Option<&dyn Datagrams> { None }   // Some on WebTransport; a WebSocket, or a channel wrapping another, has none
     fn peer_certificates(&self) -> Option<&[Vec<u8>]> { None }   // DER, the peer's own first; Some on a TLS WebSocket and on WebTransport
+    fn capabilities(&self) -> Capabilities { /* only what datagrams() says */ }   // both drivers override it
+    fn is_closed(&self) -> bool { false }                                          // both drivers track it
 }
 ```
+
+`capabilities()` on a WebSocket reports `Carrier::Messages`, the send and read bounds in force, and datagrams only where both ends
+agreed (`Delivery::OverStream`, or `Unreliable` while a data channel is open); on WebTransport `Carrier::Stream`, the bounds, and
+`Delivery::Unreliable` with the connection's current datagram size. It starts nothing: unlike `datagrams()`, it neither makes a
+WebSocket hold datagrams nor begins a data-channel attempt. `is_closed()` is true once this side closed the channel or knows the
+peer or a failure ended it; false promises nothing.
 
 A reliable, ordered channel of whole messages. `peer_certificates` is the chain the peer presented and this side's rustls configuration accepted: the server's on a client, the client's on a server whose configuration asked for one. `None` without TLS, or when the peer presented none, as a client does when not asked. It proves what that configuration's verifier checked, and nothing about a channel wrapping this one.
 
@@ -107,6 +122,22 @@ where
 ```
 
 Opens WebTransport first, and WebSocket when that fails on the path before anything crossed.
+
+```rust
+pub trait FailureExt { fn recovery(self, failed: Kind, phase: Phase, has_websocket: bool) -> Recovery; }   // implemented for Failure
+```
+
+What a failure allows next. Only a path failure on `WebTransport`, with a WebSocket endpoint the peer advertised, allows a
+fallback (`VerifyFallback` while opening, `VerifyAndReconcile` once active); a protocol failure only while opening; a certificate,
+peer-proof, permission or cancel failure never. An operation of uncertain outcome is never replayed.
+
+```rust
+pub struct NonDefault { pub setting: &'static str, pub default: String, pub value: String }   // non_exhaustive
+pub fn NonDefault::new(setting: &'static str, default: impl ToString, value: impl ToString) -> Self
+```
+
+A setting that differs from its default, as data. `websocket::Dialer::non_defaults()` and `websocket::Listener::non_defaults()` return
+them (today `plain_beyond_loopback` only). The crate never logs or warns about one: the application decides what it means.
 
 ## Endpoints (crate root)
 
@@ -181,6 +212,13 @@ pub enum Recovery {
 What a failed channel allows next.
 
 ## Framing (coqui_transport_web::frame)
+
+```rust
+pub const WEBTRANSPORT: coqui_transport::frame::LengthPrefix;   // LengthPrefix::u32_le().refuse_empty()
+```
+
+The framing of a WebTransport stream, as `coqui-transport`'s length-prefix codec, held to the old bytes by `tests/vectors/webtransport_frame.json`.
+`encode` and `Decoder` delegate to it; `FrameError` and `DEFAULT_MAX_MESSAGE` are `coqui_transport::frame`'s.
 
 ```rust
 pub const DEFAULT_MAX_MESSAGE: usize = 1024 * 1024;
@@ -266,11 +304,15 @@ pub const fn Dialer::with_frames(self, frames: Frames) -> Self
 pub const fn Dialer::with_datagrams(self) -> Self                       // asks the server to agree; one that does not makes the dial Failure::Unsupported
 pub const fn Dialer::with_webrtc(self, settings: webrtc::Settings) -> Self  // feature webrtc; datagrams too, and a climb where the listener can
 pub fn Dialer::with_header(self, name: impl Into<String>, value: impl Into<String>) -> Self // a value never prints
-pub const fn Dialer::with_plain_beyond_loopback(self) -> Self               // ws:// beyond loopback too: a weakening
+pub const fn Dialer::with_plain_beyond_loopback(self) -> Self               // ws:// beyond loopback too: not the default, reported
 pub const fn Dialer::plain_beyond_loopback(&self) -> bool
+pub fn Dialer::non_defaults(&self) -> Vec<NonDefault>
+pub struct Connector                                                        // Clone, Debug; a coqui_transport::Connector
+pub const fn Connector::new(dialer: Dialer, endpoint: Url) -> Self          // connect(timeout) dials that endpoint, each call with a clone of the dialer
 pub fn Listener::bind(address: SocketAddr, tls: Option<Arc<rustls::ServerConfig>>) -> Result<Self, Failure>
-pub fn Listener::bind_plain(address: SocketAddr) -> Result<Self, Failure>   // no TLS, loopback or not, such as 0.0.0.0: a weakening beyond loopback
+pub fn Listener::bind_plain(address: SocketAddr) -> Result<Self, Failure>   // no TLS, loopback or not, such as 0.0.0.0: reported beyond loopback
 pub fn Listener::plain_beyond_loopback(&self) -> bool
+pub fn Listener::non_defaults(&self) -> Vec<NonDefault>
 pub const fn Listener::with_limits(self, limits: Limits) -> Self
 pub const fn Listener::with_frames(self, frames: Frames) -> Self
 pub fn Listener::with_origins(self, origins: impl IntoIterator<Item = String>) -> Self
@@ -288,11 +330,16 @@ pub fn Channel::deliver_signal(&self, signal: &[u8]) -> Result<(), Failure>     
 
 `bind` with no TLS on a non-loopback address is `Failure::Permission`; `bind_plain` is the deliberate choice of one. A dialer refuses `ws://` beyond loopback with `Failure::Permission` before connecting, unless `with_plain_beyond_loopback`. A listener or dialer that allows it says so in `plain_beyond_loopback()` and in its `Debug`, for the host to show; neither prints. `Endpoints` still takes `ws://` only on loopback. `accept` runs one handshake, bounded in total by `Limits::handshake`. `Listener::next` returns a `Pending` before its handshake, for a server that runs `Pending::handshake` on threads of its own so one slow peer cannot hold up others. `send` answers `Failure::NoProgress` at once while `Limits::queued_bytes`, or 256 messages, wait to be sent; `send_timeout` waits for room instead, woken by the worker only while a sender waits, and answers why the worker ended once it has: `Failure::Protocol` when either end refused what the other sent, otherwise `Failure::PathLost`. A message over the bound a reader set, or one that breaks the wire, ends the channel with a close code saying so (1009, 1002, 1003 or 1007): the reading end reports `Failure::Protocol`, and so does the sending end once the close arrives, to its reader and its senders. The reading end then reads and discards what the peer still sends until the peer closes, for up to 500 ms, so the close is not lost to a reset. `close` returns once what was queued has gone, or the peer has taken nothing for `Limits::send`. Each channel has a worker thread that sleeps on its socket and on its callers, so an idle channel takes no CPU and a message goes as soon as it is sent; the wait holds up to two file handles beside the socket. `Failure::Certificate` means a certificate was rejected, by this side or the peer's; any other TLS error is `Failure::Protocol`, since one forged record can cause it.
 
+Both listeners are `coqui_transport::Listener`s: `accept()` with no timeout waits for the next connection, and a failed handshake
+fails that call only. Their own `accept(timeout)` is the inherent method; call the trait's as `coqui_transport::Listener::accept(&l)`.
+
 ## WebTransport (`coqui_transport_web::webtransport`, feature `webtransport`)
 
 ```rust
 pub struct Channel                          // implements coqui_transport_web::Channel
 pub fn Dialer::pinned(pins: &[CertificatePin]) -> Result<Self, Failure>
+pub struct Connector                                                        // Clone, Debug; a coqui_transport::Connector
+pub const fn Connector::new(dialer: Dialer, endpoint: Url) -> Self
 pub fn Dialer::with_tls(tls: Arc<rustls::ClientConfig>) -> Result<Self, Failure>
 pub const fn Dialer::with_limits(self, limits: Limits) -> Self
 pub const fn Dialer::with_local_addr(self, address: SocketAddr) -> Self    // binds the UDP socket there, one per address tried
@@ -346,6 +393,8 @@ A `Port` reads the first byte of each packet (RFC 9443): QUIC to a loopback rela
 A WebSocket with `Dialer::with_webrtc` asks for `coqui-web-ladder.1` and `coqui-web-datagrams.1`, and a listener with `with_webrtc` prefers the first, which adds tag 2, a signal: one byte, 1 offer, 2 answer or 3 refused, then the session description. A listener with no port never agrees to it, and a dialer without `with_webrtc` never asks. The attempt starts at each end when `datagrams()` is first called there, once per channel. The channel is unordered with no retransmits, created by the dialer. Until it opens, and after it dies, datagrams stay in the WebSocket; each switch is reported by `path_changes`. An attempt that fails changes nothing and reports nothing.
 
 ## Gotchas
+
+- A dialled channel, from `connect` or a `Connector`, is open and unauthenticated. `connect` returns it as `Unverified`.
 
 - `Unverified` proves nothing about the peer. Run the identity proof before `into_verified`.
 - `connect` never retries after returning, and an endpoint with pins never falls back, even on a path failure.

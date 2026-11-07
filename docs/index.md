@@ -1,7 +1,9 @@
 # coqui-transport-web
 
 A reliable message channel a browser can open natively, and the native peer for it. WebTransport first, WebSocket as an explicit
-fallback. The library knows nothing of the application above it and proves nothing about who the peer is.
+fallback. The library knows nothing of the application above it and proves nothing about who the peer is. It implements
+[`coqui-transport`](https://github.com/Boriken-Dev/coqui-transport)'s `Channel`, `Datagrams`, `Connector` and `Listener`, and it was
+`coqui-web-channel`, which now re-exports it.
 
 !!! note "Alpha"
     Not published yet: the API may change in any release before 1.0.
@@ -9,10 +11,11 @@ fallback. The library knows nothing of the application above it and proves nothi
 ## The wire
 
 - **WebTransport**: one reliable bidirectional stream the client opens. Each message is a little-endian `u32` body length, then
-  the body. Non-empty, at most 1 MiB unless the application chooses otherwise. Raw datagrams may go beside it.
+  the body (`coqui-transport`'s `LengthPrefix::u32_le().refuse_empty()`). Non-empty, at most 1 MiB unless the application chooses otherwise. Raw datagrams may go beside it.
 - **WebSocket**: one application message per WebSocket message, with no prefix. Text by default.
 
-`tests/vectors/frames.json` holds the wire as data; the Rust and Dart suites both run it.
+`tests/vectors/frames.json` holds the wire as data; the Rust and Dart suites both run it. `tests/vectors/webtransport_frame.json` holds the
+bytes the stream framing produced before it moved onto `coqui-transport`'s codec, and the Rust suite checks the codec against them.
 
 ## A channel is open, not trusted
 
