@@ -22,8 +22,36 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
+  # The committed public API, so a change to it is seen in review. Regenerate with:
+  # cargo +nightly-2026-09-21 public-api --all-features -sss --color never > tools/public-api.txt
+  public-api:
+    name: Public API snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      # cargo-public-api 0.52 reads the rustdoc JSON of this nightly.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-21
+      - name: Install cargo-public-api
+        run: cargo +stable install cargo-public-api --version 0.52.0 --locked
+      - name: Compare with tools/public-api.txt
+        run: |
+          cargo +nightly-2026-09-21 public-api --all-features -sss --color never > "$RUNNER_TEMP/public-api.txt"
+          diff -u tools/public-api.txt "$RUNNER_TEMP/public-api.txt"
+
   rust:
+    name: Rust (${{ matrix.os }}, Rust ${{ matrix.toolchain }})
     strategy:
       fail-fast: false
       matrix:
@@ -40,12 +68,30 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
+        if: matrix.toolchain == 'stable'
       - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo clippy --no-default-features -- -D warnings
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings
+      - run: cargo clippy --all-targets --features websocket -- -D warnings
+      - run: cargo clippy --all-targets --features webtransport -- -D warnings
       - run: cargo test --all-features
+      - run: cargo test --no-default-features
       - run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # The default build on a target with no operating system: the codecs, the endpoints and the fallback policy build there.
+  wasm:
+    name: wasm32-unknown-unknown
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --target wasm32-unknown-unknown
 
   dart:
     runs-on: ubuntu-latest

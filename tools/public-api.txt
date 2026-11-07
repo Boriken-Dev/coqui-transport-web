@@ -1,0 +1,309 @@
+pub mod coqui_transport_web
+pub use coqui_transport_web::Capabilities
+pub use coqui_transport_web::Carrier
+pub use coqui_transport_web::Channel
+pub use coqui_transport_web::Datagrams
+pub use coqui_transport_web::Delivery
+pub use coqui_transport_web::Failure
+pub mod coqui_transport_web::frame
+pub use coqui_transport_web::frame::DEFAULT_MAX_MESSAGE
+pub use coqui_transport_web::frame::FrameError
+pub enum coqui_transport_web::frame::WsPart<'a>
+pub coqui_transport_web::frame::WsPart::Datagram(&'a [u8])
+pub coqui_transport_web::frame::WsPart::Message(&'a [u8])
+pub struct coqui_transport_web::frame::Decoder(_)
+impl coqui_transport_web::frame::Decoder
+pub const fn coqui_transport_web::frame::Decoder::new(usize) -> Self
+pub fn coqui_transport_web::frame::Decoder::next_frame(&mut self) -> core::result::Result<core::option::Option<alloc::vec::Vec<u8>>, coqui_transport::frame::FrameError>
+pub fn coqui_transport_web::frame::Decoder::push(&mut self, &[u8])
+pub fn coqui_transport_web::frame::Decoder::set_maximum(&mut self, usize)
+pub const coqui_transport_web::frame::WEBTRANSPORT: coqui_transport::frame::length::LengthPrefix
+pub const coqui_transport_web::frame::WS_DATAGRAMS_PROTOCOL: &str
+pub const coqui_transport_web::frame::WS_LADDER_PROTOCOL: &str
+pub fn coqui_transport_web::frame::encode(&[u8], usize) -> core::result::Result<alloc::vec::Vec<u8>, coqui_transport::frame::FrameError>
+pub fn coqui_transport_web::frame::ws_datagram(&[u8]) -> alloc::vec::Vec<u8>
+pub fn coqui_transport_web::frame::ws_message(&[u8]) -> alloc::vec::Vec<u8>
+pub fn coqui_transport_web::frame::ws_part(&[u8]) -> core::result::Result<coqui_transport_web::frame::WsPart<'_>, coqui_transport::frame::FrameError>
+pub fn coqui_transport_web::frame::ws_signal(&[u8]) -> alloc::vec::Vec<u8>
+pub fn coqui_transport_web::frame::ws_signal_part(&[u8]) -> core::option::Option<&[u8]>
+pub mod coqui_transport_web::webrtc
+#[non_exhaustive] pub enum coqui_transport_web::webrtc::Signaling
+pub coqui_transport_web::webrtc::Signaling::ByCaller
+pub coqui_transport_web::webrtc::Signaling::OnChannel
+pub struct coqui_transport_web::webrtc::Port
+impl coqui_transport_web::webrtc::Port
+pub fn coqui_transport_web::webrtc::Port::bind(core::net::socket_addr::SocketAddr, coqui_transport_web::webrtc::Settings) -> core::result::Result<Self, coqui_transport::failure::Failure>
+pub fn coqui_transport_web::webrtc::Port::data_channels(&self) -> usize
+pub fn coqui_transport_web::webrtc::Port::local_addr(&self) -> core::net::socket_addr::SocketAddr
+pub fn coqui_transport_web::webrtc::Port::relays(&self) -> usize
+impl core::fmt::Debug for coqui_transport_web::webrtc::Port
+pub fn coqui_transport_web::webrtc::Port::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct coqui_transport_web::webrtc::Settings
+pub coqui_transport_web::webrtc::Settings::any_candidate: bool
+pub coqui_transport_web::webrtc::Settings::attempt: core::time::Duration
+pub coqui_transport_web::webrtc::Settings::enabled: bool
+pub coqui_transport_web::webrtc::Settings::max_per_address: usize
+pub coqui_transport_web::webrtc::Settings::max_relays: usize
+pub coqui_transport_web::webrtc::Settings::max_sessions: usize
+pub coqui_transport_web::webrtc::Settings::path_mtu: usize
+pub coqui_transport_web::webrtc::Settings::public_address: core::option::Option<core::net::socket_addr::SocketAddr>
+pub coqui_transport_web::webrtc::Settings::relay_idle: core::time::Duration
+pub coqui_transport_web::webrtc::Settings::signaling: coqui_transport_web::webrtc::Signaling
+impl coqui_transport_web::webrtc::Settings
+pub const fn coqui_transport_web::webrtc::Settings::with_any_candidate(self) -> Self
+pub const fn coqui_transport_web::webrtc::Settings::with_attempt(self, core::time::Duration) -> Self
+pub const fn coqui_transport_web::webrtc::Settings::with_enabled(self, bool) -> Self
+pub const fn coqui_transport_web::webrtc::Settings::with_max_per_address(self, usize) -> Self
+pub const fn coqui_transport_web::webrtc::Settings::with_max_relays(self, usize) -> Self
+pub const fn coqui_transport_web::webrtc::Settings::with_max_sessions(self, usize) -> Self
+pub const fn coqui_transport_web::webrtc::Settings::with_path_mtu(self, usize) -> Self
+pub const fn coqui_transport_web::webrtc::Settings::with_public_address(self, core::net::socket_addr::SocketAddr) -> Self
+pub const fn coqui_transport_web::webrtc::Settings::with_relay_idle(self, core::time::Duration) -> Self
+pub const fn coqui_transport_web::webrtc::Settings::with_signaling(self, coqui_transport_web::webrtc::Signaling) -> Self
+impl core::default::Default for coqui_transport_web::webrtc::Settings
+pub fn coqui_transport_web::webrtc::Settings::default() -> Self
+pub mod coqui_transport_web::websocket
+#[non_exhaustive] pub enum coqui_transport_web::websocket::Frames
+pub coqui_transport_web::websocket::Frames::Binary
+pub coqui_transport_web::websocket::Frames::Text
+pub struct coqui_transport_web::websocket::Channel
+impl coqui_transport_web::websocket::Channel
+pub fn coqui_transport_web::websocket::Channel::deliver_signal(&self, &[u8]) -> core::result::Result<(), coqui_transport::failure::Failure>
+pub fn coqui_transport_web::websocket::Channel::next_signal(&self, core::option::Option<core::time::Duration>) -> core::result::Result<core::option::Option<alloc::vec::Vec<u8>>, coqui_transport::failure::Failure>
+impl coqui_transport::channel::Channel for coqui_transport_web::websocket::Channel
+pub fn coqui_transport_web::websocket::Channel::capabilities(&self) -> coqui_transport::capabilities::Capabilities
+pub fn coqui_transport_web::websocket::Channel::close(&self)
+pub fn coqui_transport_web::websocket::Channel::datagrams(&self) -> core::option::Option<&dyn coqui_transport::channel::Datagrams>
+pub fn coqui_transport_web::websocket::Channel::is_closed(&self) -> bool
+pub fn coqui_transport_web::websocket::Channel::peer_certificates(&self) -> core::option::Option<&[alloc::vec::Vec<u8>]>
+pub fn coqui_transport_web::websocket::Channel::receive(&self, core::option::Option<core::time::Duration>) -> core::result::Result<core::option::Option<alloc::vec::Vec<u8>>, coqui_transport::failure::Failure>
+pub fn coqui_transport_web::websocket::Channel::send(&self, &[u8]) -> core::result::Result<(), coqui_transport::failure::Failure>
+pub fn coqui_transport_web::websocket::Channel::send_timeout(&self, &[u8], core::option::Option<core::time::Duration>) -> core::result::Result<(), coqui_transport::failure::Failure>
+pub fn coqui_transport_web::websocket::Channel::set_max_message(&self, usize)
+pub fn coqui_transport_web::websocket::Channel::set_max_receive(&self, usize)
+pub fn coqui_transport_web::websocket::Channel::set_max_receive_after(&self, usize, usize) -> core::result::Result<(), coqui_transport::failure::Failure>
+pub fn coqui_transport_web::websocket::Channel::set_max_send(&self, usize)
+pub fn coqui_transport_web::websocket::Channel::set_pending(&self, usize) -> core::result::Result<(), coqui_transport::failure::Failure>
+impl core::fmt::Debug for coqui_transport_web::websocket::Channel
+pub fn coqui_transport_web::websocket::Channel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::ops::drop::Drop for coqui_transport_web::websocket::Channel
+pub fn coqui_transport_web::websocket::Channel::drop(&mut self)
+pub struct coqui_transport_web::websocket::Connector
+impl coqui_transport_web::websocket::Connector
+pub const fn coqui_transport_web::websocket::Connector::new(coqui_transport_web::websocket::Dialer, url::Url) -> Self
+impl coqui_transport::connector::Connector for coqui_transport_web::websocket::Connector
+pub type coqui_transport_web::websocket::Connector::Connection = coqui_transport_web::websocket::Channel
+pub type coqui_transport_web::websocket::Connector::Error = coqui_transport::failure::Failure
+pub fn coqui_transport_web::websocket::Connector::connect(&self, core::time::Duration) -> core::result::Result<coqui_transport_web::websocket::Channel, coqui_transport::failure::Failure>
+pub struct coqui_transport_web::websocket::Dialer
+impl coqui_transport_web::websocket::Dialer
+pub fn coqui_transport_web::websocket::Dialer::new() -> Self
+pub fn coqui_transport_web::websocket::Dialer::non_defaults(&self) -> alloc::vec::Vec<coqui_transport_web::NonDefault>
+pub const fn coqui_transport_web::websocket::Dialer::plain_beyond_loopback(&self) -> bool
+pub const fn coqui_transport_web::websocket::Dialer::with_datagrams(self) -> Self
+pub const fn coqui_transport_web::websocket::Dialer::with_frames(self, coqui_transport_web::websocket::Frames) -> Self
+pub fn coqui_transport_web::websocket::Dialer::with_header(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub const fn coqui_transport_web::websocket::Dialer::with_limits(self, coqui_transport_web::Limits) -> Self
+pub const fn coqui_transport_web::websocket::Dialer::with_local_addr(self, core::net::socket_addr::SocketAddr) -> Self
+pub const fn coqui_transport_web::websocket::Dialer::with_plain_beyond_loopback(self) -> Self
+pub fn coqui_transport_web::websocket::Dialer::with_tls(self, alloc::sync::Arc<rustls::client::client_conn::ClientConfig>) -> Self
+pub const fn coqui_transport_web::websocket::Dialer::with_webrtc(self, coqui_transport_web::webrtc::Settings) -> Self
+impl coqui_transport_web::Dialer for coqui_transport_web::websocket::Dialer
+pub type coqui_transport_web::websocket::Dialer::Connection = coqui_transport_web::websocket::Channel
+pub fn coqui_transport_web::websocket::Dialer::dial(&mut self, coqui_transport_web::Kind, &url::Url, core::time::Duration) -> core::result::Result<coqui_transport_web::websocket::Channel, coqui_transport::failure::Failure>
+impl core::fmt::Debug for coqui_transport_web::websocket::Dialer
+pub fn coqui_transport_web::websocket::Dialer::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct coqui_transport_web::websocket::Listener
+impl coqui_transport_web::websocket::Listener
+pub fn coqui_transport_web::websocket::Listener::accept(&self, core::option::Option<core::time::Duration>) -> core::result::Result<coqui_transport_web::websocket::Channel, coqui_transport::failure::Failure>
+pub fn coqui_transport_web::websocket::Listener::bind(core::net::socket_addr::SocketAddr, core::option::Option<alloc::sync::Arc<rustls::server::server_conn::ServerConfig>>) -> core::result::Result<Self, coqui_transport::failure::Failure>
+pub fn coqui_transport_web::websocket::Listener::bind_plain(core::net::socket_addr::SocketAddr) -> core::result::Result<Self, coqui_transport::failure::Failure>
+pub fn coqui_transport_web::websocket::Listener::local_addr(&self) -> core::result::Result<core::net::socket_addr::SocketAddr, coqui_transport::failure::Failure>
+pub fn coqui_transport_web::websocket::Listener::next(&self, core::option::Option<core::time::Duration>) -> core::result::Result<coqui_transport_web::websocket::Pending, coqui_transport::failure::Failure>
+pub fn coqui_transport_web::websocket::Listener::non_defaults(&self) -> alloc::vec::Vec<coqui_transport_web::NonDefault>
+pub fn coqui_transport_web::websocket::Listener::plain_beyond_loopback(&self) -> bool
+pub fn coqui_transport_web::websocket::Listener::with_admission(self, impl core::ops::function::Fn(core::net::socket_addr::SocketAddr) -> bool + core::marker::Send + core::marker::Sync + 'static) -> Self
+pub const fn coqui_transport_web::websocket::Listener::with_frames(self, coqui_transport_web::websocket::Frames) -> Self
+pub const fn coqui_transport_web::websocket::Listener::with_limits(self, coqui_transport_web::Limits) -> Self
+pub fn coqui_transport_web::websocket::Listener::with_origins(self, impl core::iter::traits::collect::IntoIterator<Item = alloc::string::String>) -> Self
+pub fn coqui_transport_web::websocket::Listener::with_webrtc(self, &coqui_transport_web::webrtc::Port) -> Self
+impl coqui_transport::connector::Listener for coqui_transport_web::websocket::Listener
+pub type coqui_transport_web::websocket::Listener::Connection = coqui_transport_web::websocket::Channel
+pub type coqui_transport_web::websocket::Listener::Error = coqui_transport::failure::Failure
+pub fn coqui_transport_web::websocket::Listener::accept(&self) -> core::result::Result<coqui_transport_web::websocket::Channel, coqui_transport::failure::Failure>
+impl core::fmt::Debug for coqui_transport_web::websocket::Listener
+pub fn coqui_transport_web::websocket::Listener::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct coqui_transport_web::websocket::Pending
+impl coqui_transport_web::websocket::Pending
+pub fn coqui_transport_web::websocket::Pending::canceller(&self) -> coqui_transport_web::Cancel
+pub fn coqui_transport_web::websocket::Pending::handshake(self) -> core::result::Result<coqui_transport_web::websocket::Channel, coqui_transport::failure::Failure>
+pub const fn coqui_transport_web::websocket::Pending::peer_addr(&self) -> core::net::socket_addr::SocketAddr
+impl core::fmt::Debug for coqui_transport_web::websocket::Pending
+pub fn coqui_transport_web::websocket::Pending::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub mod coqui_transport_web::webtransport
+pub struct coqui_transport_web::webtransport::Channel
+impl coqui_transport::channel::Channel for coqui_transport_web::webtransport::Channel
+pub fn coqui_transport_web::webtransport::Channel::capabilities(&self) -> coqui_transport::capabilities::Capabilities
+pub fn coqui_transport_web::webtransport::Channel::close(&self)
+pub fn coqui_transport_web::webtransport::Channel::datagrams(&self) -> core::option::Option<&dyn coqui_transport::channel::Datagrams>
+pub fn coqui_transport_web::webtransport::Channel::is_closed(&self) -> bool
+pub fn coqui_transport_web::webtransport::Channel::peer_certificates(&self) -> core::option::Option<&[alloc::vec::Vec<u8>]>
+pub fn coqui_transport_web::webtransport::Channel::receive(&self, core::option::Option<core::time::Duration>) -> core::result::Result<core::option::Option<alloc::vec::Vec<u8>>, coqui_transport::failure::Failure>
+pub fn coqui_transport_web::webtransport::Channel::send(&self, &[u8]) -> core::result::Result<(), coqui_transport::failure::Failure>
+pub fn coqui_transport_web::webtransport::Channel::send_timeout(&self, &[u8], core::option::Option<core::time::Duration>) -> core::result::Result<(), coqui_transport::failure::Failure>
+pub fn coqui_transport_web::webtransport::Channel::set_max_message(&self, usize)
+pub fn coqui_transport_web::webtransport::Channel::set_max_receive(&self, usize)
+pub fn coqui_transport_web::webtransport::Channel::set_max_receive_after(&self, usize, usize) -> core::result::Result<(), coqui_transport::failure::Failure>
+pub fn coqui_transport_web::webtransport::Channel::set_max_send(&self, usize)
+pub fn coqui_transport_web::webtransport::Channel::set_pending(&self, usize) -> core::result::Result<(), coqui_transport::failure::Failure>
+impl core::fmt::Debug for coqui_transport_web::webtransport::Channel
+pub fn coqui_transport_web::webtransport::Channel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::ops::drop::Drop for coqui_transport_web::webtransport::Channel
+pub fn coqui_transport_web::webtransport::Channel::drop(&mut self)
+pub struct coqui_transport_web::webtransport::Connector
+impl coqui_transport_web::webtransport::Connector
+pub const fn coqui_transport_web::webtransport::Connector::new(coqui_transport_web::webtransport::Dialer, url::Url) -> Self
+impl coqui_transport::connector::Connector for coqui_transport_web::webtransport::Connector
+pub type coqui_transport_web::webtransport::Connector::Connection = coqui_transport_web::webtransport::Channel
+pub type coqui_transport_web::webtransport::Connector::Error = coqui_transport::failure::Failure
+pub fn coqui_transport_web::webtransport::Connector::connect(&self, core::time::Duration) -> core::result::Result<coqui_transport_web::webtransport::Channel, coqui_transport::failure::Failure>
+pub struct coqui_transport_web::webtransport::Dialer
+impl coqui_transport_web::webtransport::Dialer
+pub fn coqui_transport_web::webtransport::Dialer::pinned(&[coqui_transport_web::CertificatePin]) -> core::result::Result<Self, coqui_transport::failure::Failure>
+pub const fn coqui_transport_web::webtransport::Dialer::with_limits(self, coqui_transport_web::Limits) -> Self
+pub const fn coqui_transport_web::webtransport::Dialer::with_local_addr(self, core::net::socket_addr::SocketAddr) -> Self
+pub fn coqui_transport_web::webtransport::Dialer::with_tls(alloc::sync::Arc<rustls::client::client_conn::ClientConfig>) -> core::result::Result<Self, coqui_transport::failure::Failure>
+impl coqui_transport_web::Dialer for coqui_transport_web::webtransport::Dialer
+pub type coqui_transport_web::webtransport::Dialer::Connection = coqui_transport_web::webtransport::Channel
+pub fn coqui_transport_web::webtransport::Dialer::dial(&mut self, coqui_transport_web::Kind, &url::Url, core::time::Duration) -> core::result::Result<coqui_transport_web::webtransport::Channel, coqui_transport::failure::Failure>
+impl core::fmt::Debug for coqui_transport_web::webtransport::Dialer
+pub fn coqui_transport_web::webtransport::Dialer::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct coqui_transport_web::webtransport::Listener
+impl coqui_transport_web::webtransport::Listener
+pub fn coqui_transport_web::webtransport::Listener::accept(&self, core::option::Option<core::time::Duration>) -> core::result::Result<coqui_transport_web::webtransport::Channel, coqui_transport::failure::Failure>
+pub fn coqui_transport_web::webtransport::Listener::bind(core::net::socket_addr::SocketAddr, alloc::sync::Arc<rustls::server::server_conn::ServerConfig>) -> core::result::Result<Self, coqui_transport::failure::Failure>
+pub const fn coqui_transport_web::webtransport::Listener::local_addr(&self) -> core::net::socket_addr::SocketAddr
+pub fn coqui_transport_web::webtransport::Listener::next(&self, core::option::Option<core::time::Duration>) -> core::result::Result<coqui_transport_web::webtransport::Pending, coqui_transport::failure::Failure>
+pub fn coqui_transport_web::webtransport::Listener::on_port(&coqui_transport_web::webrtc::Port, alloc::sync::Arc<rustls::server::server_conn::ServerConfig>) -> core::result::Result<Self, coqui_transport::failure::Failure>
+pub fn coqui_transport_web::webtransport::Listener::with_admission(self, impl core::ops::function::Fn(core::net::socket_addr::SocketAddr) -> bool + core::marker::Send + core::marker::Sync + 'static) -> Self
+pub const fn coqui_transport_web::webtransport::Listener::with_limits(self, coqui_transport_web::Limits) -> Self
+pub fn coqui_transport_web::webtransport::Listener::with_origins(self, impl core::iter::traits::collect::IntoIterator<Item = alloc::string::String>) -> Self
+pub fn coqui_transport_web::webtransport::Listener::with_tls_per_connection(self, impl core::ops::function::Fn(core::net::socket_addr::SocketAddr, core::net::socket_addr::SocketAddr) -> alloc::sync::Arc<rustls::server::server_conn::ServerConfig> + core::marker::Send + core::marker::Sync + 'static) -> Self
+impl coqui_transport::connector::Listener for coqui_transport_web::webtransport::Listener
+pub type coqui_transport_web::webtransport::Listener::Connection = coqui_transport_web::webtransport::Channel
+pub type coqui_transport_web::webtransport::Listener::Error = coqui_transport::failure::Failure
+pub fn coqui_transport_web::webtransport::Listener::accept(&self) -> core::result::Result<coqui_transport_web::webtransport::Channel, coqui_transport::failure::Failure>
+impl core::fmt::Debug for coqui_transport_web::webtransport::Listener
+pub fn coqui_transport_web::webtransport::Listener::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct coqui_transport_web::webtransport::Pending
+impl coqui_transport_web::webtransport::Pending
+pub fn coqui_transport_web::webtransport::Pending::canceller(&self) -> coqui_transport_web::Cancel
+pub fn coqui_transport_web::webtransport::Pending::handshake(self) -> core::result::Result<coqui_transport_web::webtransport::Channel, coqui_transport::failure::Failure>
+pub const fn coqui_transport_web::webtransport::Pending::local_addr(&self) -> core::net::socket_addr::SocketAddr
+pub const fn coqui_transport_web::webtransport::Pending::peer_addr(&self) -> core::net::socket_addr::SocketAddr
+impl core::fmt::Debug for coqui_transport_web::webtransport::Pending
+pub fn coqui_transport_web::webtransport::Pending::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum coqui_transport_web::EndpointError
+pub coqui_transport_web::EndpointError::Address
+pub coqui_transport_web::EndpointError::Empty
+pub coqui_transport_web::EndpointError::HostMismatch
+pub coqui_transport_web::EndpointError::NotPlain
+pub coqui_transport_web::EndpointError::Pin
+pub coqui_transport_web::EndpointError::Url
+pub coqui_transport_web::EndpointError::WebSocket
+pub coqui_transport_web::EndpointError::WebTransport
+impl core::error::Error for coqui_transport_web::EndpointError
+impl core::fmt::Display for coqui_transport_web::EndpointError
+pub fn coqui_transport_web::EndpointError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum coqui_transport_web::Kind
+pub coqui_transport_web::Kind::WebSocket
+pub coqui_transport_web::Kind::WebTransport
+pub enum coqui_transport_web::Phase
+pub coqui_transport_web::Phase::Active
+pub coqui_transport_web::Phase::Opening
+#[non_exhaustive] pub enum coqui_transport_web::Recovery
+pub coqui_transport_web::Recovery::Deny
+pub coqui_transport_web::Recovery::VerifyAndReconcile
+pub coqui_transport_web::Recovery::VerifyFallback
+pub struct coqui_transport_web::Cancel(_)
+impl coqui_transport_web::Cancel
+pub fn coqui_transport_web::Cancel::cancel(&self) -> bool
+impl core::fmt::Debug for coqui_transport_web::Cancel
+pub fn coqui_transport_web::Cancel::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct coqui_transport_web::CertificatePin(_)
+impl coqui_transport_web::CertificatePin
+pub const fn coqui_transport_web::CertificatePin::as_bytes(&self) -> &[u8; 32]
+pub const fn coqui_transport_web::CertificatePin::from_bytes([u8; 32]) -> Self
+impl core::fmt::Debug for coqui_transport_web::CertificatePin
+pub fn coqui_transport_web::CertificatePin::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for coqui_transport_web::CertificatePin
+pub fn coqui_transport_web::CertificatePin::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::str::traits::FromStr for coqui_transport_web::CertificatePin
+pub type coqui_transport_web::CertificatePin::Err = coqui_transport_web::EndpointError
+pub fn coqui_transport_web::CertificatePin::from_str(&str) -> core::result::Result<Self, Self::Err>
+pub struct coqui_transport_web::Endpoints
+impl coqui_transport_web::Endpoints
+pub fn coqui_transport_web::Endpoints::builder() -> coqui_transport_web::EndpointsBuilder
+pub fn coqui_transport_web::Endpoints::certificate_pins(&self) -> &[coqui_transport_web::CertificatePin]
+pub const fn coqui_transport_web::Endpoints::websocket(&self) -> core::option::Option<&url::Url>
+pub const fn coqui_transport_web::Endpoints::webtransport(&self) -> core::option::Option<&url::Url>
+pub struct coqui_transport_web::EndpointsBuilder
+impl coqui_transport_web::EndpointsBuilder
+pub fn coqui_transport_web::EndpointsBuilder::address(self, impl core::convert::AsRef<str>) -> Self
+pub fn coqui_transport_web::EndpointsBuilder::allow_plain_loopback(self, bool) -> Self
+pub fn coqui_transport_web::EndpointsBuilder::build(self) -> core::result::Result<coqui_transport_web::Endpoints, coqui_transport_web::EndpointError>
+pub fn coqui_transport_web::EndpointsBuilder::certificate_pin(self, coqui_transport_web::CertificatePin) -> Self
+pub fn coqui_transport_web::EndpointsBuilder::websocket(self, impl core::convert::AsRef<str>) -> Self
+pub fn coqui_transport_web::EndpointsBuilder::webtransport(self, impl core::convert::AsRef<str>) -> Self
+#[non_exhaustive] pub struct coqui_transport_web::Limits
+pub coqui_transport_web::Limits::handshake: core::time::Duration
+pub coqui_transport_web::Limits::idle: core::time::Duration
+pub coqui_transport_web::Limits::max_message: usize
+pub coqui_transport_web::Limits::pending: usize
+pub coqui_transport_web::Limits::pending_datagrams: usize
+pub coqui_transport_web::Limits::queued_bytes: usize
+pub coqui_transport_web::Limits::send: core::time::Duration
+pub coqui_transport_web::Limits::websocket_datagram: usize
+impl coqui_transport_web::Limits
+pub const fn coqui_transport_web::Limits::with_handshake(self, core::time::Duration) -> Self
+pub const fn coqui_transport_web::Limits::with_idle(self, core::time::Duration) -> Self
+pub const fn coqui_transport_web::Limits::with_max_message(self, usize) -> Self
+pub const fn coqui_transport_web::Limits::with_pending(self, usize) -> Self
+pub const fn coqui_transport_web::Limits::with_pending_datagrams(self, usize) -> Self
+pub const fn coqui_transport_web::Limits::with_queued_bytes(self, usize) -> Self
+pub const fn coqui_transport_web::Limits::with_send(self, core::time::Duration) -> Self
+pub const fn coqui_transport_web::Limits::with_websocket_datagram(self, usize) -> Self
+impl core::default::Default for coqui_transport_web::Limits
+pub fn coqui_transport_web::Limits::default() -> Self
+pub struct coqui_transport_web::NoPreflight
+impl<C: coqui_transport::channel::Channel> coqui_transport_web::Preflight<C> for coqui_transport_web::NoPreflight
+pub fn coqui_transport_web::NoPreflight::check(&mut self, coqui_transport_web::Kind, &C) -> core::result::Result<(), coqui_transport::failure::Failure>
+#[non_exhaustive] pub struct coqui_transport_web::NonDefault
+pub coqui_transport_web::NonDefault::default: alloc::string::String
+pub coqui_transport_web::NonDefault::setting: &'static str
+pub coqui_transport_web::NonDefault::value: alloc::string::String
+impl coqui_transport_web::NonDefault
+pub fn coqui_transport_web::NonDefault::new(&'static str, impl alloc::string::ToString, impl alloc::string::ToString) -> Self
+pub struct coqui_transport_web::Unverified<C: coqui_transport::channel::Channel>
+impl<C: coqui_transport::channel::Channel> coqui_transport_web::Unverified<C>
+pub const fn coqui_transport_web::Unverified<C>::channel(&self) -> &C
+pub fn coqui_transport_web::Unverified<C>::into_verified(self) -> C
+pub const fn coqui_transport_web::Unverified<C>::kind(&self) -> coqui_transport_web::Kind
+pub trait coqui_transport_web::Dialer
+pub type coqui_transport_web::Dialer::Connection: coqui_transport::channel::Channel
+pub fn coqui_transport_web::Dialer::dial(&mut self, coqui_transport_web::Kind, &url::Url, core::time::Duration) -> core::result::Result<Self::Connection, coqui_transport::failure::Failure>
+impl coqui_transport_web::Dialer for coqui_transport_web::websocket::Dialer
+pub type coqui_transport_web::websocket::Dialer::Connection = coqui_transport_web::websocket::Channel
+pub fn coqui_transport_web::websocket::Dialer::dial(&mut self, coqui_transport_web::Kind, &url::Url, core::time::Duration) -> core::result::Result<coqui_transport_web::websocket::Channel, coqui_transport::failure::Failure>
+impl coqui_transport_web::Dialer for coqui_transport_web::webtransport::Dialer
+pub type coqui_transport_web::webtransport::Dialer::Connection = coqui_transport_web::webtransport::Channel
+pub fn coqui_transport_web::webtransport::Dialer::dial(&mut self, coqui_transport_web::Kind, &url::Url, core::time::Duration) -> core::result::Result<coqui_transport_web::webtransport::Channel, coqui_transport::failure::Failure>
+pub trait coqui_transport_web::FailureExt
+pub fn coqui_transport_web::FailureExt::recovery(self, coqui_transport_web::Kind, coqui_transport_web::Phase, bool) -> coqui_transport_web::Recovery
+impl coqui_transport_web::FailureExt for coqui_transport::failure::Failure
+pub fn coqui_transport::failure::Failure::recovery(self, coqui_transport_web::Kind, coqui_transport_web::Phase, bool) -> coqui_transport_web::Recovery
+pub trait coqui_transport_web::Preflight<C: coqui_transport::channel::Channel>
+pub fn coqui_transport_web::Preflight::check(&mut self, coqui_transport_web::Kind, &C) -> core::result::Result<(), coqui_transport::failure::Failure>
+impl<C: coqui_transport::channel::Channel> coqui_transport_web::Preflight<C> for coqui_transport_web::NoPreflight
+pub fn coqui_transport_web::NoPreflight::check(&mut self, coqui_transport_web::Kind, &C) -> core::result::Result<(), coqui_transport::failure::Failure>
+pub fn coqui_transport_web::connect<D, P>(&coqui_transport_web::Endpoints, &mut D, &mut P, core::time::Duration) -> core::result::Result<coqui_transport_web::Unverified<<D as coqui_transport_web::Dialer>::Connection>, coqui_transport::failure::Failure> where D: coqui_transport_web::Dialer, P: coqui_transport_web::Preflight<<D as coqui_transport_web::Dialer>::Connection>
