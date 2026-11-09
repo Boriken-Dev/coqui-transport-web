@@ -57,7 +57,10 @@ fn webtransport_pairs(listener: &webtransport::Listener, pin: CertificatePin) ->
         listener.local_addr().port()
     ))
     .unwrap();
-    let mut dialer = webtransport::Dialer::pinned(&[pin]).unwrap();
+    let mut dialer =
+        webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin])))
+            .build()
+            .unwrap();
     (0..HELD)
         .map(|_| {
             thread::scope(|scope| {
@@ -81,7 +84,8 @@ fn websocket_pairs(listener: &websocket::Listener) -> Vec<Pair> {
         .map(|_| {
             thread::scope(|scope| {
                 let accepted = scope.spawn(|| listener.accept(Some(WAIT)).unwrap());
-                let near = websocket::Dialer::new()
+                let near = websocket::Dialer::builder()
+                    .build()
                     .dial(Kind::WebSocket, &url, WAIT)
                     .unwrap();
                 let far = accepted.join().unwrap();
@@ -97,10 +101,17 @@ fn websocket_pairs(listener: &websocket::Listener) -> Vec<Pair> {
 fn channels_held_at_their_read_ahead_take_no_cpu_while_their_readers_wait() {
     let any: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let (tls, pin) = server_tls();
-    let quic = webtransport::Listener::bind(any, tls)
-        .unwrap()
-        .with_limits(Limits::default().with_pending(1));
-    let tcp = websocket::Listener::bind(any, None).unwrap();
+    let quic = webtransport::Listener::builder(any, tls)
+        .limits({
+            let mut value = Limits::default();
+            value.pending = 1;
+            value
+        })
+        .build()
+        .unwrap();
+    let tcp = websocket::Listener::builder(any, websocket::ServerTls::Plain)
+        .build()
+        .unwrap();
     let mut pairs = webtransport_pairs(&quic, pin);
     pairs.extend(websocket_pairs(&tcp));
     for (near, _) in &pairs {

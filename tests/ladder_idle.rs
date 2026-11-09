@@ -36,16 +36,18 @@ fn a_climbed_channel_at_rest_takes_no_cpu_and_closing_ends_every_thread() {
     let before = thread_count();
     let any: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let port = Port::bind(any, Settings::default()).unwrap();
-    let listener = websocket::Listener::bind(any, None)
-        .unwrap()
-        .with_frames(Frames::Binary)
-        .with_webrtc(&port);
+    let listener = websocket::Listener::builder(any, websocket::ServerTls::Plain)
+        .frames(Frames::Binary)
+        .webrtc(&port)
+        .build()
+        .unwrap();
     let url = Url::parse(&format!("ws://{}/", listener.local_addr().unwrap())).unwrap();
     let (near, far) = thread::scope(|scope| {
         let accepted = scope.spawn(|| listener.accept(Some(WAIT)).unwrap());
-        let near = websocket::Dialer::new()
-            .with_frames(Frames::Binary)
-            .with_webrtc(Settings::default())
+        let near = websocket::Dialer::builder()
+            .frames(Frames::Binary)
+            .webrtc(Settings::default())
+            .build()
             .dial(Kind::WebSocket, &url, WAIT)
             .unwrap();
         (near, accepted.join().unwrap())

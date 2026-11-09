@@ -38,7 +38,7 @@ use crate::frame::{self, Decoder};
 use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, Reading, Received, bind_failure};
 #[cfg(feature = "webrtc")]
 use crate::webrtc::Port;
-use coqui_transport::Failure;
+use coqui_transport::{Failure, NonDefault};
 
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -442,9 +442,9 @@ impl coqui_transport::Channel for Channel {
     /// Datagrams are the connection's own, so they are reported whether or not [`datagrams`](coqui_transport::Channel::datagrams) was called.
     fn capabilities(&self) -> Capabilities {
         Capabilities::new()
-            .with_carrier(Carrier::Stream)
-            .with_limits(self.max_send.load(Ordering::SeqCst), self.reading.current())
-            .with_datagrams(Some((
+            .carrier(Carrier::Stream)
+            .limits(self.max_send.load(Ordering::SeqCst), self.reading.current())
+            .datagrams(Some((
                 Delivery::Unreliable,
                 self.connection.max_datagram_size(),
             )))
@@ -508,55 +508,131 @@ impl fmt::Debug for Dialer {
     }
 }
 
-impl Dialer {
-    /// A dialer accepting exactly the certificates with these hashes, as a browser's
-    /// `serverCertificateHashes` does.
+/// Whom a [`DialerBuilder`] trusts.
+#[derive(Clone)]
+#[non_exhaustive]
+pub enum ClientTrust {
+    /// Exactly the certificates with these hashes, as a browser's `serverCertificateHashes` does.
+    Pinned(Vec<CertificatePin>),
+    /// What this TLS configuration trusts. Its ALPN is set to WebTransport's.
+    Config(Arc<ClientConfig>),
+}
+
+impl fmt::Debug for ClientTrust {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pinned(pins) => f.debug_tuple("Pinned").field(&pins.len()).finish(),
+            Self::Config(_) => f.write_str("Config(..)"),
+        }
+    }
+}
+
+impl From<Arc<ClientConfig>> for ClientTrust {
+    fn from(config: Arc<ClientConfig>) -> Self {
+        Self::Config(config)
+    }
+}
+
+impl From<Vec<CertificatePin>> for ClientTrust {
+    fn from(pins: Vec<CertificatePin>) -> Self {
+        Self::Pinned(pins)
+    }
+}
+
+/// What a [`DialerBuilder`] takes whole through `settings`, in the form a file, a form or a peer fills.
+///
+/// The trust holds certificates and code, so the builder takes it as an argument. Every key is optional (an absent one is its
+/// default) and an unknown key is refused. The type is a guatiao value (`from_value`, `to_value`, `schema`), and
+/// `guatiao_serde::text` reads and writes its text. It is `#[non_exhaustive]`: start from [`Default`] and assign the fields.
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, guatiao::ToValue, guatiao::FromValue, guatiao::Schema,
+)]
+#[map(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DialerSettings {
+    /// The bounds of channels this dialer opens.
+    #[map(default = DialerSettings::default().limits)]
+    pub limits: Limits,
+    /// Binds the dialer's UDP socket to this address rather than to what the system picks, so a listener sees the session come
+    /// from there. Give port 0 for any free port: each address a host name resolves to is tried from a socket of its own. Only
+    /// endpoint addresses of its family are tried; an address this host cannot bind, or an endpoint with none of its family,
+    /// fails the dial with [`Failure::Unsupported`], or [`Failure::Permission`] when the address is taken or not allowed.
+    pub local_addr: Option<SocketAddr>,
+}
+
+/// Builds a [`Dialer`]: [`Dialer::builder`], the settings, then [`build`](Self::build).
+#[derive(Clone, Debug)]
+#[must_use]
+pub struct DialerBuilder {
+    trust: ClientTrust,
+    settings: DialerSettings,
+}
+
+impl DialerBuilder {
+    /// The bounds of channels this dialer opens; see [`DialerSettings::limits`].
+    pub const fn limits(mut self, limits: Limits) -> Self {
+        self.settings.limits = limits;
+        self
+    }
+
+    /// The local address the UDP socket binds to; see [`DialerSettings::local_addr`].
+    pub const fn local_addr(mut self, address: SocketAddr) -> Self {
+        self.settings.local_addr = Some(address);
+        self
+    }
+
+    /// Every setting from `settings`. Replaces what the setters set before, and is replaced by what they set after it. The
+    /// trust is an argument, not a setting, and stays.
+    pub fn settings(mut self, settings: DialerSettings) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// The dialer.
     ///
     /// # Errors
     ///
     /// [`Failure::Unsupported`] when its runtime could not start.
-    pub fn pinned(pins: &[CertificatePin]) -> Result<Self, Failure> {
-        Ok(Self {
-            tls: Tls::Pinned(
+    pub fn build(self) -> Result<Dialer, Failure> {
+        let tls = match self.trust {
+            ClientTrust::Pinned(pins) => Tls::Pinned(
                 pins.iter()
                     .map(|pin| Sha256Digest::new(*pin.as_bytes()))
                     .collect(),
             ),
-            limits: Limits::default(),
-            local: None,
+            ClientTrust::Config(config) => Tls::Custom(config),
+        };
+        Ok(Dialer {
+            tls,
+            limits: self.settings.limits,
+            local: self.settings.local_addr,
             runtime: runtime()?,
         })
     }
+}
 
-    /// A dialer trusting what this TLS configuration trusts. Its ALPN is set to WebTransport's.
-    ///
-    /// # Errors
-    ///
-    /// [`Failure::Unsupported`] when its runtime could not start.
-    pub fn with_tls(tls: Arc<ClientConfig>) -> Result<Self, Failure> {
-        Ok(Self {
-            tls: Tls::Custom(tls),
-            limits: Limits::default(),
-            local: None,
-            runtime: runtime()?,
-        })
+impl Dialer {
+    /// A builder for a dialer that trusts `trust`, with every setting at its default.
+    pub fn builder(trust: impl Into<ClientTrust>) -> DialerBuilder {
+        DialerBuilder {
+            trust: trust.into(),
+            settings: DialerSettings::default(),
+        }
     }
 
-    /// The bounds of channels this dialer opens.
+    /// The settings this dialer was built with.
     #[must_use]
-    pub const fn with_limits(mut self, limits: Limits) -> Self {
-        self.limits = limits;
-        self
+    pub fn settings(&self) -> DialerSettings {
+        DialerSettings {
+            limits: self.limits,
+            local_addr: self.local,
+        }
     }
 
-    /// Binds the dialer's UDP socket to `address` rather than to what the system picks, so a listener sees the session come from
-    /// there. Give port 0 for any free port: each address a host name resolves to is tried from a socket of its own. Only endpoint
-    /// addresses of its family are tried; an address this host cannot bind, or an endpoint with none of its family, fails the dial
-    /// with [`Failure::Unsupported`], or [`Failure::Permission`] when the address is taken or not allowed.
+    /// The settings of this dialer that differ from their default, named by key.
     #[must_use]
-    pub const fn with_local_addr(mut self, address: SocketAddr) -> Self {
-        self.local = Some(address);
-        self
+    pub fn non_defaults(&self) -> Vec<NonDefault> {
+        NonDefault::of_settings(&self.settings())
     }
 
     /// A client endpoint, which sends a name's session to `address` when given one.
@@ -801,15 +877,160 @@ impl coqui_transport::Listener for Listener {
     }
 }
 
-impl Listener {
-    /// Binds a UDP `address`. TLS is required: WebTransport has no plain form. Its ALPN is set to
-    /// WebTransport's. A browser pinning this server by hash needs a certificate valid for at most
-    /// 14 days, signed with ECDSA P-256.
+/// Where a [`ListenerBuilder`] listens.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum Binding {
+    /// A UDP address of its own. TLS is required: WebTransport has no plain form.
+    Address(SocketAddr),
+    /// A [`Port`], which takes one such listener in its life, so data channels can share the number. `wtransport` runs on a
+    /// loopback socket behind the port's relay, unmodified but for not offering to grease QUIC's fixed bit: RFC 9443 forbids
+    /// that on a shared port, since a greased packet can read as DTLS. Admission still judges the real source. Building is
+    /// [`Failure::Permission`] when the port already has its listener.
+    #[cfg(feature = "webrtc")]
+    Port(Port),
+}
+
+impl From<SocketAddr> for Binding {
+    fn from(address: SocketAddr) -> Self {
+        Self::Address(address)
+    }
+}
+
+#[cfg(feature = "webrtc")]
+impl From<Port> for Binding {
+    fn from(port: Port) -> Self {
+        Self::Port(port)
+    }
+}
+
+/// What a [`ListenerBuilder`] takes whole through `settings`, in the form a file, a form or a peer fills.
+///
+/// The binding, the TLS configuration and the admission function hold code, so the builder takes them as arguments. Every key is
+/// optional (an absent one is its default) and an unknown key is refused. The type is a guatiao value (`from_value`,
+/// `to_value`, `schema`), and `guatiao_serde::text` reads and writes its text. It is `#[non_exhaustive]`: start from
+/// [`Default`] and assign the fields.
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, guatiao::ToValue, guatiao::FromValue, guatiao::Schema,
+)]
+#[map(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ListenerSettings {
+    /// The bounds of channels this listener accepts.
+    #[map(default = ListenerSettings::default().limits)]
+    pub limits: Limits,
+    /// Refuses a browser whose `Origin` is not listed. A request with no `Origin` is not a browser and is unaffected. An empty
+    /// list checks nothing; identity still has to be proven afterwards.
+    #[map(default = ListenerSettings::default().origins)]
+    pub origins: Vec<alloc::string::String>,
+}
+
+/// Builds a [`Listener`]: [`Listener::builder`], the settings, then [`build`](Self::build). TLS is required: WebTransport has
+/// no plain form. Its ALPN is set to WebTransport's. A browser pinning this server by hash needs a certificate valid for at most
+/// 14 days, signed with ECDSA P-256.
+#[must_use]
+pub struct ListenerBuilder {
+    binding: Binding,
+    tls: Arc<ServerConfig>,
+    settings: ListenerSettings,
+    tls_for: Option<TlsFor>,
+    admission: Option<Admission>,
+}
+
+impl fmt::Debug for ListenerBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ListenerBuilder")
+            .field("binding", &self.binding)
+            .field("settings", &self.settings)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ListenerBuilder {
+    /// The bounds of channels this listener accepts.
+    pub const fn limits(mut self, limits: Limits) -> Self {
+        self.settings.limits = limits;
+        self
+    }
+
+    /// Refuses a browser whose `Origin` is not listed; see [`ListenerSettings::origins`]. Replaces the list set before.
+    pub fn origins(mut self, origins: impl IntoIterator<Item = alloc::string::String>) -> Self {
+        self.settings.origins = origins.into_iter().collect();
+        self
+    }
+
+    /// Builds each connection's TLS configuration before its handshake from the client's source and the local address it reached
+    /// (on a wildcard bind, the one it sent to), so a client certificate verifier can judge a client by both. The handshake runs
+    /// on the driver's own threads, where nothing the caller set up around [`Pending::handshake`] is in scope. Its ALPN is set to
+    /// WebTransport's. Without this, every connection gets the configuration the listener was built with.
+    pub fn tls_per_connection(
+        mut self,
+        tls: impl Fn(SocketAddr, SocketAddr) -> Arc<ServerConfig> + Send + Sync + 'static,
+    ) -> Self {
+        self.tls_for = Some(Arc::new(tls));
+        self
+    }
+
+    /// Refuses a source address before any handshake, so a denied peer costs nothing. Decided on each connection.
+    pub fn admission(mut self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self {
+        self.admission = Some(Arc::new(admit));
+        self
+    }
+
+    /// Every setting from `settings`. Replaces what the setters set before, and is replaced by what they set after it. The
+    /// binding, the TLS configuration and the functions are arguments, not settings, and stay.
+    pub fn settings(mut self, settings: ListenerSettings) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// Binds the listener.
     ///
     /// # Errors
     ///
-    /// Why it could not bind.
-    pub fn bind(address: SocketAddr, tls: Arc<ServerConfig>) -> Result<Self, Failure> {
+    /// Why it could not bind, or start; [`Failure::Permission`] when a [`Binding::Port`] already has its listener.
+    pub fn build(self) -> Result<Listener, Failure> {
+        let mut listener = match self.binding {
+            Binding::Address(address) => Listener::bind(address, self.tls)?,
+            #[cfg(feature = "webrtc")]
+            Binding::Port(port) => Listener::on_port(&port, self.tls)?,
+        };
+        listener.limits = self.settings.limits;
+        listener.origins = self.settings.origins;
+        listener.tls_for = self.tls_for;
+        listener.admission = self.admission;
+        Ok(listener)
+    }
+}
+
+impl Listener {
+    /// A builder for a listener on `binding` serving `tls`, with every setting at its default.
+    pub fn builder(binding: impl Into<Binding>, tls: Arc<ServerConfig>) -> ListenerBuilder {
+        ListenerBuilder {
+            binding: binding.into(),
+            tls,
+            settings: ListenerSettings::default(),
+            tls_for: None,
+            admission: None,
+        }
+    }
+
+    /// The settings this listener was built with.
+    #[must_use]
+    pub fn settings(&self) -> ListenerSettings {
+        ListenerSettings {
+            limits: self.limits,
+            origins: self.origins.clone(),
+        }
+    }
+
+    /// The settings of this listener that differ from their default, named by key.
+    #[must_use]
+    pub fn non_defaults(&self) -> Vec<NonDefault> {
+        NonDefault::of_settings(&self.settings())
+    }
+
+    fn bind(address: SocketAddr, tls: Arc<ServerConfig>) -> Result<Self, Failure> {
         let runtime = runtime()?;
         let mut tls = ServerConfig::clone(&tls);
         tls.alpn_protocols = alloc::vec![WEBTRANSPORT_ALPN.to_vec()];
@@ -838,15 +1059,8 @@ impl Listener {
         })
     }
 
-    /// Listens on a [`Port`], which takes one such listener in its life, so data channels can share the number. `wtransport` runs on a loopback
-    /// socket behind the port's relay, unmodified but for not offering to grease QUIC's fixed bit: RFC 9443 forbids that on a shared
-    /// port, since a greased packet can read as DTLS. Admission still judges the real source.
-    ///
-    /// # Errors
-    ///
-    /// [`Failure::Permission`] when the port already has its listener; otherwise why it could not start.
     #[cfg(feature = "webrtc")]
-    pub fn on_port(port: &Port, tls: Arc<ServerConfig>) -> Result<Self, Failure> {
+    fn on_port(port: &Port, tls: Arc<ServerConfig>) -> Result<Self, Failure> {
         if !port.take_quic() {
             return Err(Failure::Permission);
         }
@@ -909,47 +1123,6 @@ impl Listener {
             return true;
         };
         source.is_some_and(|source| admit(source))
-    }
-
-    /// The bounds of channels this listener accepts.
-    #[must_use]
-    pub const fn with_limits(mut self, limits: Limits) -> Self {
-        self.limits = limits;
-        self
-    }
-
-    /// Refuses a browser whose `Origin` is not listed. A request with no `Origin` is not a browser
-    /// and is unaffected. An empty list checks nothing; identity still has to be proven afterwards.
-    #[must_use]
-    pub fn with_origins(
-        mut self,
-        origins: impl IntoIterator<Item = alloc::string::String>,
-    ) -> Self {
-        self.origins = origins.into_iter().collect();
-        self
-    }
-
-    /// Builds each connection's TLS configuration before its handshake from the client's source and the local address it reached
-    /// (on a wildcard bind, the one it sent to), so a client certificate verifier can judge a client by both. The handshake runs on
-    /// the driver's own threads, where nothing the caller set up around [`Pending::handshake`] is in scope. Its ALPN is set to
-    /// WebTransport's. Without this, every connection gets the configuration the listener was bound with.
-    #[must_use]
-    pub fn with_tls_per_connection(
-        mut self,
-        tls: impl Fn(SocketAddr, SocketAddr) -> Arc<ServerConfig> + Send + Sync + 'static,
-    ) -> Self {
-        self.tls_for = Some(Arc::new(tls));
-        self
-    }
-
-    /// Refuses a source address before any handshake, so a denied peer costs nothing. Decided on each connection.
-    #[must_use]
-    pub fn with_admission(
-        mut self,
-        admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static,
-    ) -> Self {
-        self.admission = Some(Arc::new(admit));
-        self
     }
 
     /// The address it is bound to.

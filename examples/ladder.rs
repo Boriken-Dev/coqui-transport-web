@@ -192,9 +192,12 @@ fn on_one_number(
     for _ in 0..64 {
         let port = Port::bind(loopback, settings)?;
         if TcpListener::bind(port.local_addr()).is_ok()
-            && let Ok(listener) = websocket::Listener::bind(port.local_addr(), None)
+            && let Ok(listener) =
+                websocket::Listener::builder(port.local_addr(), websocket::ServerTls::Plain)
+                    .frames(Frames::Binary)
+                    .webrtc(&port)
+                    .build()
         {
-            let listener = listener.with_frames(Frames::Binary).with_webrtc(&port);
             return Ok((port, listener));
         }
     }
@@ -223,7 +226,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pin = CertificatePin::from_bytes(*hash.as_ref());
 
     let (direct_port, direct) = on_one_number(Settings::default())?;
-    let quic = webtransport::Listener::on_port(&direct_port, tls)?;
+    let quic = webtransport::Listener::builder(direct_port.clone(), tls).build()?;
 
     // The forwarder needs the port's number and the port needs the forwarder's, so the number is found first.
     let holder = UdpSocket::bind("127.0.0.1:0")?;
@@ -231,25 +234,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(holder);
     let path = Arc::new(Path::default());
     let forwarder = forward(hidden, Arc::clone(&path))?;
-    let forwarded_port = Port::bind(
-        hidden,
-        Settings::default()
-            .with_attempt(Duration::from_secs(3))
-            .with_public_address(forwarder),
-    )?;
-    let forwarded = websocket::Listener::bind("127.0.0.1:0".parse()?, None)?
-        .with_frames(Frames::Binary)
-        .with_webrtc(&forwarded_port);
+    let forwarded_port = Port::bind(hidden, {
+        let mut value = Settings::default();
+        value.attempt = Duration::from_secs(3);
+        value.public_address = Some(forwarder);
+        value
+    })?;
+    let forwarded =
+        websocket::Listener::builder("127.0.0.1:0".parse()?, websocket::ServerTls::Plain)
+            .frames(Frames::Binary)
+            .webrtc(&forwarded_port)
+            .build()?;
 
-    let carried_port = Port::bind(
-        "127.0.0.1:0".parse()?,
-        Settings::default()
-            .with_attempt(Duration::from_secs(3))
-            .with_signaling(Signaling::ByCaller),
-    )?;
-    let carried = websocket::Listener::bind("127.0.0.1:0".parse()?, None)?
-        .with_frames(Frames::Binary)
-        .with_webrtc(&carried_port);
+    let carried_port = Port::bind("127.0.0.1:0".parse()?, {
+        let mut value = Settings::default();
+        value.attempt = Duration::from_secs(3);
+        value.signaling = Signaling::ByCaller;
+        value
+    })?;
+    let carried = websocket::Listener::builder("127.0.0.1:0".parse()?, websocket::ServerTls::Plain)
+        .frames(Frames::Binary)
+        .webrtc(&carried_port)
+        .build()?;
 
     println!(
         "{{\"direct\":{},\"forwarded\":{},\"forwarder\":{},\"carried\":{},\"pin\":\"{pin}\"}}",

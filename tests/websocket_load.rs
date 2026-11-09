@@ -76,13 +76,16 @@ impl Setup {
     /// `count` connected pairs, a dialled end and an accepted end.
     fn pairs(self, count: usize) -> Vec<(websocket::Channel, websocket::Channel)> {
         let keys = tls();
-        let listener = websocket::Listener::bind(
+        let listener = websocket::Listener::builder(
             "127.0.0.1:0".parse().unwrap(),
-            self.secure.then(|| Arc::clone(&keys.server)),
+            self.secure
+                .then(|| Arc::clone(&keys.server))
+                .map_or(websocket::ServerTls::Plain, websocket::ServerTls::Config),
         )
-        .unwrap()
-        .with_limits(self.far)
-        .with_frames(Frames::Binary);
+        .limits(self.far)
+        .frames(Frames::Binary)
+        .build()
+        .unwrap();
         let port = listener.local_addr().unwrap().port();
         // By address: a name can try an address nothing listens on first, which takes seconds a connection on Windows.
         let scheme = if self.secure { "wss" } else { "ws" };
@@ -92,13 +95,12 @@ impl Setup {
                 .map(|_| listener.accept(Some(WAIT)).unwrap())
                 .collect::<Vec<_>>()
         });
-        let mut dialer = websocket::Dialer::new()
-            .with_limits(self.near)
-            .with_frames(Frames::Binary)
-            .with_tls(keys.client);
-        if self.datagrams {
-            dialer = dialer.with_datagrams();
-        }
+        let mut dialer = websocket::Dialer::builder()
+            .limits(self.near)
+            .frames(Frames::Binary)
+            .tls(keys.client)
+            .datagrams(self.datagrams)
+            .build();
         let near: Vec<_> = (0..count)
             .map(|_| dialer.dial(Kind::WebSocket, &url, WAIT).unwrap())
             .collect();
@@ -247,9 +249,17 @@ fn send_until_it_ends(channel: &websocket::Channel) -> (Failure, Duration) {
 fn a_peer_that_stops_reading_is_noticed_at_the_limit(secure: bool) {
     let limit = Duration::from_secs(1);
     let mut setup = Setup::new(secure);
-    setup.near = Limits::default().with_send(limit);
+    setup.near = {
+        let mut value = Limits::default();
+        value.send = limit;
+        value
+    };
     // Holding one message, this end reads nothing more until someone takes it, and nobody does.
-    setup.far = Limits::default().with_pending(1);
+    setup.far = {
+        let mut value = Limits::default();
+        value.pending = 1;
+        value
+    };
     let (near, far) = setup.pair();
     let (failure, took) = send_until_it_ends(&near);
     assert_eq!(failure, Failure::NoProgress);
@@ -272,8 +282,16 @@ fn a_slow_peer_is_not_cut_off(secure: bool) {
     const COUNT: usize = 32;
     let mut setup = Setup::new(secure);
     // Each read frees room well within this, while sending all of it takes several times as long.
-    setup.near = Limits::default().with_send(Duration::from_secs(1));
-    setup.far = Limits::default().with_pending(1);
+    setup.near = {
+        let mut value = Limits::default();
+        value.send = Duration::from_secs(1);
+        value
+    };
+    setup.far = {
+        let mut value = Limits::default();
+        value.pending = 1;
+        value
+    };
     let (near, far) = setup.pair();
     let reader = thread::spawn(move || {
         for index in 0..COUNT {
@@ -336,10 +354,17 @@ fn close_with_a_full_queue_sends_it_all_and_closes() {
 #[test]
 fn close_returns_when_a_failure_has_no_reader_to_go_to() {
     let mut setup = Setup::new(false);
-    setup.near = Limits::default()
-        .with_send(Duration::from_millis(300))
-        .with_pending(1);
-    setup.far = Limits::default().with_pending(1);
+    setup.near = {
+        let mut value = Limits::default();
+        value.send = Duration::from_millis(300);
+        value.pending = 1;
+        value
+    };
+    setup.far = {
+        let mut value = Limits::default();
+        value.pending = 1;
+        value
+    };
     let (near, far) = setup.pair();
     // More than this end's inbox holds, and nobody reads it, while it fills a peer that does not read either.
     for _ in 0..3 {

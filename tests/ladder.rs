@@ -168,9 +168,12 @@ fn on_one_number(settings: Settings) -> (Port, websocket::Listener) {
         let port = Port::bind(loopback(), settings).unwrap();
         // Whichever number UDP got may be taken on TCP.
         if TcpListener::bind(port.local_addr()).is_ok()
-            && let Ok(listener) = websocket::Listener::bind(port.local_addr(), None)
+            && let Ok(listener) =
+                websocket::Listener::builder(port.local_addr(), websocket::ServerTls::Plain)
+                    .frames(Frames::Binary)
+                    .webrtc(&port)
+                    .build()
         {
-            let listener = listener.with_frames(Frames::Binary).with_webrtc(&port);
             return (port, listener);
         }
     }
@@ -186,11 +189,12 @@ fn dial(listener: &websocket::Listener, settings: Option<Settings>) -> Pair {
     let url = Url::parse(&format!("ws://{}/", listener.local_addr().unwrap())).unwrap();
     thread::scope(|scope| {
         let accepted = scope.spawn(|| listener.accept(Some(WAIT)).unwrap());
-        let mut dialer = websocket::Dialer::new().with_frames(Frames::Binary);
-        dialer = match settings {
-            Some(settings) => dialer.with_webrtc(settings),
-            None => dialer.with_datagrams(),
-        };
+        let dialer = websocket::Dialer::builder().frames(Frames::Binary);
+        let mut dialer = match settings {
+            Some(settings) => dialer.webrtc(settings),
+            None => dialer.datagrams(true),
+        }
+        .build();
         let near = dialer.dial(Kind::WebSocket, &url, WAIT).unwrap();
         Pair {
             near,
@@ -281,12 +285,20 @@ fn nothing_happens_until_someone_asks_for_datagrams() {
 fn a_blocked_udp_path_costs_only_the_attempt() {
     let hole = UdpSocket::bind(loopback()).unwrap();
     let attempt = Duration::from_millis(1500);
-    let (port, listener) = on_one_number(
-        Settings::default()
-            .with_attempt(attempt)
-            .with_public_address(hole.local_addr().unwrap()),
+    let (port, listener) = on_one_number({
+        let mut value = Settings::default();
+        value.attempt = attempt;
+        value.public_address = Some(hole.local_addr().unwrap());
+        value
+    });
+    let Pair { near, far } = dial(
+        &listener,
+        Some({
+            let mut value = Settings::default();
+            value.attempt = attempt;
+            value
+        }),
     );
-    let Pair { near, far } = dial(&listener, Some(Settings::default().with_attempt(attempt)));
     let near_datagrams = near.datagrams().unwrap();
     let far_datagrams = far.datagrams().unwrap();
     let changes = near_datagrams.path_changes().unwrap();
@@ -314,7 +326,14 @@ fn a_blocked_udp_path_costs_only_the_attempt() {
 #[test]
 fn turned_off_a_channel_asks_for_plain_datagrams_and_never_signals() {
     let (port, listener) = on_one_number(Settings::default());
-    let Pair { near, far } = dial(&listener, Some(Settings::default().with_enabled(false)));
+    let Pair { near, far } = dial(
+        &listener,
+        Some({
+            let mut value = Settings::default();
+            value.enabled = false;
+            value
+        }),
+    );
     let near_datagrams = near.datagrams().unwrap();
     let far_datagrams = far.datagrams().unwrap();
     assert!(near_datagrams.path_changes().is_none());
@@ -326,9 +345,10 @@ fn turned_off_a_channel_asks_for_plain_datagrams_and_never_signals() {
 
 #[test]
 fn a_listener_with_no_port_gives_plain_datagrams_to_a_client_that_would_climb() {
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_frames(Frames::Binary);
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .frames(Frames::Binary)
+        .build()
+        .unwrap();
     let Pair { near, far } = dial(&listener, Some(Settings::default()));
     let near_datagrams = near.datagrams().unwrap();
     let far_datagrams = far.datagrams().unwrap();
@@ -378,16 +398,21 @@ fn a_path_that_dies_goes_back_to_the_websocket_with_an_event_and_no_second_attem
 
 /// A port whose candidate is `forwarder`, on the number it forwards to.
 fn on_forwarded(forwarder: &Forwarder) -> (Port, websocket::Listener) {
-    let settings = Settings::default().with_public_address(forwarder.address);
+    let settings = {
+        let mut value = Settings::default();
+        value.public_address = Some(forwarder.address);
+        value
+    };
     let port = Port::bind(loopback(), settings).unwrap();
     *forwarder
         .target
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = port.local_addr();
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_frames(Frames::Binary)
-        .with_webrtc(&port);
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .frames(Frames::Binary)
+        .webrtc(&port)
+        .build()
+        .unwrap();
     (port, listener)
 }
 
@@ -409,9 +434,12 @@ fn carry(pair: &Pair, change: impl Fn(&str) -> String) {
 
 #[test]
 fn signals_a_caller_carries_open_it_and_a_changed_fingerprint_never_does() {
-    let settings = Settings::default()
-        .with_signaling(Signaling::ByCaller)
-        .with_attempt(Duration::from_secs(2));
+    let settings = {
+        let mut value = Settings::default();
+        value.signaling = Signaling::ByCaller;
+        value.attempt = Duration::from_secs(2);
+        value
+    };
     let (_port, listener) = on_one_number(settings);
 
     let pair = dial(&listener, Some(settings));
@@ -446,12 +474,20 @@ fn signals_a_caller_carries_open_it_and_a_changed_fingerprint_never_does() {
 #[test]
 fn a_caller_carrying_signals_ignores_one_arriving_on_the_socket() {
     let attempt = Duration::from_millis(1500);
-    let (port, listener) = on_one_number(
-        Settings::default()
-            .with_signaling(Signaling::ByCaller)
-            .with_attempt(attempt),
+    let (port, listener) = on_one_number({
+        let mut value = Settings::default();
+        value.signaling = Signaling::ByCaller;
+        value.attempt = attempt;
+        value
+    });
+    let pair = dial(
+        &listener,
+        Some({
+            let mut value = Settings::default();
+            value.attempt = attempt;
+            value
+        }),
     );
-    let pair = dial(&listener, Some(Settings::default().with_attempt(attempt)));
     let near = pair.near.datagrams().unwrap();
     let far = pair.far.datagrams().unwrap();
     let changes = near.path_changes().unwrap();
@@ -480,9 +516,12 @@ fn a_candidate_a_peer_names_elsewhere_gets_nothing_from_either_side() {
         elsewhere.ip(),
         elsewhere.port()
     );
-    let settings = Settings::default()
-        .with_signaling(Signaling::ByCaller)
-        .with_attempt(Duration::from_secs(2));
+    let settings = {
+        let mut value = Settings::default();
+        value.signaling = Signaling::ByCaller;
+        value.attempt = Duration::from_secs(2);
+        value
+    };
     let (_port, listener) = on_one_number(settings);
     let mut buffer = [0_u8; 2048];
 
@@ -528,7 +567,14 @@ fn a_candidate_a_peer_names_elsewhere_gets_nothing_from_either_side() {
     );
 
     // The same answer allowed: this is what the check above would have seen, had the refusal not been there.
-    let allowed = dial(&listener, Some(settings.with_any_candidate()));
+    let allowed = dial(
+        &listener,
+        Some({
+            let mut allowed = settings;
+            allowed.any_candidate = true;
+            allowed
+        }),
+    );
     let _near = allowed.near.datagrams().unwrap();
     let _far = allowed.far.datagrams().unwrap();
     carry(&allowed, lying);
@@ -565,10 +611,16 @@ fn sdp_value<'a>(sdp: &'a str, key: &str) -> &'a str {
 
 #[test]
 fn a_source_that_proved_nothing_gets_not_one_byte_back() {
-    let settings = Settings::default().with_signaling(Signaling::ByCaller);
+    let settings = {
+        let mut value = Settings::default();
+        value.signaling = Signaling::ByCaller;
+        value
+    };
     let (port, listener) = on_one_number(settings);
     let (tls, _) = tls();
-    let quic = webtransport::Listener::on_port(&port, tls).unwrap();
+    let quic = webtransport::Listener::builder(port.clone(), tls)
+        .build()
+        .unwrap();
     let forwarder = Forwarder::new(port.local_addr());
 
     // A session exists, so there are credentials to get wrong.
@@ -627,7 +679,11 @@ fn a_source_that_proved_nothing_gets_not_one_byte_back() {
 
 #[test]
 fn over_its_cap_a_port_refuses_an_offer_and_the_first_channel_goes_on() {
-    let (port, listener) = on_one_number(Settings::default().with_max_sessions(1));
+    let (port, listener) = on_one_number({
+        let mut value = Settings::default();
+        value.max_sessions = 1;
+        value
+    });
     let first = dial(&listener, Some(Settings::default()));
     let first_near = first.near.datagrams().unwrap();
     let first_far = first.far.datagrams().unwrap();
@@ -688,7 +744,14 @@ fn a_path_mtu_caps_the_datagram_and_one_of_that_size_takes_one_packet() {
         sent
     );
 
-    let small = dial(&listener, Some(Settings::default().with_path_mtu(600)));
+    let small = dial(
+        &listener,
+        Some({
+            let mut value = Settings::default();
+            value.path_mtu = 600;
+            value
+        }),
+    );
     let small_datagrams = small.near.datagrams().unwrap();
     let _far = small.far.datagrams().unwrap();
     let changes = small_datagrams.path_changes().unwrap();
@@ -754,15 +817,19 @@ fn a_lossy_path_loses_datagrams_and_holds_nothing_up() {
 fn webtransport_through_a_port_carries_every_datagram() {
     let port = Port::bind(loopback(), Settings::default()).unwrap();
     let (tls, pin) = tls();
-    let listener = webtransport::Listener::on_port(&port, tls).unwrap();
+    let listener = webtransport::Listener::builder(port.clone(), tls)
+        .build()
+        .unwrap();
     assert_eq!(listener.local_addr(), port.local_addr());
     let url = Url::parse(&format!("https://127.0.0.1:{}/", port.local_addr().port())).unwrap();
     thread::scope(|scope| {
         let accepted = scope.spawn(|| listener.accept(Some(WAIT)).unwrap());
-        let near = webtransport::Dialer::pinned(&[pin])
-            .unwrap()
-            .dial(Kind::WebTransport, &url, WAIT)
-            .unwrap();
+        let near =
+            webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin])))
+                .build()
+                .unwrap()
+                .dial(Kind::WebTransport, &url, WAIT)
+                .unwrap();
         near.send(b"open").unwrap();
         let far = accepted.join().unwrap();
         assert_eq!(far.receive(Some(WAIT)).unwrap().unwrap(), b"open");
@@ -792,7 +859,9 @@ fn webtransport_through_a_port_carries_every_datagram() {
 fn webtransport_a_data_channel_and_a_websocket_run_on_one_number_at_once() {
     let (port, listener) = on_one_number(Settings::default());
     let (tls, pin) = tls();
-    let quic = webtransport::Listener::on_port(&port, tls).unwrap();
+    let quic = webtransport::Listener::builder(port.clone(), tls)
+        .build()
+        .unwrap();
     let pair = dial(&listener, Some(Settings::default()));
     let near_climbing = pair.near.datagrams().unwrap();
     let far_climbing = pair.far.datagrams().unwrap();
@@ -802,10 +871,12 @@ fn webtransport_a_data_channel_and_a_websocket_run_on_one_number_at_once() {
     let url = Url::parse(&format!("https://127.0.0.1:{}/", port.local_addr().port())).unwrap();
     thread::scope(|scope| {
         let accepted = scope.spawn(|| quic.accept(Some(WAIT)).unwrap());
-        let near = webtransport::Dialer::pinned(&[pin])
-            .unwrap()
-            .dial(Kind::WebTransport, &url, WAIT)
-            .unwrap();
+        let near =
+            webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin])))
+                .build()
+                .unwrap()
+                .dial(Kind::WebTransport, &url, WAIT)
+                .unwrap();
         near.send(b"open").unwrap();
         let far = accepted.join().unwrap();
         assert_eq!(far.receive(Some(WAIT)).unwrap().unwrap(), b"open");
@@ -847,17 +918,20 @@ fn climbs_over_tls(address: SocketAddr) {
         .with_no_client_auth();
 
     let port = Port::bind(address, Settings::default()).unwrap();
-    let listener = websocket::Listener::bind(address, Some(Arc::new(server)))
-        .unwrap()
-        .with_frames(Frames::Binary)
-        .with_webrtc(&port);
+    let listener =
+        websocket::Listener::builder(address, websocket::ServerTls::Config(Arc::new(server)))
+            .frames(Frames::Binary)
+            .webrtc(&port)
+            .build()
+            .unwrap();
     let url = Url::parse(&format!("wss://{}/", listener.local_addr().unwrap())).unwrap();
     thread::scope(|scope| {
         let accepted = scope.spawn(|| listener.accept(Some(WAIT)).unwrap());
-        let near = websocket::Dialer::new()
-            .with_tls(Arc::new(client))
-            .with_frames(Frames::Binary)
-            .with_webrtc(Settings::default())
+        let near = websocket::Dialer::builder()
+            .tls(Arc::new(client))
+            .frames(Frames::Binary)
+            .webrtc(Settings::default())
+            .build()
             .dial(Kind::WebSocket, &url, WAIT)
             .unwrap();
         let far = accepted.join().unwrap();
@@ -897,10 +971,11 @@ fn ipv6_works_the_same_on_all_three() {
         println!("skipped: no IPv6 loopback here");
         return;
     };
-    let listener = websocket::Listener::bind(any, None)
-        .unwrap()
-        .with_frames(Frames::Binary)
-        .with_webrtc(&port);
+    let listener = websocket::Listener::builder(any, websocket::ServerTls::Plain)
+        .frames(Frames::Binary)
+        .webrtc(&port)
+        .build()
+        .unwrap();
     let pair = dial(&listener, Some(Settings::default()));
     let near = pair.near.datagrams().unwrap();
     let far = pair.far.datagrams().unwrap();
@@ -908,14 +983,18 @@ fn ipv6_works_the_same_on_all_three() {
     assert_eq!(await_change(&changes), Delivery::Unreliable);
     arrives(near, far, b"over six");
     let (tls, pin) = tls();
-    let quic = webtransport::Listener::on_port(&port, tls).unwrap();
+    let quic = webtransport::Listener::builder(port.clone(), tls)
+        .build()
+        .unwrap();
     let url = Url::parse(&format!("https://[::1]:{}/", port.local_addr().port())).unwrap();
     thread::scope(|scope| {
         let accepted = scope.spawn(|| quic.accept(Some(WAIT)).unwrap());
-        let near = webtransport::Dialer::pinned(&[pin])
-            .unwrap()
-            .dial(Kind::WebTransport, &url, WAIT)
-            .unwrap();
+        let near =
+            webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin])))
+                .build()
+                .unwrap()
+                .dial(Kind::WebTransport, &url, WAIT)
+                .unwrap();
         near.send(b"open").unwrap();
         let far = accepted.join().unwrap();
         assert_eq!(far.receive(Some(WAIT)).unwrap().unwrap(), b"open");
@@ -931,22 +1010,25 @@ fn admission_judges_the_real_source_and_not_the_relay() {
     let noting = Arc::clone(&seen);
     let deny = Arc::new(AtomicBool::new(false));
     let denying = Arc::clone(&deny);
-    let listener = webtransport::Listener::on_port(&port, tls)
-        .unwrap()
-        .with_admission(move |source| {
+    let listener = webtransport::Listener::builder(port.clone(), tls)
+        .admission(move |source| {
             noting
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(source);
             !denying.load(Ordering::SeqCst)
-        });
+        })
+        .build()
+        .unwrap();
     let url = Url::parse(&format!("https://127.0.0.1:{}/", forwarder.address.port())).unwrap();
     thread::scope(|scope| {
         let accepted = scope.spawn(|| listener.accept(Some(WAIT)).unwrap());
-        let near = webtransport::Dialer::pinned(&[pin])
-            .unwrap()
-            .dial(Kind::WebTransport, &url, WAIT)
-            .unwrap();
+        let near =
+            webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin])))
+                .build()
+                .unwrap()
+                .dial(Kind::WebTransport, &url, WAIT)
+                .unwrap();
         near.send(b"open").unwrap();
         let far = accepted.join().unwrap();
         let sources = forwarder
@@ -965,11 +1047,11 @@ fn admission_judges_the_real_source_and_not_the_relay() {
     });
     // A refused source gets no session.
     deny.store(true, Ordering::SeqCst);
-    let refused = webtransport::Dialer::pinned(&[pin]).unwrap().dial(
-        Kind::WebTransport,
-        &url,
-        Duration::from_millis(100),
-    );
+    let refused =
+        webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin])))
+            .build()
+            .unwrap()
+            .dial(Kind::WebTransport, &url, Duration::from_millis(100));
     assert!(refused.is_err());
     assert!(matches!(
         listener.next(Some(Duration::from_millis(500))),
@@ -980,15 +1062,17 @@ fn admission_judges_the_real_source_and_not_the_relay() {
 #[test]
 fn a_flood_of_sources_cannot_pass_the_cap_or_keep_a_real_client_out() {
     const CAP: usize = 64;
-    let port = Port::bind(
-        loopback(),
-        Settings::default()
-            .with_max_relays(CAP)
-            .with_relay_idle(Duration::from_secs(600)),
-    )
+    let port = Port::bind(loopback(), {
+        let mut value = Settings::default();
+        value.max_relays = CAP;
+        value.relay_idle = Duration::from_secs(600);
+        value
+    })
     .unwrap();
     let (tls, pin) = tls();
-    let listener = webtransport::Listener::on_port(&port, tls).unwrap();
+    let listener = webtransport::Listener::builder(port.clone(), tls)
+        .build()
+        .unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let target = port.local_addr();
 
@@ -1012,10 +1096,12 @@ fn a_flood_of_sources_cannot_pass_the_cap_or_keep_a_real_client_out() {
     let url = Url::parse(&format!("https://127.0.0.1:{}/", target.port())).unwrap();
     thread::scope(|scope| {
         let accepted = scope.spawn(|| listener.accept(Some(WAIT)).unwrap());
-        let near = webtransport::Dialer::pinned(&[pin])
-            .unwrap()
-            .dial(Kind::WebTransport, &url, WAIT)
-            .unwrap();
+        let near =
+            webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin])))
+                .build()
+                .unwrap()
+                .dial(Kind::WebTransport, &url, WAIT)
+                .unwrap();
         near.send(b"open").unwrap();
         let far = accepted.join().unwrap();
         assert_eq!(far.receive(Some(WAIT)).unwrap().unwrap(), b"open");
@@ -1032,13 +1118,16 @@ fn a_flood_of_sources_cannot_pass_the_cap_or_keep_a_real_client_out() {
 
 #[test]
 fn a_relay_ends_after_silence() {
-    let port = Port::bind(
-        loopback(),
-        Settings::default().with_relay_idle(Duration::from_millis(300)),
-    )
+    let port = Port::bind(loopback(), {
+        let mut value = Settings::default();
+        value.relay_idle = Duration::from_millis(300);
+        value
+    })
     .unwrap();
     let (tls, _) = tls();
-    let _listener = webtransport::Listener::on_port(&port, tls).unwrap();
+    let _listener = webtransport::Listener::builder(port.clone(), tls)
+        .build()
+        .unwrap();
     let source = UdpSocket::bind(loopback()).unwrap();
     // Let the listener's address reach the worker.
     let deadline = Instant::now() + WAIT;
@@ -1059,7 +1148,9 @@ fn closing_frees_the_number_and_ends_the_channels_reader() {
     let (port, listener) = on_one_number(Settings::default());
     let address = port.local_addr();
     let (tls, _) = tls();
-    let quic = webtransport::Listener::on_port(&port, tls).unwrap();
+    let quic = webtransport::Listener::builder(port.clone(), tls)
+        .build()
+        .unwrap();
     let pair = dial(&listener, Some(Settings::default()));
     let near = pair.near.datagrams().unwrap();
     let far = pair.far.datagrams().unwrap();

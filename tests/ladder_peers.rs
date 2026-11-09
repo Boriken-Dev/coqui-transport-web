@@ -34,7 +34,11 @@ fn loopback() -> SocketAddr {
 }
 
 fn carried() -> Settings {
-    Settings::default().with_signaling(Signaling::ByCaller)
+    {
+        let mut value = Settings::default();
+        value.signaling = Signaling::ByCaller;
+        value
+    }
 }
 
 fn tls() -> (Arc<rustls::ServerConfig>, CertificatePin) {
@@ -65,9 +69,12 @@ fn on_one_number(settings: Settings) -> (Port, websocket::Listener) {
     for _ in 0..64 {
         let port = Port::bind(loopback(), settings).unwrap();
         if TcpListener::bind(port.local_addr()).is_ok()
-            && let Ok(listener) = websocket::Listener::bind(port.local_addr(), None)
+            && let Ok(listener) =
+                websocket::Listener::builder(port.local_addr(), websocket::ServerTls::Plain)
+                    .frames(Frames::Binary)
+                    .webrtc(&port)
+                    .build()
         {
-            let listener = listener.with_frames(Frames::Binary).with_webrtc(&port);
             return (port, listener);
         }
     }
@@ -83,9 +90,10 @@ fn dial_to(listener: &websocket::Listener, to: SocketAddr, settings: Settings) -
     let url = Url::parse(&format!("ws://{to}/")).unwrap();
     thread::scope(|scope| {
         let accepted = scope.spawn(|| listener.accept(Some(WAIT)).unwrap());
-        let near = websocket::Dialer::new()
-            .with_frames(Frames::Binary)
-            .with_webrtc(settings)
+        let near = websocket::Dialer::builder()
+            .frames(Frames::Binary)
+            .webrtc(settings)
+            .build()
             .dial(Kind::WebSocket, &url, WAIT)
             .unwrap();
         Pair {
@@ -229,7 +237,14 @@ fn a_client_cannot_point_the_listener_at_another_address() {
 #[test]
 fn where_any_address_may_check_a_session_holds_to_the_one_it_chose() {
     let elsewhere = UdpSocket::bind(loopback()).unwrap();
-    nominate_elsewhere(carried().with_any_candidate(), &elsewhere);
+    nominate_elsewhere(
+        {
+            let mut settings = carried();
+            settings.any_candidate = true;
+            settings
+        },
+        &elsewhere,
+    );
 }
 
 /// Packets to send, each from the far socket of the nth client.
@@ -315,15 +330,21 @@ impl Drop for Forwarder {
 #[test]
 fn one_client_cannot_take_over_another_s_session() {
     let forwarder = Forwarder::reserve();
-    let port = Port::bind(loopback(), carried().with_public_address(forwarder.address)).unwrap();
+    let port = Port::bind(loopback(), {
+        let mut settings = carried();
+        settings.public_address = Some(forwarder.address);
+        settings
+    })
+    .unwrap();
     *forwarder
         .target
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = port.local_addr();
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_frames(Frames::Binary)
-        .with_webrtc(&port);
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .frames(Frames::Binary)
+        .webrtc(&port)
+        .build()
+        .unwrap();
     let first = dial(&listener, carried());
     let first_credentials = climb(&first);
     let second = dial(&listener, carried());
@@ -365,7 +386,11 @@ fn one_client_cannot_take_over_another_s_session() {
 
 #[test]
 fn one_address_cannot_hold_more_data_channels_than_its_share() {
-    let (port, listener) = on_one_number(Settings::default().with_max_per_address(1));
+    let (port, listener) = on_one_number({
+        let mut value = Settings::default();
+        value.max_per_address = 1;
+        value
+    });
     let first = dial(&listener, Settings::default());
     let first_changes = first.near.datagrams().unwrap().path_changes().unwrap();
     let _ = first.far.datagrams().unwrap();
@@ -395,7 +420,10 @@ fn quic_session(
     let url = Url::parse(&format!("https://127.0.0.1:{}/", port.local_addr().port())).unwrap();
     thread::scope(|scope| {
         let accepted = scope.spawn(|| listener.accept(Some(limit)));
-        let near = webtransport::Dialer::pinned(&[pin])?.dial(Kind::WebTransport, &url, limit);
+        let near =
+            webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin])))
+                .build()?
+                .dial(Kind::WebTransport, &url, limit);
         let far = accepted.join().unwrap();
         let (near, far) = (near?, far?);
         near.send(b"open")?;
@@ -408,9 +436,16 @@ fn quic_session(
 
 #[test]
 fn a_closed_webtransport_session_gives_its_relay_back() {
-    let port = Port::bind(loopback(), Settings::default().with_max_relays(2)).unwrap();
+    let port = Port::bind(loopback(), {
+        let mut value = Settings::default();
+        value.max_relays = 2;
+        value
+    })
+    .unwrap();
     let (tls, pin) = tls();
-    let listener = webtransport::Listener::on_port(&port, tls).unwrap();
+    let listener = webtransport::Listener::builder(port.clone(), tls)
+        .build()
+        .unwrap();
     for _ in 0..2 {
         quic_session(&listener, &port, pin, WAIT).unwrap();
     }
@@ -431,36 +466,69 @@ fn a_closed_webtransport_session_gives_its_relay_back() {
 fn a_second_webtransport_listener_on_one_port_is_refused() {
     let port = Port::bind(loopback(), Settings::default()).unwrap();
     let (tls, _) = tls();
-    let _first = webtransport::Listener::on_port(&port, Arc::clone(&tls)).unwrap();
+    let _first = webtransport::Listener::builder(port.clone(), Arc::clone(&tls))
+        .build()
+        .unwrap();
     assert!(matches!(
-        webtransport::Listener::on_port(&port, tls),
+        webtransport::Listener::builder(port.clone(), tls).build(),
         Err(Failure::Permission)
     ));
 }
 
 #[test]
 fn settings_that_leave_no_room_are_refused() {
-    let none = Settings::default().with_path_mtu(116);
+    let none = {
+        let mut value = Settings::default();
+        value.path_mtu = 116;
+        value
+    };
     assert!(matches!(
         Port::bind(loopback(), none),
         Err(Failure::Unsupported)
     ));
     for broken in [
-        Settings::default().with_attempt(Duration::ZERO),
-        Settings::default().with_max_sessions(0),
-        Settings::default().with_max_relays(0),
-        Settings::default().with_max_per_address(0),
-        Settings::default().with_relay_idle(Duration::ZERO),
+        {
+            let mut value = Settings::default();
+            value.attempt = Duration::ZERO;
+            value
+        },
+        {
+            let mut value = Settings::default();
+            value.max_sessions = 0;
+            value
+        },
+        {
+            let mut value = Settings::default();
+            value.max_relays = 0;
+            value
+        },
+        {
+            let mut value = Settings::default();
+            value.max_per_address = 0;
+            value
+        },
+        {
+            let mut value = Settings::default();
+            value.relay_idle = Duration::ZERO;
+            value
+        },
     ] {
         assert!(
             matches!(Port::bind(loopback(), broken), Err(Failure::Unsupported)),
             "{broken:?}"
         );
     }
-    let listener = websocket::Listener::bind(loopback(), None).unwrap();
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .build()
+        .unwrap();
     let url = Url::parse(&format!("ws://{}/", listener.local_addr().unwrap())).unwrap();
-    let dialed = websocket::Dialer::new()
-        .with_webrtc(Settings::default().with_path_mtu(100))
+    let dialed = websocket::Dialer::builder()
+        .webrtc({
+            let mut value = Settings::default();
+            value.path_mtu = 100;
+            value
+        })
+        .build()
         .dial(Kind::WebSocket, &url, Duration::from_secs(2));
     assert!(matches!(dialed, Err(Failure::Unsupported)));
 }
@@ -483,7 +551,9 @@ impl wtransport::quinn::TokenStore for Tokens {
 fn webtransport_on_a_port_hands_out_no_address_token() {
     let port = Port::bind(loopback(), Settings::default()).unwrap();
     let (tls, pin) = tls();
-    let listener = webtransport::Listener::on_port(&port, tls).unwrap();
+    let listener = webtransport::Listener::builder(port.clone(), tls)
+        .build()
+        .unwrap();
     thread::spawn(move || {
         let _ = listener.accept(Some(Duration::from_secs(10)));
     });

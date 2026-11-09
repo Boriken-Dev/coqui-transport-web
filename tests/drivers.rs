@@ -104,7 +104,9 @@ fn plain_ws_url(address: SocketAddr) -> Url {
 
 #[test]
 fn plain_websocket_carries_ordered_messages_on_loopback() {
-    let listener = websocket::Listener::bind(loopback(), None).unwrap();
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .build()
+        .unwrap();
     let url = plain_ws_url(listener.local_addr().unwrap());
     let server = thread::spawn(move || {
         let channel = listener.accept(Some(WAIT)).unwrap();
@@ -113,7 +115,8 @@ fn plain_websocket_carries_ordered_messages_on_loopback() {
         // The peer's orderly close is the end of the stream, not a failure.
         assert_eq!(channel.receive(Some(WAIT)).unwrap(), None);
     });
-    let client = websocket::Dialer::new()
+    let client = websocket::Dialer::builder()
+        .build()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     round_trip(&client);
@@ -125,7 +128,9 @@ fn plain_websocket_carries_ordered_messages_on_loopback() {
 fn a_plain_websocket_listener_beyond_loopback_is_refused() {
     let address: SocketAddr = "0.0.0.0:0".parse().unwrap();
     assert_eq!(
-        websocket::Listener::bind(address, None).unwrap_err(),
+        websocket::Listener::builder(address, websocket::ServerTls::Plain)
+            .build()
+            .unwrap_err(),
         Failure::Permission
     );
 }
@@ -133,7 +138,12 @@ fn a_plain_websocket_listener_beyond_loopback_is_refused() {
 #[test]
 fn wss_verifies_the_certificate_and_a_stranger_is_rejected() {
     let trusted = identity();
-    let listener = websocket::Listener::bind(loopback(), Some(server_tls(&trusted))).unwrap();
+    let listener = websocket::Listener::builder(
+        loopback(),
+        websocket::ServerTls::Config(server_tls(&trusted)),
+    )
+    .build()
+    .unwrap();
     let port = listener.local_addr().unwrap().port();
     let url = Url::parse(&format!("wss://localhost:{port}/channel")).unwrap();
     let server = thread::spawn(move || {
@@ -147,12 +157,14 @@ fn wss_verifies_the_certificate_and_a_stranger_is_rejected() {
         echo_once(&channel);
     });
     let stranger = identity();
-    let refused = websocket::Dialer::new()
-        .with_tls(client_tls(&stranger))
+    let refused = websocket::Dialer::builder()
+        .tls(client_tls(&stranger))
+        .build()
         .dial(Kind::WebSocket, &url, WAIT);
     assert_eq!(refused.unwrap_err(), Failure::Certificate);
-    let client = websocket::Dialer::new()
-        .with_tls(client_tls(&trusted))
+    let client = websocket::Dialer::builder()
+        .tls(client_tls(&trusted))
+        .build()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     round_trip(&client);
@@ -162,22 +174,31 @@ fn wss_verifies_the_certificate_and_a_stranger_is_rejected() {
 #[test]
 fn wss_with_no_tls_configuration_fails_closed() {
     let url = Url::parse("wss://localhost:1/").unwrap();
-    let refused = websocket::Dialer::new().dial(Kind::WebSocket, &url, Duration::from_secs(2));
+    let refused =
+        websocket::Dialer::builder()
+            .build()
+            .dial(Kind::WebSocket, &url, Duration::from_secs(2));
     assert!(refused.is_err());
 }
 
 #[test]
 fn a_websocket_message_over_the_limit_ends_the_channel_as_a_protocol_failure() {
-    let limits = Limits::default().with_max_message(16);
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_limits(limits);
+    let limits = {
+        let mut value = Limits::default();
+        value.max_message = 16;
+        value
+    };
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .limits(limits)
+        .build()
+        .unwrap();
     let url = plain_ws_url(listener.local_addr().unwrap());
     let server = thread::spawn(move || {
         let channel = listener.accept(Some(WAIT)).unwrap();
         channel.receive(Some(WAIT))
     });
-    let client = websocket::Dialer::new()
+    let client = websocket::Dialer::builder()
+        .build()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     client.send(&[b'x'; 64]).unwrap();
@@ -186,14 +207,17 @@ fn a_websocket_message_over_the_limit_ends_the_channel_as_a_protocol_failure() {
 
 #[test]
 fn a_binary_websocket_message_is_refused_on_a_text_channel() {
-    let listener = websocket::Listener::bind(loopback(), None).unwrap();
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .build()
+        .unwrap();
     let url = plain_ws_url(listener.local_addr().unwrap());
     let server = thread::spawn(move || {
         let channel = listener.accept(Some(WAIT)).unwrap();
         channel.receive(Some(WAIT))
     });
-    let client = websocket::Dialer::new()
-        .with_frames(Frames::Binary)
+    let client = websocket::Dialer::builder()
+        .frames(Frames::Binary)
+        .build()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     client.send(&[0xff, 0x00]).unwrap();
@@ -202,10 +226,13 @@ fn a_binary_websocket_message_is_refused_on_a_text_channel() {
 
 #[test]
 fn invalid_text_is_refused_before_it_reaches_the_wire() {
-    let listener = websocket::Listener::bind(loopback(), None).unwrap();
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .build()
+        .unwrap();
     let url = plain_ws_url(listener.local_addr().unwrap());
     let server = thread::spawn(move || listener.accept(Some(WAIT)).map(|_| ()));
-    let client = websocket::Dialer::new()
+    let client = websocket::Dialer::builder()
+        .build()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     assert_eq!(client.send(&[0xff]), Err(Failure::Protocol));
@@ -216,9 +243,10 @@ fn invalid_text_is_refused_before_it_reaches_the_wire() {
 #[test]
 fn a_listed_origin_is_required_when_origins_are_set() {
     use tungstenite::client::IntoClientRequest;
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_origins(["https://allowed.example".to_owned()]);
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .origins(["https://allowed.example".to_owned()])
+        .build()
+        .unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let refused = listener.accept(Some(WAIT)).map(|_| ());
@@ -244,9 +272,10 @@ fn a_listed_origin_is_required_when_origins_are_set() {
 
 #[test]
 fn a_denied_source_never_starts_a_handshake() {
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_admission(|_| false);
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .admission(|_| false)
+        .build()
+        .unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         listener
@@ -254,7 +283,11 @@ fn a_denied_source_never_starts_a_handshake() {
             .map(|_| ())
     });
     let url = plain_ws_url(address);
-    let refused = websocket::Dialer::new().dial(Kind::WebSocket, &url, Duration::from_millis(500));
+    let refused = websocket::Dialer::builder().build().dial(
+        Kind::WebSocket,
+        &url,
+        Duration::from_millis(500),
+    );
     assert!(refused.is_err());
     assert_eq!(server.join().unwrap(), Err(Failure::Timeout));
 }
@@ -282,7 +315,9 @@ fn a_dialer_header_and_the_path_reach_the_server_and_a_value_never_prints() {
         seen.unwrap()
     });
     let url = Url::parse(&format!("ws://127.0.0.1:{port}/v1/assistant/agent-link")).unwrap();
-    let mut dialer = websocket::Dialer::new().with_header("authorization", "Bearer secret-token");
+    let mut dialer = websocket::Dialer::builder()
+        .header("authorization", "Bearer secret-token")
+        .build();
     assert!(!format!("{dialer:?}").contains("secret-token"));
     let _channel = dialer.dial(Kind::WebSocket, &url, WAIT).unwrap();
     let (path, header) = server.join().unwrap();
@@ -292,7 +327,9 @@ fn a_dialer_header_and_the_path_reach_the_server_and_a_value_never_prints() {
 
 #[test]
 fn close_delivers_what_was_queued_before_it_returns() {
-    let listener = websocket::Listener::bind(loopback(), None).unwrap();
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .build()
+        .unwrap();
     let url = plain_ws_url(listener.local_addr().unwrap());
     let server = thread::spawn(move || {
         let channel = listener.accept(Some(WAIT)).unwrap();
@@ -302,7 +339,8 @@ fn close_delivers_what_was_queued_before_it_returns() {
         }
         got
     });
-    let client = websocket::Dialer::new()
+    let client = websocket::Dialer::builder()
+        .build()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     let sent: Vec<Vec<u8>> = (0..20).map(|n| format!("{n}").into_bytes()).collect();
@@ -316,7 +354,11 @@ fn close_delivers_what_was_queued_before_it_returns() {
 #[test]
 fn plain_websocket_from_a_dialer_is_refused_beyond_loopback() {
     let url = Url::parse("ws://192.0.2.1:9/").unwrap();
-    let refused = websocket::Dialer::new().dial(Kind::WebSocket, &url, Duration::from_millis(200));
+    let refused = websocket::Dialer::builder().build().dial(
+        Kind::WebSocket,
+        &url,
+        Duration::from_millis(200),
+    );
     assert!(refused.is_err());
     // A listener answering on another address of this machine is still not loopback by name.
     let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
@@ -328,7 +370,11 @@ fn plain_websocket_from_a_dialer_is_refused_beyond_loopback() {
         && !address.ip().is_unspecified()
     {
         let url = Url::parse(&format!("ws://{}:{port}/", address.ip())).unwrap();
-        let refused = websocket::Dialer::new().dial(Kind::WebSocket, &url, Duration::from_secs(2));
+        let refused = websocket::Dialer::builder().build().dial(
+            Kind::WebSocket,
+            &url,
+            Duration::from_secs(2),
+        );
         assert_eq!(refused.unwrap_err(), Failure::Permission);
     }
 }
@@ -344,13 +390,26 @@ fn beyond_loopback() -> Option<std::net::IpAddr> {
 #[test]
 fn a_plain_websocket_listener_beyond_loopback_is_a_choice_it_reports() {
     let anywhere: SocketAddr = "0.0.0.0:0".parse().unwrap();
-    let listener = websocket::Listener::bind_plain(anywhere).unwrap();
+    let listener = websocket::Listener::builder(anywhere, websocket::ServerTls::Plain)
+        .plain_beyond_loopback(true)
+        .build()
+        .unwrap();
     assert!(listener.plain_beyond_loopback());
     assert!(format!("{listener:?}").contains("plain_beyond_loopback: true"));
     for local in [
-        websocket::Listener::bind_plain(loopback()).unwrap(),
-        websocket::Listener::bind(loopback(), None).unwrap(),
-        websocket::Listener::bind(anywhere, Some(server_tls(&identity()))).unwrap(),
+        websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+            .plain_beyond_loopback(true)
+            .build()
+            .unwrap(),
+        websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+            .build()
+            .unwrap(),
+        websocket::Listener::builder(
+            anywhere,
+            websocket::ServerTls::Config(server_tls(&identity())),
+        )
+        .build()
+        .unwrap(),
     ] {
         assert!(!local.plain_beyond_loopback(), "{local:?}");
     }
@@ -358,27 +417,35 @@ fn a_plain_websocket_listener_beyond_loopback_is_a_choice_it_reports() {
 
 #[test]
 fn a_dialer_opens_plain_websocket_beyond_loopback_only_when_told_to() {
-    let refused = websocket::Dialer::new().dial(
+    let refused = websocket::Dialer::builder().build().dial(
         Kind::WebSocket,
         &Url::parse("ws://192.0.2.1:9/").unwrap(),
         Duration::from_secs(5),
     );
     assert_eq!(refused.unwrap_err(), Failure::Permission);
-    assert!(!websocket::Dialer::new().plain_beyond_loopback());
+    assert!(!websocket::Dialer::builder().build().plain_beyond_loopback());
     let Some(address) = beyond_loopback() else {
         eprintln!("no address beyond loopback with a route: the dial itself is not tried");
         return;
     };
-    let listener = websocket::Listener::bind_plain(SocketAddr::new(address, 0)).unwrap();
+    let listener =
+        websocket::Listener::builder(SocketAddr::new(address, 0), websocket::ServerTls::Plain)
+            .plain_beyond_loopback(true)
+            .build()
+            .unwrap();
     let url = plain_ws_url(listener.local_addr().unwrap());
     let server = thread::spawn(move || {
         let channel = listener.accept(Some(WAIT)).unwrap();
         echo_once(&channel);
         echo_once(&channel);
     });
-    let refused = websocket::Dialer::new().dial(Kind::WebSocket, &url, WAIT);
+    let refused = websocket::Dialer::builder()
+        .build()
+        .dial(Kind::WebSocket, &url, WAIT);
     assert_eq!(refused.unwrap_err(), Failure::Permission);
-    let mut dialer = websocket::Dialer::new().with_plain_beyond_loopback();
+    let mut dialer = websocket::Dialer::builder()
+        .plain_beyond_loopback(true)
+        .build();
     assert!(dialer.plain_beyond_loopback());
     assert!(format!("{dialer:?}").contains("plain_beyond_loopback: true"));
     let client = dialer.dial(Kind::WebSocket, &url, WAIT).unwrap();
@@ -389,10 +456,15 @@ fn a_dialer_opens_plain_websocket_beyond_loopback_only_when_told_to() {
 #[test]
 fn a_peer_dribbling_its_handshake_gets_no_longer_than_the_total_limit_and_holds_up_nobody() {
     use std::io::Write;
-    let limits = Limits::default().with_handshake(Duration::from_millis(600));
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_limits(limits);
+    let limits = {
+        let mut value = Limits::default();
+        value.handshake = Duration::from_millis(600);
+        value
+    };
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .limits(limits)
+        .build()
+        .unwrap();
     let address = listener.local_addr().unwrap();
     let mut slow = std::net::TcpStream::connect(address).unwrap();
     let dribbling = thread::spawn(move || {
@@ -417,19 +489,25 @@ fn a_peer_dribbling_its_handshake_gets_no_longer_than_the_total_limit_and_holds_
 #[test]
 fn a_peer_that_goes_silent_is_noticed_and_a_live_one_is_not() {
     let idle = Duration::from_millis(200);
-    let limits = Limits::default().with_idle(idle);
+    let limits = {
+        let mut value = Limits::default();
+        value.idle = idle;
+        value
+    };
     // Two live drivers answer each other's pings, so silence between messages ends nothing.
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_limits(limits);
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .limits(limits)
+        .build()
+        .unwrap();
     let url = plain_ws_url(listener.local_addr().unwrap());
     let server = thread::spawn(move || {
         let channel = listener.accept(Some(WAIT)).unwrap();
         echo_once(&channel);
         channel
     });
-    let client = websocket::Dialer::new()
-        .with_limits(limits)
+    let client = websocket::Dialer::builder()
+        .limits(limits)
+        .build()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     thread::sleep(idle * 4);
@@ -446,8 +524,9 @@ fn a_peer_that_goes_silent_is_noticed_and_a_live_one_is_not() {
         thread::sleep(Duration::from_secs(3));
         drop(socket);
     });
-    let client = websocket::Dialer::new()
-        .with_limits(limits)
+    let client = websocket::Dialer::builder()
+        .limits(limits)
+        .build()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     assert_eq!(client.receive(Some(WAIT)), Err(Failure::NoProgress));
@@ -457,12 +536,16 @@ fn a_peer_that_goes_silent_is_noticed_and_a_live_one_is_not() {
 
 #[test]
 fn a_peer_that_stops_reading_ends_the_channel_with_no_progress() {
-    let limits = Limits::default()
-        .with_send(Duration::from_millis(300))
-        .with_max_message(1024 * 1024);
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_limits(limits);
+    let limits = {
+        let mut value = Limits::default();
+        value.send = Duration::from_millis(300);
+        value.max_message = 1024 * 1024;
+        value
+    };
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .limits(limits)
+        .build()
+        .unwrap();
     let url = plain_ws_url(listener.local_addr().unwrap());
     let raw = thread::spawn(move || {
         let tcp = std::net::TcpStream::connect(url.socket_addrs(|| None).unwrap()[0]).unwrap();
@@ -492,10 +575,15 @@ fn a_peer_that_stops_reading_ends_the_channel_with_no_progress() {
 
 #[test]
 fn a_raised_limit_takes_effect_both_ways_and_a_lowered_one_refuses() {
-    let limits = Limits::default().with_max_message(16);
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_limits(limits);
+    let limits = {
+        let mut value = Limits::default();
+        value.max_message = 16;
+        value
+    };
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .limits(limits)
+        .build()
+        .unwrap();
     let url = plain_ws_url(listener.local_addr().unwrap());
     let server = thread::spawn(move || {
         let channel = listener.accept(Some(WAIT)).unwrap();
@@ -508,7 +596,8 @@ fn a_raised_limit_takes_effect_both_ways_and_a_lowered_one_refuses() {
         channel.send(b"lowered").unwrap();
         channel.receive(Some(WAIT))
     });
-    let client = websocket::Dialer::new()
+    let client = websocket::Dialer::builder()
+        .build()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     assert_eq!(client.receive(Some(WAIT)).unwrap().unwrap(), b"raised");
@@ -520,12 +609,19 @@ fn a_raised_limit_takes_effect_both_ways_and_a_lowered_one_refuses() {
 
 #[test]
 fn queued_bytes_over_the_budget_are_refused_rather_than_held() {
-    let limits = Limits::default().with_queued_bytes(8);
-    let listener = websocket::Listener::bind(loopback(), None).unwrap();
+    let limits = {
+        let mut value = Limits::default();
+        value.queued_bytes = 8;
+        value
+    };
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .build()
+        .unwrap();
     let url = plain_ws_url(listener.local_addr().unwrap());
     let _server = thread::spawn(move || listener.accept(Some(WAIT)).map(|_| ()));
-    let client = websocket::Dialer::new()
-        .with_limits(limits)
+    let client = websocket::Dialer::builder()
+        .limits(limits)
+        .build()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     assert_eq!(client.send(&[b'x'; 64]), Err(Failure::NoProgress));
@@ -533,7 +629,9 @@ fn queued_bytes_over_the_budget_are_refused_rather_than_held() {
 
 #[test]
 fn a_receive_timeout_leaves_the_channel_usable() {
-    let listener = websocket::Listener::bind(loopback(), None).unwrap();
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .build()
+        .unwrap();
     let url = plain_ws_url(listener.local_addr().unwrap());
     // The client sends only once the timeout has happened, whatever the machine's speed.
     let (timed_out, wait_for_it) = std::sync::mpsc::channel();
@@ -546,7 +644,8 @@ fn a_receive_timeout_leaves_the_channel_usable() {
         timed_out.send(()).unwrap();
         echo_once(&channel);
     });
-    let client = websocket::Dialer::new()
+    let client = websocket::Dialer::builder()
+        .build()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     wait_for_it.recv_timeout(WAIT).unwrap();
@@ -557,10 +656,15 @@ fn a_receive_timeout_leaves_the_channel_usable() {
 
 #[test]
 fn a_slow_reader_does_not_lose_messages_past_the_pending_bound() {
-    let limits = Limits::default().with_pending(2);
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_limits(limits);
+    let limits = {
+        let mut value = Limits::default();
+        value.pending = 2;
+        value
+    };
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .limits(limits)
+        .build()
+        .unwrap();
     let url = plain_ws_url(listener.local_addr().unwrap());
     let server = thread::spawn(move || {
         let channel = listener.accept(Some(WAIT)).unwrap();
@@ -569,7 +673,8 @@ fn a_slow_reader_does_not_lose_messages_past_the_pending_bound() {
             .map(|_| channel.receive(Some(WAIT)).unwrap().unwrap())
             .collect::<Vec<_>>()
     });
-    let client = websocket::Dialer::new()
+    let client = websocket::Dialer::builder()
+        .build()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     let sent: Vec<Vec<u8>> = (0..50).map(|n| format!("{n}").into_bytes()).collect();
@@ -582,7 +687,9 @@ fn a_slow_reader_does_not_lose_messages_past_the_pending_bound() {
 #[test]
 fn webtransport_carries_ordered_messages_with_a_pinned_certificate() {
     let id = identity();
-    let listener = webtransport::Listener::bind(loopback(), server_tls(&id)).unwrap();
+    let listener = webtransport::Listener::builder(loopback(), server_tls(&id))
+        .build()
+        .unwrap();
     let port = listener.local_addr().port();
     let url = Url::parse(&format!("https://127.0.0.1:{port}/channel")).unwrap();
     let server = thread::spawn(move || {
@@ -591,10 +698,12 @@ fn webtransport_carries_ordered_messages_with_a_pinned_certificate() {
         echo_once(&channel);
         channel
     });
-    let client = webtransport::Dialer::pinned(&[pin(&id)])
-        .unwrap()
-        .dial(Kind::WebTransport, &url, WAIT)
-        .unwrap();
+    let client =
+        webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin(&id)])))
+            .build()
+            .unwrap()
+            .dial(Kind::WebTransport, &url, WAIT)
+            .unwrap();
     round_trip(&client);
     client.close();
     drop(server.join().unwrap());
@@ -605,19 +714,22 @@ fn webtransport_pair(
     limits: coqui_transport_web::Limits,
 ) -> (webtransport::Channel, webtransport::Channel) {
     let id = identity();
-    let listener = webtransport::Listener::bind(loopback(), server_tls(&id))
-        .unwrap()
-        .with_limits(limits);
+    let listener = webtransport::Listener::builder(loopback(), server_tls(&id))
+        .limits(limits)
+        .build()
+        .unwrap();
     let port = listener.local_addr().port();
     let accepted = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
-    let client = webtransport::Dialer::pinned(&[pin(&id)])
-        .unwrap()
-        .dial(
-            Kind::WebTransport,
-            &Url::parse(&format!("https://127.0.0.1:{port}/channel")).unwrap(),
-            WAIT,
-        )
-        .unwrap();
+    let client =
+        webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin(&id)])))
+            .build()
+            .unwrap()
+            .dial(
+                Kind::WebTransport,
+                &Url::parse(&format!("https://127.0.0.1:{port}/channel")).unwrap(),
+                WAIT,
+            )
+            .unwrap();
     // A client has nothing to accept until its stream carries something.
     client.send(b"open").unwrap();
     let server = accepted.join().unwrap();
@@ -664,8 +776,11 @@ fn a_datagram_too_large_is_refused_and_the_channel_goes_on() {
 
 #[test]
 fn a_reader_behind_loses_datagrams_and_can_see_how_many() {
-    let (client, server) =
-        webtransport_pair(coqui_transport_web::Limits::default().with_pending_datagrams(2));
+    let (client, server) = webtransport_pair({
+        let mut value = coqui_transport_web::Limits::default();
+        value.pending_datagrams = 2;
+        value
+    });
     let (near, far) = (client.datagrams().unwrap(), server.datagrams().unwrap());
     let until = std::time::Instant::now() + WAIT;
     while far.dropped() == 0 {
@@ -705,25 +820,23 @@ fn datagrams_end_with_the_channel() {
 fn websocket_pair(
     limits: coqui_transport_web::Limits,
     frames: Frames,
-    dialer: impl FnOnce(websocket::Dialer) -> websocket::Dialer,
+    dialer: impl FnOnce(websocket::DialerBuilder) -> websocket::DialerBuilder,
 ) -> (websocket::Channel, websocket::Channel) {
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_limits(limits)
-        .with_frames(frames);
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .limits(limits)
+        .frames(frames)
+        .build()
+        .unwrap();
     let port = listener.local_addr().unwrap().port();
     let accepted = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
-    let client = dialer(
-        websocket::Dialer::new()
-            .with_limits(limits)
-            .with_frames(frames),
-    )
-    .dial(
-        Kind::WebSocket,
-        &Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap(),
-        WAIT,
-    )
-    .unwrap();
+    let client = dialer(websocket::Dialer::builder().limits(limits).frames(frames))
+        .build()
+        .dial(
+            Kind::WebSocket,
+            &Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap(),
+            WAIT,
+        )
+        .unwrap();
     (client, accepted.join().unwrap())
 }
 
@@ -740,9 +853,10 @@ fn a_websocket_has_no_datagrams_unless_asked_and_its_wire_is_unchanged() {
     assert!(boxed.datagrams().is_none());
 
     // A peer that knows nothing of tags sees a body as it was, and is seen as it was.
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_frames(Frames::Binary);
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .frames(Frames::Binary)
+        .build()
+        .unwrap();
     let port = listener.local_addr().unwrap().port();
     let accepted = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
     let (mut raw, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}/")).unwrap();
@@ -757,11 +871,10 @@ fn a_websocket_has_no_datagrams_unless_asked_and_its_wire_is_unchanged() {
 #[test]
 fn websocket_datagrams_go_both_ways_beside_the_messages_in_either_frame_kind() {
     for frames in [Frames::Binary, Frames::Text] {
-        let (client, server) = websocket_pair(
-            coqui_transport_web::Limits::default(),
-            frames,
-            websocket::Dialer::with_datagrams,
-        );
+        let (client, server) =
+            websocket_pair(coqui_transport_web::Limits::default(), frames, |builder| {
+                builder.datagrams(true)
+            });
         let (near, far) = (client.datagrams().unwrap(), server.datagrams().unwrap());
         assert_eq!(near.delivery(), coqui_transport_web::Delivery::OverStream);
         assert_eq!(near.max_size(), Some(64 * 1024));
@@ -780,9 +893,13 @@ fn websocket_datagrams_go_both_ways_beside_the_messages_in_either_frame_kind() {
 
 #[test]
 fn a_websocket_message_at_its_limit_still_fits_with_the_tag() {
-    let limits = coqui_transport_web::Limits::default().with_max_message(5);
+    let limits = {
+        let mut value = coqui_transport_web::Limits::default();
+        value.max_message = 5;
+        value
+    };
     let (client, server) =
-        websocket_pair(limits, Frames::Binary, websocket::Dialer::with_datagrams);
+        websocket_pair(limits, Frames::Binary, |builder| builder.datagrams(true));
     client.send(b"12345").unwrap();
     assert_eq!(server.receive(Some(WAIT)).unwrap().unwrap(), b"12345");
     assert_eq!(client.send(b"123456"), Err(Failure::Protocol));
@@ -790,9 +907,13 @@ fn a_websocket_message_at_its_limit_still_fits_with_the_tag() {
 
 #[test]
 fn a_websocket_datagram_size_is_a_setting_with_no_floor_and_it_binds_both_ways() {
-    let limits = coqui_transport_web::Limits::default().with_websocket_datagram(4);
+    let limits = {
+        let mut value = coqui_transport_web::Limits::default();
+        value.websocket_datagram = 4;
+        value
+    };
     let (client, server) =
-        websocket_pair(limits, Frames::Binary, websocket::Dialer::with_datagrams);
+        websocket_pair(limits, Frames::Binary, |builder| builder.datagrams(true));
     let (near, far) = (client.datagrams().unwrap(), server.datagrams().unwrap());
     assert_eq!(near.max_size(), Some(4));
     assert_eq!(near.send(b"12345"), Err(Failure::Protocol));
@@ -801,16 +922,18 @@ fn a_websocket_datagram_size_is_a_setting_with_no_floor_and_it_binds_both_ways()
 
     // A peer whose own setting is larger: the extra is discarded and counted, and nothing else is harmed.
     let wide = coqui_transport_web::Limits::default();
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_limits(limits)
-        .with_frames(Frames::Binary);
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .limits(limits)
+        .frames(Frames::Binary)
+        .build()
+        .unwrap();
     let port = listener.local_addr().unwrap().port();
     let accepted = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
-    let wider = websocket::Dialer::new()
-        .with_limits(wide)
-        .with_frames(Frames::Binary)
-        .with_datagrams()
+    let wider = websocket::Dialer::builder()
+        .limits(wide)
+        .frames(Frames::Binary)
+        .datagrams(true)
+        .build()
         .dial(
             Kind::WebSocket,
             &Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap(),
@@ -825,8 +948,12 @@ fn a_websocket_datagram_size_is_a_setting_with_no_floor_and_it_binds_both_ways()
     assert_eq!(there.dropped(), 1);
     assert_eq!(far.dropped(), 0);
 
-    let none = coqui_transport_web::Limits::default().with_websocket_datagram(0);
-    let (client, _server) = websocket_pair(none, Frames::Binary, websocket::Dialer::with_datagrams);
+    let none = {
+        let mut value = coqui_transport_web::Limits::default();
+        value.websocket_datagram = 0;
+        value
+    };
+    let (client, _server) = websocket_pair(none, Frames::Binary, |builder| builder.datagrams(true));
     let datagrams = client.datagrams().unwrap();
     assert_eq!(datagrams.send(b"x"), Err(Failure::Protocol));
     datagrams.send(b"").unwrap();
@@ -835,9 +962,13 @@ fn a_websocket_datagram_size_is_a_setting_with_no_floor_and_it_binds_both_ways()
 #[test]
 fn websocket_datagrams_nobody_asked_for_are_not_held() {
     let (client, server) = websocket_pair(
-        coqui_transport_web::Limits::default().with_pending_datagrams(1),
+        {
+            let mut value = coqui_transport_web::Limits::default();
+            value.pending_datagrams = 1;
+            value
+        },
         Frames::Binary,
-        websocket::Dialer::with_datagrams,
+        |builder| builder.datagrams(true),
     );
     let near = client.datagrams().unwrap();
     near.send(b"one").unwrap();
@@ -862,9 +993,10 @@ fn websocket_datagrams_nobody_asked_for_are_not_held() {
 
 #[test]
 fn a_datagram_from_a_peer_cannot_arrive_as_a_message_or_break_the_channel() {
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_frames(Frames::Binary);
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .frames(Frames::Binary)
+        .build()
+        .unwrap();
     let port = listener.local_addr().unwrap().port();
     let accepted = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
     let mut request = tungstenite::client::IntoClientRequest::into_client_request(format!(
@@ -898,7 +1030,7 @@ fn a_server_that_does_not_agree_is_a_failure_a_caller_can_read() {
         let (stream, _) = server.accept().unwrap();
         let _ = tungstenite::accept(stream);
     });
-    let refused = websocket::Dialer::new().with_datagrams().dial(
+    let refused = websocket::Dialer::builder().datagrams(true).build().dial(
         Kind::WebSocket,
         &Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap(),
         WAIT,
@@ -911,7 +1043,7 @@ fn websocket_datagrams_end_with_the_channel() {
     let (client, server) = websocket_pair(
         coqui_transport_web::Limits::default(),
         Frames::Binary,
-        websocket::Dialer::with_datagrams,
+        |builder| builder.datagrams(true),
     );
     let far = server.datagrams().unwrap();
     client.close();
@@ -923,10 +1055,15 @@ fn websocket_datagrams_end_with_the_channel() {
 #[test]
 fn webtransport_and_websocket_serve_one_port_number_on_one_address() {
     let id = identity();
-    let tcp = websocket::Listener::bind(loopback(), Some(server_tls(&id))).unwrap();
+    let tcp =
+        websocket::Listener::builder(loopback(), websocket::ServerTls::Config(server_tls(&id)))
+            .build()
+            .unwrap();
     let port = tcp.local_addr().unwrap().port();
-    let udp = webtransport::Listener::bind(SocketAddr::new(loopback().ip(), port), server_tls(&id))
-        .unwrap();
+    let udp =
+        webtransport::Listener::builder(SocketAddr::new(loopback().ip(), port), server_tls(&id))
+            .build()
+            .unwrap();
     assert_eq!(udp.local_addr().port(), port);
     let endpoints = Endpoints::builder()
         .address(format!("https://127.0.0.1:{port}/channel"))
@@ -944,17 +1081,20 @@ fn webtransport_and_websocket_serve_one_port_number_on_one_address() {
         echo_once(&channel);
         channel
     });
-    let quic = webtransport::Dialer::pinned(&[pin(&id)])
-        .unwrap()
-        .dial(Kind::WebTransport, endpoints.webtransport().unwrap(), WAIT)
-        .unwrap();
+    let quic =
+        webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin(&id)])))
+            .build()
+            .unwrap()
+            .dial(Kind::WebTransport, endpoints.webtransport().unwrap(), WAIT)
+            .unwrap();
     round_trip(&quic);
     quic.close();
     // The certificate names `localhost`, which only WebSocket's check looks at.
     let mut named = endpoints.websocket().unwrap().clone();
     named.set_host(Some("localhost")).unwrap();
-    let socket = websocket::Dialer::new()
-        .with_tls(client_tls(&id))
+    let socket = websocket::Dialer::builder()
+        .tls(client_tls(&id))
+        .build()
         .dial(Kind::WebSocket, &named, WAIT)
         .unwrap();
     round_trip(&socket);
@@ -1004,10 +1144,12 @@ fn a_server_that_does_not_offer_webtransport_is_a_reason_to_try_websocket() {
     for (alpn, not_found) in [(&b"something-else"[..], false), (&b"h3"[..], true)] {
         let (_running, port) = other_quic_server(&id, alpn, not_found);
         let url = Url::parse(&format!("https://127.0.0.1:{port}/channel")).unwrap();
-        let failure = webtransport::Dialer::pinned(&[pin(&id)])
-            .unwrap()
-            .dial(Kind::WebTransport, &url, WAIT)
-            .unwrap_err();
+        let failure =
+            webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin(&id)])))
+                .build()
+                .unwrap()
+                .dial(Kind::WebTransport, &url, WAIT)
+                .unwrap_err();
         assert_eq!(
             failure.recovery(Kind::WebTransport, Phase::Opening, true),
             Recovery::VerifyFallback,
@@ -1019,35 +1161,40 @@ fn a_server_that_does_not_offer_webtransport_is_a_reason_to_try_websocket() {
 #[test]
 fn webtransport_refuses_a_certificate_with_another_hash() {
     let id = identity();
-    let listener = webtransport::Listener::bind(loopback(), server_tls(&id)).unwrap();
+    let listener = webtransport::Listener::builder(loopback(), server_tls(&id))
+        .build()
+        .unwrap();
     let port = listener.local_addr().port();
     let url = Url::parse(&format!("https://127.0.0.1:{port}/channel")).unwrap();
     let _server = thread::spawn(move || {
         let _ = listener.accept(Some(Duration::from_secs(5)));
     });
     let wrong = CertificatePin::from_bytes([0x11; 32]);
-    let refused = webtransport::Dialer::pinned(&[wrong]).unwrap().dial(
-        Kind::WebTransport,
-        &url,
-        Duration::from_secs(5),
-    );
+    let refused =
+        webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([wrong])))
+            .build()
+            .unwrap()
+            .dial(Kind::WebTransport, &url, Duration::from_secs(5));
     assert_eq!(refused.unwrap_err(), Failure::Certificate);
 }
 
 #[test]
 fn a_source_webtransport_admission_refuses_is_told_so_and_does_not_fall_back() {
     let id = identity();
-    let listener = webtransport::Listener::bind(loopback(), server_tls(&id))
-        .unwrap()
-        .with_admission(|_| false);
+    let listener = webtransport::Listener::builder(loopback(), server_tls(&id))
+        .admission(|_| false)
+        .build()
+        .unwrap();
     let port = listener.local_addr().port();
     let serving = thread::spawn(move || listener.next(Some(Duration::from_secs(3))).map(|_| ()));
     let url = Url::parse(&format!("https://127.0.0.1:{port}/channel")).unwrap();
     let started = Instant::now();
-    let refused = webtransport::Dialer::pinned(&[pin(&id)])
-        .unwrap()
-        .dial(Kind::WebTransport, &url, WAIT)
-        .unwrap_err();
+    let refused =
+        webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin(&id)])))
+            .build()
+            .unwrap()
+            .dial(Kind::WebTransport, &url, WAIT)
+            .unwrap_err();
     assert_eq!(refused, Failure::Permission);
     assert!(started.elapsed() < Duration::from_secs(3), "it was told");
     assert_eq!(
@@ -1060,20 +1207,27 @@ fn a_source_webtransport_admission_refuses_is_told_so_and_does_not_fall_back() {
 #[test]
 fn webtransport_message_over_the_limit_ends_the_channel_as_a_protocol_failure() {
     let id = identity();
-    let limits = Limits::default().with_max_message(8);
-    let listener = webtransport::Listener::bind(loopback(), server_tls(&id))
-        .unwrap()
-        .with_limits(limits);
+    let limits = {
+        let mut value = Limits::default();
+        value.max_message = 8;
+        value
+    };
+    let listener = webtransport::Listener::builder(loopback(), server_tls(&id))
+        .limits(limits)
+        .build()
+        .unwrap();
     let port = listener.local_addr().port();
     let url = Url::parse(&format!("https://127.0.0.1:{port}/channel")).unwrap();
     let server = thread::spawn(move || {
         let channel = listener.accept(Some(WAIT)).unwrap();
         channel.receive(Some(WAIT))
     });
-    let client = webtransport::Dialer::pinned(&[pin(&id)])
-        .unwrap()
-        .dial(Kind::WebTransport, &url, WAIT)
-        .unwrap();
+    let client =
+        webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin(&id)])))
+            .build()
+            .unwrap()
+            .dial(Kind::WebTransport, &url, WAIT)
+            .unwrap();
     client.send(&[b'x'; 64]).unwrap();
     assert_eq!(server.join().unwrap(), Err(Failure::Protocol));
 }
@@ -1102,7 +1256,9 @@ impl Dialer for Both {
 
 #[test]
 fn a_blocked_webtransport_path_falls_back_to_websocket() {
-    let listener = websocket::Listener::bind(loopback(), None).unwrap();
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .build()
+        .unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let channel = listener.accept(Some(WAIT)).unwrap();
@@ -1119,8 +1275,12 @@ fn a_blocked_webtransport_path_falls_back_to_websocket() {
         .build()
         .unwrap();
     let mut dialer = Both {
-        websocket: websocket::Dialer::new(),
-        webtransport: webtransport::Dialer::with_tls(client_tls(&identity())).unwrap(),
+        websocket: websocket::Dialer::builder().build(),
+        webtransport: webtransport::Dialer::builder(webtransport::ClientTrust::Config(client_tls(
+            &identity(),
+        )))
+        .build()
+        .unwrap(),
     };
     let started = Instant::now();
     let link = coqui_transport_web::connect(
@@ -1154,8 +1314,9 @@ fn a_webtransport_name_resolving_to_both_families_reaches_a_listener_on_either()
         return;
     }
     let id = identity();
-    let listener =
-        webtransport::Listener::bind(SocketAddr::new(other, 0), server_tls(&id)).unwrap();
+    let listener = webtransport::Listener::builder(SocketAddr::new(other, 0), server_tls(&id))
+        .build()
+        .unwrap();
     let port = listener.local_addr().port();
     let server = thread::spawn(move || {
         let channel = listener.accept(Some(WAIT)).unwrap();
@@ -1165,10 +1326,12 @@ fn a_webtransport_name_resolving_to_both_families_reaches_a_listener_on_either()
     });
     let url = Url::parse(&format!("https://localhost:{port}/channel")).unwrap();
     let started = Instant::now();
-    let client = webtransport::Dialer::pinned(&[pin(&id)])
-        .unwrap()
-        .dial(Kind::WebTransport, &url, WAIT)
-        .unwrap();
+    let client =
+        webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin(&id)])))
+            .build()
+            .unwrap()
+            .dial(Kind::WebTransport, &url, WAIT)
+            .unwrap();
     assert!(
         started.elapsed() < Duration::from_secs(3),
         "{:?}",
@@ -1180,7 +1343,11 @@ fn a_webtransport_name_resolving_to_both_families_reaches_a_listener_on_either()
 
 /// A handshake limit no test waits out.
 fn patient() -> Limits {
-    Limits::default().with_handshake(Duration::from_secs(30))
+    {
+        let mut value = Limits::default();
+        value.handshake = Duration::from_secs(30);
+        value
+    }
 }
 
 /// Whether a socket's peer has closed it: an end, or a reset, and not a read still waiting.
@@ -1198,9 +1365,10 @@ fn ended(socket: &std::net::TcpStream) -> bool {
 
 #[test]
 fn a_websocket_handshake_can_be_abandoned_from_another_thread() {
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_limits(patient());
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .limits(patient())
+        .build()
+        .unwrap();
     let address = listener.local_addr().unwrap();
     // A peer that connects and says nothing.
     let silent = std::net::TcpStream::connect(address).unwrap();
@@ -1221,7 +1389,11 @@ fn a_websocket_handshake_can_be_abandoned_from_another_thread() {
     assert_eq!(pending.handshake().map(|_| ()), Err(Failure::Cancelled));
     // Once it finished, a cancel changes nothing.
     let url = plain_ws_url(address);
-    let client = thread::spawn(move || websocket::Dialer::new().dial(Kind::WebSocket, &url, WAIT));
+    let client = thread::spawn(move || {
+        websocket::Dialer::builder()
+            .build()
+            .dial(Kind::WebSocket, &url, WAIT)
+    });
     let pending = listener.next(Some(WAIT)).unwrap();
     let cancel = pending.canceller();
     let channel = pending.handshake().unwrap();
@@ -1233,9 +1405,10 @@ fn a_websocket_handshake_can_be_abandoned_from_another_thread() {
 #[test]
 fn a_webtransport_handshake_can_be_abandoned_from_another_thread() {
     let id = identity();
-    let listener = webtransport::Listener::bind(loopback(), server_tls(&id))
-        .unwrap()
-        .with_limits(patient());
+    let listener = webtransport::Listener::builder(loopback(), server_tls(&id))
+        .limits(patient())
+        .build()
+        .unwrap();
     let url = Url::parse(&format!(
         "https://127.0.0.1:{}/channel",
         listener.local_addr().port()
@@ -1243,7 +1416,8 @@ fn a_webtransport_handshake_can_be_abandoned_from_another_thread() {
     .unwrap();
     let dial = |url: Url, pin: CertificatePin| {
         thread::spawn(move || {
-            webtransport::Dialer::pinned(&[pin])
+            webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin])))
+                .build()
                 .unwrap()
                 .dial(Kind::WebTransport, &url, WAIT)
         })

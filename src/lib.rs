@@ -9,7 +9,6 @@ mod fallback;
 pub mod frame;
 #[cfg(any(feature = "websocket", feature = "webtransport"))]
 mod pump;
-mod report;
 #[cfg(feature = "webrtc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "webrtc")))]
 pub mod webrtc;
@@ -20,6 +19,7 @@ pub mod websocket;
 #[cfg_attr(docsrs, doc(cfg(feature = "webtransport")))]
 pub mod webtransport;
 
+pub use coqui_transport::NonDefault;
 pub use coqui_transport::{Capabilities, Carrier, Channel, Datagrams, Delivery, Failure};
 pub use endpoint::{CertificatePin, EndpointError, Endpoints, EndpointsBuilder};
 pub use fallback::{
@@ -28,4 +28,3 @@ pub use fallback::{
 #[cfg(any(feature = "websocket", feature = "webtransport"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "websocket", feature = "webtransport"))))]
 pub use pump::{Cancel, Limits};
-pub use report::NonDefault;

@@ -54,8 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hash = wtransport::tls::Certificate::from_der(der.to_vec())?.hash();
     let pin = CertificatePin::from_bytes(*hash.as_ref());
 
-    let plain = websocket::Listener::bind(loopback, None)?;
-    let quic = webtransport::Listener::bind(loopback, tls)?;
+    let plain = websocket::Listener::builder(loopback, websocket::ServerTls::Plain).build()?;
+    let quic = webtransport::Listener::builder(loopback, tls).build()?;
     println!(
         "{{\"websocket\":{},\"webtransport\":{},\"pin\":\"{pin}\"}}",
         plain.local_addr()?.port(),

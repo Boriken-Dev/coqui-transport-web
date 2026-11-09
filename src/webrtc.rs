@@ -29,7 +29,18 @@ use coqui_transport::Failure;
 use worker::{Command, Relays, WAKER, Worker};
 
 /// How an offer and its answer reach the other end.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    guatiao::ToValue,
+    guatiao::FromValue,
+    guatiao::Schema,
+)]
+#[map(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum Signaling {
     /// On the WebSocket itself, as tagged messages: TLS is all that protects them, as it is for the datagrams they lead to.
@@ -41,15 +52,25 @@ pub enum Signaling {
 }
 
 /// How a channel climbs, and what a [`Port`] allows.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// A guatiao value (`from_value`, `to_value`, `schema`) a file fills: every key is optional (an absent one is its default),
+/// an unknown key is refused, a duration is a number of seconds, `[secs, nanos]` or `{secs, nanos}`, and `signaling` is
+/// `on-channel` or `by-caller`. It is `#[non_exhaustive]`: start from [`Default`] and assign the fields.
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, guatiao::ToValue, guatiao::FromValue, guatiao::Schema,
+)]
+#[map(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Settings {
     /// Whether to try at all. Off, a channel asks for nothing more than plain datagrams and sends no signal.
+    #[map(default = Settings::default().enabled)]
     pub enabled: bool,
     /// How long a data channel may take to open before the channel stays on the WebSocket for good. Only the attempt is lost.
+    #[map(default = Settings::default().attempt)]
     pub attempt: Duration,
     /// The largest IP packet the path is known to carry. It caps a data channel's datagrams, since a fragmented one is lost whenever
     /// any fragment is.
+    #[map(default = Settings::default().path_mtu)]
     pub path_mtu: usize,
     /// The address a [`Port`] names in its one candidate. Unset, it names the address the WebSocket connection arrived at, with the
     /// UDP port's number. Behind a proxy or NAT that is wrong, and it tells the peer an address it had no other way to learn.
@@ -58,19 +79,25 @@ pub struct Settings {
     /// address, and a [`Port`] answers checks only from the WebSocket peer's address, so neither end can point the other's traffic
     /// somewhere else. Behind a proxy the WebSocket peer is the proxy, so a `Port` there needs this on, and each data channel is then
     /// held to the one source its peer nominated.
+    #[map(default = Settings::default().any_candidate)]
     pub any_candidate: bool,
     /// How offers and answers travel.
+    #[map(default = Settings::default().signaling)]
     pub signaling: Signaling,
     /// Data channels a [`Port`] holds at once, past which an offer is refused.
+    #[map(default = Settings::default().max_sessions)]
     pub max_sessions: usize,
     /// QUIC sources a [`Port`] relays at once, each a socket, so keep this well below the process's limit on them. A new source past
     /// this replaces the oldest that has completed no handshake in half a second, and is dropped if there is none.
+    #[map(default = Settings::default().max_relays)]
     pub max_relays: usize,
     /// QUIC sources, and data channels, one IP address holds at once. Behind a proxy every WebSocket client has the proxy's
     /// address, which this then limits.
+    #[map(default = Settings::default().max_per_address)]
     pub max_per_address: usize,
     /// Silence after which a relay ends. A source returning later gets a new one, which QUIC reads as a changed address. It should
     /// outlast the QUIC idle timeout.
+    #[map(default = Settings::default().relay_idle)]
     pub relay_idle: Duration,
 }
 
@@ -105,76 +132,6 @@ impl Settings {
         } else {
             Err(Failure::Unsupported)
         }
-    }
-
-    /// Sets whether to try.
-    #[must_use]
-    pub const fn with_enabled(mut self, enabled: bool) -> Self {
-        self.enabled = enabled;
-        self
-    }
-
-    /// Sets how long a data channel may take to open.
-    #[must_use]
-    pub const fn with_attempt(mut self, limit: Duration) -> Self {
-        self.attempt = limit;
-        self
-    }
-
-    /// Sets the largest IP packet the path is known to carry.
-    #[must_use]
-    pub const fn with_path_mtu(mut self, bytes: usize) -> Self {
-        self.path_mtu = bytes;
-        self
-    }
-
-    /// Sets the address named in a [`Port`]'s candidate.
-    #[must_use]
-    pub const fn with_public_address(mut self, address: SocketAddr) -> Self {
-        self.public_address = Some(address);
-        self
-    }
-
-    /// Lets the other end's path be at another address than the WebSocket's peer.
-    #[must_use]
-    pub const fn with_any_candidate(mut self) -> Self {
-        self.any_candidate = true;
-        self
-    }
-
-    /// Sets how offers and answers travel.
-    #[must_use]
-    pub const fn with_signaling(mut self, signaling: Signaling) -> Self {
-        self.signaling = signaling;
-        self
-    }
-
-    /// Sets how many data channels a [`Port`] holds at once.
-    #[must_use]
-    pub const fn with_max_sessions(mut self, sessions: usize) -> Self {
-        self.max_sessions = sessions;
-        self
-    }
-
-    /// Sets how many QUIC sources a [`Port`] relays at once.
-    #[must_use]
-    pub const fn with_max_relays(mut self, relays: usize) -> Self {
-        self.max_relays = relays;
-        self
-    }
-
-    /// Sets how many QUIC sources, and data channels, one IP address holds at once.
-    #[must_use]
-    pub const fn with_max_per_address(mut self, held: usize) -> Self {
-        self.max_per_address = held;
-        self
-    }
-
-    /// Sets the silence after which a relay ends.
-    #[must_use]
-    pub const fn with_relay_idle(mut self, limit: Duration) -> Self {
-        self.relay_idle = limit;
-        self
     }
 }
 
@@ -370,7 +327,10 @@ mod tests {
     }
 
     fn port_for(relays: usize) -> (Port, UdpSocket) {
-        port_with(Settings::default().with_max_relays(relays))
+        port_with(Settings {
+            max_relays: relays,
+            ..Settings::default()
+        })
     }
 
     fn port_with(settings: Settings) -> (Port, UdpSocket) {
@@ -509,11 +469,11 @@ mod tests {
 
     #[test]
     fn a_source_cannot_keep_its_relay_alive_by_sending() {
-        let (port, quic) = port_with(
-            Settings::default()
-                .with_max_relays(4)
-                .with_relay_idle(Duration::from_millis(300)),
-        );
+        let (port, quic) = port_with(Settings {
+            max_relays: 4,
+            relay_idle: Duration::from_millis(300),
+            ..Settings::default()
+        });
         let one = client();
         let first = first_packet(&one, &port, &quic);
         let mut relays = std::collections::HashSet::from([first]);
@@ -534,11 +494,11 @@ mod tests {
 
     #[test]
     fn one_address_holds_no_more_than_its_share() {
-        let (port, quic) = port_with(
-            Settings::default()
-                .with_max_relays(8)
-                .with_max_per_address(2),
-        );
+        let (port, quic) = port_with(Settings {
+            max_relays: 8,
+            max_per_address: 2,
+            ..Settings::default()
+        });
         let (one, two, three) = (client(), client(), client());
         first_packet(&one, &port, &quic);
         first_packet(&two, &port, &quic);

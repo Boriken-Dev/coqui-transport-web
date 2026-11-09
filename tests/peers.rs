@@ -124,7 +124,12 @@ fn over_websocket(
     dialer: websocket::Dialer,
 ) -> (Seen, Seen) {
     let scheme = if server.is_some() { "wss" } else { "ws" };
-    let listener = websocket::Listener::bind(loopback(), server).unwrap();
+    let listener = websocket::Listener::builder(
+        loopback(),
+        server.map_or(websocket::ServerTls::Plain, websocket::ServerTls::Config),
+    )
+    .build()
+    .unwrap();
     let port = listener.local_addr().unwrap().port();
     let accepted = thread::spawn(move || seen(&listener.accept(Some(WAIT)).unwrap()));
     let url = Url::parse(&format!("{scheme}://127.0.0.1:{port}/")).unwrap();
@@ -137,7 +142,9 @@ fn over_webtransport(
     server: Arc<rustls::ServerConfig>,
     mut dialer: webtransport::Dialer,
 ) -> (Seen, Seen) {
-    let listener = webtransport::Listener::bind(loopback(), server).unwrap();
+    let listener = webtransport::Listener::builder(loopback(), server)
+        .build()
+        .unwrap();
     let port = listener.local_addr().port();
     let accepted = thread::spawn(move || {
         let channel = listener.accept(Some(WAIT)).unwrap();
@@ -160,8 +167,9 @@ fn each_end_of_a_tls_websocket_has_the_chain_the_other_presented() {
         (Ask::Optional, true, Some(client.der())),
         (Ask::Required, true, Some(client.der())),
     ] {
-        let dialer =
-            websocket::Dialer::new().with_tls(client_tls(&server, presents.then_some(&client)));
+        let dialer = websocket::Dialer::builder()
+            .tls(client_tls(&server, presents.then_some(&client)))
+            .build();
         let seen = over_websocket(Some(server_tls(&server, &client, ask)), dialer);
         assert_eq!(
             seen,
@@ -173,7 +181,10 @@ fn each_end_of_a_tls_websocket_has_the_chain_the_other_presented() {
 
 #[test]
 fn a_plain_websocket_has_no_certificates() {
-    assert_eq!(over_websocket(None, websocket::Dialer::new()), (None, None));
+    assert_eq!(
+        over_websocket(None, websocket::Dialer::builder().build()),
+        (None, None)
+    );
 }
 
 #[test]
@@ -185,9 +196,12 @@ fn each_end_of_a_webtransport_session_has_the_chain_the_other_presented() {
         (Ask::Optional, true, Some(client.der())),
         (Ask::Required, true, Some(client.der())),
     ] {
-        let dialer =
-            webtransport::Dialer::with_tls(client_tls(&server, presents.then_some(&client)))
-                .unwrap();
+        let dialer = webtransport::Dialer::builder(webtransport::ClientTrust::Config(client_tls(
+            &server,
+            presents.then_some(&client),
+        )))
+        .build()
+        .unwrap();
         let seen = over_webtransport(server_tls(&server, &client, ask), dialer);
         assert_eq!(
             seen,
@@ -196,7 +210,10 @@ fn each_end_of_a_webtransport_session_has_the_chain_the_other_presented() {
         );
     }
     // A pinned dialer has the chain its pin matched.
-    let pinned = webtransport::Dialer::pinned(&[server.pin()]).unwrap();
+    let pinned =
+        webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([server.pin()])))
+            .build()
+            .unwrap();
     let seen = over_webtransport(server_tls(&server, &client, Ask::Nothing), pinned);
     assert_eq!(seen, (Some(server.der()), None));
 }
@@ -204,15 +221,19 @@ fn each_end_of_a_webtransport_session_has_the_chain_the_other_presented() {
 #[test]
 fn a_boxed_channel_passes_its_certificates_on() {
     let (server, client) = (Identity::new(), Identity::new());
-    let listener =
-        websocket::Listener::bind(loopback(), Some(server_tls(&server, &client, Ask::Nothing)))
-            .unwrap();
+    let listener = websocket::Listener::builder(
+        loopback(),
+        websocket::ServerTls::Config(server_tls(&server, &client, Ask::Nothing)),
+    )
+    .build()
+    .unwrap();
     let port = listener.local_addr().unwrap().port();
     let accepted = thread::spawn(move || listener.accept(Some(WAIT)).map(|_| ()));
     let url = Url::parse(&format!("wss://127.0.0.1:{port}/")).unwrap();
     let boxed: Box<dyn Channel> = Box::new(
-        websocket::Dialer::new()
-            .with_tls(client_tls(&server, None))
+        websocket::Dialer::builder()
+            .tls(client_tls(&server, None))
+            .build()
             .dial(Kind::WebSocket, &url, WAIT)
             .unwrap(),
     );
@@ -236,9 +257,10 @@ fn noting() -> (
 #[test]
 fn a_pending_websocket_names_the_source_it_admitted() {
     let (noted, admit) = noting();
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_admission(admit);
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .admission(admit)
+        .build()
+        .unwrap();
     let tcp = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let pending = listener.next(Some(WAIT)).unwrap();
     assert_eq!(pending.peer_addr(), tcp.local_addr().unwrap());
@@ -249,20 +271,21 @@ fn a_pending_websocket_names_the_source_it_admitted() {
 fn a_pending_webtransport_session_names_the_source_it_admitted() {
     let id = Identity::new();
     let (noted, admit) = noting();
-    let listener = webtransport::Listener::bind(loopback(), server_tls(&id, &id, Ask::Nothing))
-        .unwrap()
-        .with_admission(admit);
+    let listener = webtransport::Listener::builder(loopback(), server_tls(&id, &id, Ask::Nothing))
+        .admission(admit)
+        .build()
+        .unwrap();
     let url = Url::parse(&format!(
         "https://127.0.0.1:{}/",
         listener.local_addr().port()
     ))
     .unwrap();
     let client = thread::spawn(move || {
-        let _ = webtransport::Dialer::pinned(&[id.pin()]).unwrap().dial(
-            Kind::WebTransport,
-            &url,
-            Duration::from_secs(3),
-        );
+        let _ =
+            webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([id.pin()])))
+                .build()
+                .unwrap()
+                .dial(Kind::WebTransport, &url, Duration::from_secs(3));
     });
     let pending = listener.next(Some(WAIT)).unwrap();
     assert_eq!(*noted.lock().unwrap(), [pending.peer_addr()]);
@@ -285,13 +308,15 @@ fn not_here() -> SocketAddr {
 #[test]
 fn a_websocket_dialer_bound_to_a_local_address_is_admitted_from_it() {
     let (noted, admit) = noting();
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_admission(admit);
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .admission(admit)
+        .build()
+        .unwrap();
     let url = Url::parse(&format!("ws://{}/", listener.local_addr().unwrap())).unwrap();
     let client = thread::spawn(move || {
-        let near = websocket::Dialer::new()
-            .with_local_addr(second_loopback())
+        let near = websocket::Dialer::builder()
+            .local_addr(second_loopback())
+            .build()
             .dial(Kind::WebSocket, &url, WAIT)
             .unwrap();
         near.send(b"open").unwrap();
@@ -309,20 +334,23 @@ fn a_websocket_dialer_bound_to_a_local_address_is_admitted_from_it() {
 fn a_webtransport_dialer_bound_to_a_local_address_is_admitted_from_it() {
     let id = Identity::new();
     let (noted, admit) = noting();
-    let listener = webtransport::Listener::bind(loopback(), server_tls(&id, &id, Ask::Nothing))
-        .unwrap()
-        .with_admission(admit);
+    let listener = webtransport::Listener::builder(loopback(), server_tls(&id, &id, Ask::Nothing))
+        .admission(admit)
+        .build()
+        .unwrap();
     let url = Url::parse(&format!(
         "https://127.0.0.1:{}/",
         listener.local_addr().port()
     ))
     .unwrap();
     let client = thread::spawn(move || {
-        let near = webtransport::Dialer::pinned(&[id.pin()])
-            .unwrap()
-            .with_local_addr(second_loopback())
-            .dial(Kind::WebTransport, &url, WAIT)
-            .unwrap();
+        let near =
+            webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([id.pin()])))
+                .local_addr(second_loopback())
+                .build()
+                .unwrap()
+                .dial(Kind::WebTransport, &url, WAIT)
+                .unwrap();
         near.send(b"open").unwrap();
         near
     });
@@ -338,27 +366,33 @@ fn a_webtransport_dialer_bound_to_a_local_address_is_admitted_from_it() {
 #[test]
 fn a_dialer_whose_local_address_cannot_reach_the_endpoint_says_so() {
     let id = Identity::new();
-    let listener = websocket::Listener::bind(loopback(), None).unwrap();
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .build()
+        .unwrap();
     let url = Url::parse(&format!("ws://{}/", listener.local_addr().unwrap())).unwrap();
     for local in [not_here(), "[::1]:0".parse().unwrap()] {
-        let dialed =
-            websocket::Dialer::new()
-                .with_local_addr(local)
-                .dial(Kind::WebSocket, &url, WAIT);
+        let dialed = websocket::Dialer::builder().local_addr(local).build().dial(
+            Kind::WebSocket,
+            &url,
+            WAIT,
+        );
         assert_eq!(dialed.err(), Some(Failure::Unsupported), "{local}");
     }
     assert_eq!(
         listener.next(Some(Duration::from_millis(200))).err(),
         Some(Failure::Timeout)
     );
-    let quic =
-        webtransport::Listener::bind(loopback(), server_tls(&id, &id, Ask::Nothing)).unwrap();
+    let quic = webtransport::Listener::builder(loopback(), server_tls(&id, &id, Ask::Nothing))
+        .build()
+        .unwrap();
     let url = Url::parse(&format!("https://127.0.0.1:{}/", quic.local_addr().port())).unwrap();
     for local in [not_here(), "[::1]:0".parse().unwrap()] {
-        let dialed = webtransport::Dialer::pinned(&[id.pin()])
-            .unwrap()
-            .with_local_addr(local)
-            .dial(Kind::WebTransport, &url, Duration::from_secs(3));
+        let dialed =
+            webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([id.pin()])))
+                .local_addr(local)
+                .build()
+                .unwrap()
+                .dial(Kind::WebTransport, &url, Duration::from_secs(3));
         assert_eq!(dialed.err(), Some(Failure::Unsupported), "{local}");
     }
 }
@@ -370,16 +404,18 @@ fn a_pending_session_on_a_port_names_the_client_and_not_its_relay() {
     let id = Identity::new();
     let (noted, admit) = noting();
     let port = Port::bind(loopback(), Settings::default()).unwrap();
-    let listener = webtransport::Listener::on_port(&port, server_tls(&id, &id, Ask::Nothing))
-        .unwrap()
-        .with_admission(admit);
+    let listener =
+        webtransport::Listener::builder(port.clone(), server_tls(&id, &id, Ask::Nothing))
+            .admission(admit)
+            .build()
+            .unwrap();
     let url = Url::parse(&format!("https://127.0.0.1:{}/", port.local_addr().port())).unwrap();
     let client = thread::spawn(move || {
-        let _ = webtransport::Dialer::pinned(&[id.pin()]).unwrap().dial(
-            Kind::WebTransport,
-            &url,
-            Duration::from_secs(3),
-        );
+        let _ =
+            webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([id.pin()])))
+                .build()
+                .unwrap()
+                .dial(Kind::WebTransport, &url, Duration::from_secs(3));
     });
     let pending = listener.next(Some(WAIT)).unwrap();
     assert_eq!(*noted.lock().unwrap(), [pending.peer_addr()]);
@@ -393,18 +429,24 @@ fn a_pending_session_on_a_port_names_the_client_and_not_its_relay() {
 fn a_webtransport_client_refused_by_certificate_is_told_so() {
     let (server, trusted, stranger) = (Identity::new(), Identity::new(), Identity::new());
     for presented in [Some(&stranger), None] {
-        let listener =
-            webtransport::Listener::bind(loopback(), server_tls(&server, &trusted, Ask::Required))
-                .unwrap();
+        let listener = webtransport::Listener::builder(
+            loopback(),
+            server_tls(&server, &trusted, Ask::Required),
+        )
+        .build()
+        .unwrap();
         let url = Url::parse(&format!(
             "https://127.0.0.1:{}/",
             listener.local_addr().port()
         ))
         .unwrap();
         let accepting = thread::spawn(move || listener.accept(Some(WAIT)).err());
-        let dialed = webtransport::Dialer::with_tls(client_tls(&server, presented))
-            .unwrap()
-            .dial(Kind::WebTransport, &url, WAIT);
+        let dialed = webtransport::Dialer::builder(webtransport::ClientTrust::Config(client_tls(
+            &server, presented,
+        )))
+        .build()
+        .unwrap()
+        .dial(Kind::WebTransport, &url, WAIT);
         assert_eq!(
             dialed.err(),
             Some(Failure::Certificate),
@@ -426,9 +468,11 @@ fn a_webtransport_dial_nothing_answers_is_a_path_failure() {
         .unwrap()
         .port();
     let url = Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
-    let dialed = webtransport::Dialer::with_tls(client_tls(&server, None))
-        .unwrap()
-        .dial(Kind::WebTransport, &url, Duration::from_secs(2));
+    let dialed =
+        webtransport::Dialer::builder(webtransport::ClientTrust::Config(client_tls(&server, None)))
+            .build()
+            .unwrap()
+            .dial(Kind::WebTransport, &url, Duration::from_secs(2));
     let failure = dialed.err();
     assert!(failure.is_some_and(Failure::is_path), "{failure:?}");
 }
@@ -441,12 +485,13 @@ fn noting_tls(address: SocketAddr, server: &Identity) -> (webtransport::Listener
     let tls = server_tls(server, server, Ask::Nothing);
     let noted = Addressed::default();
     let noting = Arc::clone(&noted);
-    let listener = webtransport::Listener::bind(address, Arc::clone(&tls))
-        .unwrap()
-        .with_tls_per_connection(move |source, local| {
+    let listener = webtransport::Listener::builder(address, Arc::clone(&tls))
+        .tls_per_connection(move |source, local| {
             noting.lock().unwrap().push((source, local));
             Arc::clone(&tls)
-        });
+        })
+        .build()
+        .unwrap();
     (listener, noted)
 }
 
@@ -461,10 +506,12 @@ fn a_wildcard_webtransport_listener_builds_tls_from_the_source_and_the_address_r
         (addresses, pending.handshake().unwrap())
     });
     let url = Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
-    let client = webtransport::Dialer::pinned(&[server.pin()])
-        .unwrap()
-        .dial(Kind::WebTransport, &url, WAIT)
-        .unwrap();
+    let client =
+        webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([server.pin()])))
+            .build()
+            .unwrap()
+            .dial(Kind::WebTransport, &url, WAIT)
+            .unwrap();
     client.send(b"open").unwrap();
     let ((source, local), _channel) = accepted.join().unwrap();
     assert_eq!(local, SocketAddr::from(([127, 0, 0, 1], port)));

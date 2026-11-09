@@ -47,15 +47,17 @@ fn server_tls() -> (Arc<rustls::ServerConfig>, CertificatePin) {
 
 /// A connected WebSocket pair, client first, with `client` and `server` limits.
 fn websocket_pair(client: Limits, server: Limits) -> (websocket::Channel, websocket::Channel) {
-    let listener = websocket::Listener::bind(loopback(), None)
-        .unwrap()
-        .with_limits(server)
-        .with_frames(websocket::Frames::Binary);
+    let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
+        .limits(server)
+        .frames(websocket::Frames::Binary)
+        .build()
+        .unwrap();
     let url = Url::parse(&format!("ws://{}/", listener.local_addr().unwrap())).unwrap();
     let accepted = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
-    let near = websocket::Dialer::new()
-        .with_limits(client)
-        .with_frames(websocket::Frames::Binary)
+    let near = websocket::Dialer::builder()
+        .limits(client)
+        .frames(websocket::Frames::Binary)
+        .build()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     (near, accepted.join().unwrap())
@@ -67,18 +69,20 @@ fn webtransport_pair(
     server: Limits,
 ) -> (webtransport::Channel, webtransport::Channel) {
     let (tls, pin) = server_tls();
-    let listener = webtransport::Listener::bind(loopback(), tls)
-        .unwrap()
-        .with_limits(server);
+    let listener = webtransport::Listener::builder(loopback(), tls)
+        .limits(server)
+        .build()
+        .unwrap();
     let url = Url::parse(&format!(
         "https://127.0.0.1:{}/",
         listener.local_addr().port()
     ))
     .unwrap();
     let accepted = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
-    let near = webtransport::Dialer::pinned(&[pin])
+    let near = webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin])))
+        .limits(client)
+        .build()
         .unwrap()
-        .with_limits(client)
         .dial(Kind::WebTransport, &url, WAIT)
         .unwrap();
     // A server has no stream to accept until the client's carries something.
@@ -282,13 +286,21 @@ fn a_read_ahead_of_0_is_one_message() {
 
 #[test]
 fn a_websocket_raising_its_read_ahead_lets_the_backlog_flow() {
-    let (client, server) = websocket_pair(Limits::default(), Limits::default().with_pending(1));
+    let (client, server) = websocket_pair(Limits::default(), {
+        let mut value = Limits::default();
+        value.pending = 1;
+        value
+    });
     a_raised_read_ahead_lets_the_backlog_flow(&client, &server);
 }
 
 #[test]
 fn a_webtransport_channel_raising_its_read_ahead_lets_the_backlog_flow() {
-    let (client, server) = webtransport_pair(Limits::default(), Limits::default().with_pending(1));
+    let (client, server) = webtransport_pair(Limits::default(), {
+        let mut value = Limits::default();
+        value.pending = 1;
+        value
+    });
     a_raised_read_ahead_lets_the_backlog_flow(&client, &server);
 }
 
@@ -346,8 +358,16 @@ fn fill(channel: &impl Channel, message: &[u8]) -> usize {
 
 /// A sender behind a reader that takes one message at most, and the 64 KiB message it sends.
 fn behind_a_stalled_reader(client: Limits) -> (websocket::Channel, websocket::Channel, Vec<u8>) {
-    let client = client.with_queued_bytes(256 * 1024);
-    let (near, far) = websocket_pair(client, Limits::default().with_pending(1));
+    let client = {
+        let mut limits = client;
+        limits.queued_bytes = 256 * 1024;
+        limits
+    };
+    let (near, far) = websocket_pair(client, {
+        let mut value = Limits::default();
+        value.pending = 1;
+        value
+    });
     (near, far, vec![7; 64 * 1024])
 }
 
@@ -379,8 +399,11 @@ fn a_websocket_send_waits_for_room_as_long_as_its_caller_says() {
 fn a_websocket_send_waiting_for_room_ends_with_the_channel() {
     // Ended by its own send limit, and by a close.
     for (closing, ended) in [(false, Failure::PathLost), (true, Failure::Cancelled)] {
-        let (client, _server, message) =
-            behind_a_stalled_reader(Limits::default().with_send(Duration::from_secs(1)));
+        let (client, _server, message) = behind_a_stalled_reader({
+            let mut value = Limits::default();
+            value.send = Duration::from_secs(1);
+            value
+        });
         fill(&client, &message);
         let client = Arc::new(client);
         let (done, outcome) = mpsc::channel();
@@ -446,8 +469,17 @@ fn a_websocket_reader_that_stops_holds_its_sender_back() {
 fn a_websocket_reader_stalled_past_the_idle_limit_is_not_taken_for_gone() {
     let idle = Duration::from_millis(200);
     let (client, server) = websocket_pair(
-        Limits::default().with_idle(idle),
-        Limits::default().with_idle(idle).with_pending(1),
+        {
+            let mut value = Limits::default();
+            value.idle = idle;
+            value
+        },
+        {
+            let mut value = Limits::default();
+            value.idle = idle;
+            value.pending = 1;
+            value
+        },
     );
     for n in 0..4 {
         client.send(&[n; 16]).unwrap();
@@ -468,8 +500,16 @@ fn a_websocket_reader_stalled_past_the_idle_limit_is_not_taken_for_gone() {
 fn a_websocket_held_at_its_read_ahead_is_not_taken_for_gone() {
     let idle = Duration::from_millis(200);
     let (client, server) = websocket_pair(
-        Limits::default().with_idle(idle),
-        Limits::default().with_idle(idle),
+        {
+            let mut value = Limits::default();
+            value.idle = idle;
+            value
+        },
+        {
+            let mut value = Limits::default();
+            value.idle = idle;
+            value
+        },
     );
     server.set_pending(1).unwrap();
     for n in 0..4 {
@@ -509,8 +549,16 @@ fn a_websocket_message_over_the_readers_bound_is_refused_at_both_ends() {
 #[test]
 fn a_webtransport_send_waits_as_long_as_its_caller_says() {
     let (client, _server) = webtransport_pair(
-        Limits::default().with_send(Duration::from_secs(5)),
-        Limits::default().with_pending(1),
+        {
+            let mut value = Limits::default();
+            value.send = Duration::from_secs(5);
+            value
+        },
+        {
+            let mut value = Limits::default();
+            value.pending = 1;
+            value
+        },
     );
     let message = vec![7; 256 * 1024];
     let until = Instant::now() + WAIT;

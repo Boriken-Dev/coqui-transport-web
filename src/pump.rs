@@ -9,87 +9,44 @@ use crate::frame::DEFAULT_MAX_MESSAGE;
 use coqui_transport::Failure;
 
 /// The bounds a peer cannot exceed. Every value has a finite default.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// A guatiao value (`from_value`, `to_value`, `schema`) a file fills: every key is optional (an absent one is its default),
+/// an unknown key is refused, and a duration is a number of seconds, `[secs, nanos]` or `{secs, nanos}`. It is
+/// `#[non_exhaustive]`: start from [`Default`] and assign the fields.
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, guatiao::ToValue, guatiao::FromValue, guatiao::Schema,
+)]
+#[map(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Limits {
     /// The largest message accepted or sent, in bytes. Larger ends the channel.
+    #[map(default = Limits::default().max_message)]
     pub max_message: usize,
     /// Messages read and held for a slow reader, after which the driver stops reading from the peer. Each channel starts here,
     /// and [`Channel::set_pending`](crate::Channel::set_pending) changes it for one. 0 is 1.
+    #[map(default = Limits::default().pending)]
     pub pending: usize,
     /// How long opening may take in total: TCP or QUIC, TLS, and the HTTP upgrade.
+    #[map(default = Limits::default().handshake)]
     pub handshake: Duration,
     /// Bytes queued to send, past which `send` answers `Failure::NoProgress` rather than growing.
+    #[map(default = Limits::default().queued_bytes)]
     pub queued_bytes: usize,
     /// How long a peer may take nothing while there is something to send, where a driver waits at all. It ends the channel
     /// with `Failure::NoProgress`.
+    #[map(default = Limits::default().send)]
     pub send: Duration,
     /// Silence after which a WebSocket peer is pinged, and twice this after which it is gone: `Failure::NoProgress`.
+    #[map(default = Limits::default().idle)]
     pub idle: Duration,
     /// Datagrams held for a slow reader, past which new ones are discarded and counted. Unlike a message, a datagram slows nobody.
     /// Over a WebSocket it also bounds those waiting to be sent.
+    #[map(default = Limits::default().pending_datagrams)]
     pub pending_datagrams: usize,
     /// The largest datagram over a WebSocket, in bytes, whichever way it goes. There is no packet to fit there, so it is a choice,
     /// and one over it is refused here and discarded from a peer. WebTransport's comes from the path.
+    #[map(default = Limits::default().websocket_datagram)]
     pub websocket_datagram: usize,
-}
-
-impl Limits {
-    /// Sets the largest message.
-    #[must_use]
-    pub const fn with_max_message(mut self, bytes: usize) -> Self {
-        self.max_message = bytes;
-        self
-    }
-
-    /// Sets how many messages wait for a slow reader.
-    #[must_use]
-    pub const fn with_pending(mut self, messages: usize) -> Self {
-        self.pending = messages;
-        self
-    }
-
-    /// Sets how long opening may take in total.
-    #[must_use]
-    pub const fn with_handshake(mut self, limit: Duration) -> Self {
-        self.handshake = limit;
-        self
-    }
-
-    /// Sets how many bytes may wait to be sent.
-    #[must_use]
-    pub const fn with_queued_bytes(mut self, bytes: usize) -> Self {
-        self.queued_bytes = bytes;
-        self
-    }
-
-    /// Sets how long one send may wait.
-    #[must_use]
-    pub const fn with_send(mut self, limit: Duration) -> Self {
-        self.send = limit;
-        self
-    }
-
-    /// Sets the silence after which a peer is pinged.
-    #[must_use]
-    pub const fn with_idle(mut self, limit: Duration) -> Self {
-        self.idle = limit;
-        self
-    }
-
-    /// Sets how many datagrams wait for a slow reader.
-    #[must_use]
-    pub const fn with_pending_datagrams(mut self, datagrams: usize) -> Self {
-        self.pending_datagrams = datagrams;
-        self
-    }
-
-    /// Sets the largest datagram over a WebSocket.
-    #[must_use]
-    pub const fn with_websocket_datagram(mut self, bytes: usize) -> Self {
-        self.websocket_datagram = bytes;
-        self
-    }
 }
 
 impl Default for Limits {
