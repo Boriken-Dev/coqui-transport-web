@@ -29,10 +29,10 @@ webrtc = ["websocket", "webtransport", "dep:str0m"]
 
 [dependencies]
 # The settings types' value form and schema; alpha, by revision, as the family pins it.
-guatiao = { git = "https://github.com/Boriken-Dev/guatiao", rev = "03e1cac8be06715a8037f45f1610c5894eea0b5b", default-features = false, features = ["derive"] }
+guatiao = { git = "https://github.com/Boriken-Dev/guatiao", rev = "0350bae7fef4cef2aa46ce73f1ef6be15983d83b", default-features = false, features = ["derive"] }
 # The channel, datagram and failure contracts every transport shares, and the length-prefix codec a WebTransport
 # stream is framed with. The family has no releases for now: its crates depend on each other by git revision.
-coqui-transport = { git = "https://github.com/Boriken-Dev/coqui-transport", rev = "c550956a29888422fd9f022ef395890944bab82f", default-features = false }
+coqui-transport = { git = "https://github.com/Boriken-Dev/coqui-transport", rev = "19183aa8fa40dff74132d46e18d1ff07fc1cbf38", default-features = false }
 # Endpoints are validated URLs; validation backs a trust decision, so it is not hand-written.
 url = "2.5"
 
@@ -52,7 +52,7 @@ str0m = { version = "0.24", optional = true, default-features = false, features 
 
 [dev-dependencies]
 # The settings types' text forms in tests, through guatiao-serde.
-guatiao-serde = { git = "https://github.com/Boriken-Dev/guatiao", rev = "03e1cac8be06715a8037f45f1610c5894eea0b5b", default-features = false, features = ["json", "toml"] }
+guatiao-serde = { git = "https://github.com/Boriken-Dev/guatiao", rev = "0350bae7fef4cef2aa46ce73f1ef6be15983d83b", default-features = false, features = ["json", "toml"] }
 serde_json = "1"
 proptest = { version = "1", default-features = false, features = ["std"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
