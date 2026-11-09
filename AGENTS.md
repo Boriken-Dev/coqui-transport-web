@@ -8,7 +8,7 @@ Header-file-style reference for the `coqui-transport-web` crate: every public it
 | `webtransport` | `webtransport::{Channel, Dialer, Listener}`, on `wtransport`, with a small runtime inside | off |
 | `webrtc` | `webrtc::{Port, Settings, Signaling}`, and a WebSocket channel that climbs onto a data channel, on `str0m`; implies both others | off |
 
-MSRV Rust 1.89. A default build depends on `url` and `coqui-transport` (by git revision: the family has no releases yet). Version
+MSRV Rust 1.89. A default build depends on `url`, `guatiao` and `coqui-transport` (by git revision, `c550956`: the family has no releases yet). Version
 `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
 
 Imports: the crate root holds the channel contract (`Channel`, `Datagrams`, `Delivery`, `Failure`, `Capabilities`, `Carrier`,
@@ -78,7 +78,7 @@ pub trait Datagrams: Send + Sync {
 pub enum Delivery { Unreliable, OverStream }   // non_exhaustive
 ```
 
-Raw datagrams beside the messages, whole or not at all. `Unreliable` (WebTransport): lost, reordered or repeated without notice. `OverStream` (a WebSocket whose client asked with `websocket::Dialer::with_datagrams` and whose server agreed, which a `Listener` always does): in order and late rather than lost on the way, as tagged binary messages. **Outside any identity proof run on the messages**, so TLS is all that protects them. Read only once `datagrams()` is first called. Until then WebTransport's transport holds them in its bounded buffer, and a WebSocket discards and counts them. A WebSocket with the `webrtc` feature can change from `OverStream` to `Unreliable` and back during a connection: `max_size` follows the path, and one over it is refused with `Failure::Protocol` rather than moved.
+Raw datagrams beside the messages, whole or not at all. `Unreliable` (WebTransport): lost, reordered or repeated without notice. `OverStream` (a WebSocket whose client asked with `websocket::DialerBuilder::datagrams` and whose server agreed, which a `Listener` always does): in order and late rather than lost on the way, as tagged binary messages. **Outside any identity proof run on the messages**, so TLS is all that protects them. Read only once `datagrams()` is first called. Until then WebTransport's transport holds them in its bounded buffer, and a WebSocket discards and counts them. A WebSocket with the `webrtc` feature can change from `OverStream` to `Unreliable` and back during a connection: `max_size` follows the path, and one over it is refused with `Failure::Protocol` rather than moved.
 
 ```rust
 pub trait Dialer {
@@ -132,8 +132,7 @@ fallback (`VerifyFallback` while opening, `VerifyAndReconcile` once active); a p
 peer-proof, permission or cancel failure never. An operation of uncertain outcome is never replayed.
 
 ```rust
-pub struct NonDefault { pub setting: &'static str, pub default: String, pub value: String }   // non_exhaustive
-pub fn NonDefault::new(setting: &'static str, default: impl ToString, value: impl ToString) -> Self
+pub use coqui_transport::NonDefault;   // { setting: String (a key path in the settings type), value: String, default: String }; NonDefault::new(setting, value, default); NonDefault::of_settings(&T) lists a guatiao settings type's differences from its defaults
 ```
 
 A setting that differs from its default, as data. `websocket::Dialer::non_defaults()` and `websocket::Listener::non_defaults()` return
@@ -267,13 +266,8 @@ Methods for the `Decoder` struct.
 ## Limits (crate root, with a driver feature)
 
 ```rust
-pub struct Limits { pub max_message: usize, pub pending: usize, pub handshake: Duration, pub queued_bytes: usize, pub send: Duration, pub idle: Duration, pub pending_datagrams: usize, pub websocket_datagram: usize }
-pub const fn with_max_message(self, bytes: usize) -> Self
-pub const fn with_pending(self, messages: usize) -> Self
-pub const fn with_handshake(self, limit: Duration) -> Self
-pub const fn with_queued_bytes(self, bytes: usize) -> Self
-pub const fn with_send(self, limit: Duration) -> Self
-pub const fn with_idle(self, limit: Duration) -> Self
+#[non_exhaustive] pub struct Limits { pub max_message: usize, pub pending: usize, pub handshake: Duration, pub queued_bytes: usize, pub send: Duration, pub idle: Duration, pub pending_datagrams: usize, pub websocket_datagram: usize }
+// A guatiao value (ToValue, FromValue, Schema): every key optional, unknown keys refused, a duration is seconds, [secs, nanos] or {secs, nanos}.
 ```
 
 `#[non_exhaustive]`. Defaults: 1 MiB, 64 messages, 10 s in total for a handshake, 64 MiB queued to send, 30 s for a WebSocket peer to take nothing while there is something to send, which ends the channel with `Failure::NoProgress`, a ping after 60 s of silence and `Failure::NoProgress` after 120 s. A message over `max_message` ends the channel with `Failure::Protocol`. When `pending`
@@ -296,28 +290,38 @@ A cancel before or during `Pending::handshake`, from any thread, makes it return
 ```rust
 pub enum Frames { Text, Binary }            // default Text; a binary message on a Text channel is Failure::Protocol
 pub struct Channel                          // implements coqui_transport_web::Channel
-pub fn Dialer::new() -> Self                // no TLS: reaches only ws://; wss:// fails with Failure::Certificate
-pub fn Dialer::with_tls(self, tls: Arc<rustls::ClientConfig>) -> Self
-pub const fn Dialer::with_limits(self, limits: Limits) -> Self
-pub const fn Dialer::with_local_addr(self, address: SocketAddr) -> Self    // binds each connection's socket there first
-pub const fn Dialer::with_frames(self, frames: Frames) -> Self
-pub const fn Dialer::with_datagrams(self) -> Self                       // asks the server to agree; one that does not makes the dial Failure::Unsupported
-pub const fn Dialer::with_webrtc(self, settings: webrtc::Settings) -> Self  // feature webrtc; datagrams too, and a climb where the listener can
-pub fn Dialer::with_header(self, name: impl Into<String>, value: impl Into<String>) -> Self // a value never prints
-pub const fn Dialer::with_plain_beyond_loopback(self) -> Self               // ws:// beyond loopback too: not the default, reported
+pub fn Dialer::builder() -> DialerBuilder     // no TLS until .tls(..): reaches only ws://; wss:// fails with Failure::Certificate
+impl DialerBuilder {                          // Clone, Debug, must_use; every setter takes and returns self, the last wins; build() -> Dialer
+    pub fn tls(self, tls: Arc<rustls::ClientConfig>) -> Self
+    pub const fn limits(self, limits: Limits) -> Self
+    pub const fn local_addr(self, address: SocketAddr) -> Self    // binds each connection's socket there first
+    pub const fn frames(self, frames: Frames) -> Self
+    pub const fn datagrams(self, datagrams: bool) -> Self          // asks the server to agree; one that does not makes the dial Failure::Unsupported
+    pub const fn webrtc(self, settings: webrtc::Settings) -> Self  // feature webrtc; datagrams too, and a climb where the listener can
+    pub fn header(self, name: impl Into<String>, value: impl Into<String>) -> Self  // a value never prints; each call adds one
+    pub const fn plain_beyond_loopback(self, allow: bool) -> Self  // ws:// beyond loopback too: not the default, reported
+    pub const fn settings(self, settings: DialerSettings) -> Self  // everything but tls and headers, whole
+}
+#[non_exhaustive] pub struct DialerSettings { pub frames: Frames, pub datagrams: bool, pub limits: Limits, pub plain_beyond_loopback: bool, pub local_addr: Option<SocketAddr>, pub webrtc: Option<webrtc::Settings> }  // guatiao value; webrtc with feature webrtc
+pub fn Dialer::settings(&self) -> DialerSettings
 pub const fn Dialer::plain_beyond_loopback(&self) -> bool
-pub fn Dialer::non_defaults(&self) -> Vec<NonDefault>
+pub fn Dialer::non_defaults(&self) -> Vec<NonDefault>   // every DialerSettings key that differs, by key path
 pub struct Connector                                                        // Clone, Debug; a coqui_transport::Connector
 pub const fn Connector::new(dialer: Dialer, endpoint: Url) -> Self          // connect(timeout) dials that endpoint, each call with a clone of the dialer
-pub fn Listener::bind(address: SocketAddr, tls: Option<Arc<rustls::ServerConfig>>) -> Result<Self, Failure>
-pub fn Listener::bind_plain(address: SocketAddr) -> Result<Self, Failure>   // no TLS, loopback or not, such as 0.0.0.0: reported beyond loopback
+pub fn Listener::builder(address: SocketAddr, tls: impl Into<ServerTls>) -> ListenerBuilder   // ServerTls::{Plain, Config(Arc<rustls::ServerConfig>)}, non_exhaustive; From<Arc<ServerConfig>>
+impl ListenerBuilder {                        // Debug, must_use; build() -> Result<Listener, Failure>
+    pub const fn limits(self, limits: Limits) -> Self
+    pub const fn frames(self, frames: Frames) -> Self
+    pub fn origins(self, origins: impl IntoIterator<Item = String>) -> Self
+    pub const fn plain_beyond_loopback(self, allow: bool) -> Self   // plain WebSocket beyond loopback, such as 0.0.0.0: reported
+    pub fn admission(self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self
+    pub fn webrtc(self, port: &webrtc::Port) -> Self                 // feature webrtc
+    pub fn settings(self, settings: ListenerSettings) -> Self        // everything but the address, TLS, admission and port, whole
+}
+#[non_exhaustive] pub struct ListenerSettings { pub frames: Frames, pub limits: Limits, pub origins: Vec<String>, pub plain_beyond_loopback: bool }  // guatiao value
+pub fn Listener::settings(&self) -> ListenerSettings
 pub fn Listener::plain_beyond_loopback(&self) -> bool
 pub fn Listener::non_defaults(&self) -> Vec<NonDefault>
-pub const fn Listener::with_limits(self, limits: Limits) -> Self
-pub const fn Listener::with_frames(self, frames: Frames) -> Self
-pub fn Listener::with_origins(self, origins: impl IntoIterator<Item = String>) -> Self
-pub fn Listener::with_admission(self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self
-pub fn Listener::with_webrtc(self, port: &webrtc::Port) -> Self             // feature webrtc
 pub fn Listener::local_addr(&self) -> Result<SocketAddr, Failure>
 pub fn Listener::next(&self, timeout: Option<Duration>) -> Result<Pending, Failure>
 pub const fn Pending::peer_addr(&self) -> SocketAddr                         // the source Listener::next admitted
@@ -328,7 +332,7 @@ pub fn Channel::next_signal(&self, timeout: Option<Duration>) -> Result<Option<V
 pub fn Channel::deliver_signal(&self, signal: &[u8]) -> Result<(), Failure>                        // feature webrtc, Signaling::ByCaller
 ```
 
-`bind` with no TLS on a non-loopback address is `Failure::Permission`; `bind_plain` is the deliberate choice of one. A dialer refuses `ws://` beyond loopback with `Failure::Permission` before connecting, unless `with_plain_beyond_loopback`. A listener or dialer that allows it says so in `plain_beyond_loopback()` and in its `Debug`, for the host to show; neither prints. `Endpoints` still takes `ws://` only on loopback. `accept` runs one handshake, bounded in total by `Limits::handshake`. `Listener::next` returns a `Pending` before its handshake, for a server that runs `Pending::handshake` on threads of its own so one slow peer cannot hold up others. `send` answers `Failure::NoProgress` at once while `Limits::queued_bytes`, or 256 messages, wait to be sent; `send_timeout` waits for room instead, woken by the worker only while a sender waits, and answers why the worker ended once it has: `Failure::Protocol` when either end refused what the other sent, otherwise `Failure::PathLost`. A message over the bound a reader set, or one that breaks the wire, ends the channel with a close code saying so (1009, 1002, 1003 or 1007): the reading end reports `Failure::Protocol`, and so does the sending end once the close arrives, to its reader and its senders. The reading end then reads and discards what the peer still sends until the peer closes, for up to 500 ms, so the close is not lost to a reset. `close` returns once what was queued has gone, or the peer has taken nothing for `Limits::send`. Each channel has a worker thread that sleeps on its socket and on its callers, so an idle channel takes no CPU and a message goes as soon as it is sent; the wait holds up to two file handles beside the socket. `Failure::Certificate` means a certificate was rejected, by this side or the peer's; any other TLS error is `Failure::Protocol`, since one forged record can cause it.
+`ServerTls::Plain` on a non-loopback address is `Failure::Permission` at `build`, unless `plain_beyond_loopback(true)` makes the deliberate choice. A dialer refuses `ws://` beyond loopback with `Failure::Permission` before connecting, unless `plain_beyond_loopback(true)`. A listener or dialer that allows it says so in `plain_beyond_loopback()` and in its `Debug`, for the host to show; neither prints. `Endpoints` still takes `ws://` only on loopback. `accept` runs one handshake, bounded in total by `Limits::handshake`. `Listener::next` returns a `Pending` before its handshake, for a server that runs `Pending::handshake` on threads of its own so one slow peer cannot hold up others. `send` answers `Failure::NoProgress` at once while `Limits::queued_bytes`, or 256 messages, wait to be sent; `send_timeout` waits for room instead, woken by the worker only while a sender waits, and answers why the worker ended once it has: `Failure::Protocol` when either end refused what the other sent, otherwise `Failure::PathLost`. A message over the bound a reader set, or one that breaks the wire, ends the channel with a close code saying so (1009, 1002, 1003 or 1007): the reading end reports `Failure::Protocol`, and so does the sending end once the close arrives, to its reader and its senders. The reading end then reads and discards what the peer still sends until the peer closes, for up to 500 ms, so the close is not lost to a reset. `close` returns once what was queued has gone, or the peer has taken nothing for `Limits::send`. Each channel has a worker thread that sleeps on its socket and on its callers, so an idle channel takes no CPU and a message goes as soon as it is sent; the wait holds up to two file handles beside the socket. `Failure::Certificate` means a certificate was rejected, by this side or the peer's; any other TLS error is `Failure::Protocol`, since one forged record can cause it.
 
 Both listeners are `coqui_transport::Listener`s: `accept()` with no timeout waits for the next connection, and a failed handshake
 fails that call only. Their own `accept(timeout)` is the inherent method; call the trait's as `coqui_transport::Listener::accept(&l)`.
@@ -337,18 +341,28 @@ fails that call only. Their own `accept(timeout)` is the inherent method; call t
 
 ```rust
 pub struct Channel                          // implements coqui_transport_web::Channel
-pub fn Dialer::pinned(pins: &[CertificatePin]) -> Result<Self, Failure>
+pub fn Dialer::builder(trust: impl Into<ClientTrust>) -> DialerBuilder   // ClientTrust::{Pinned(Vec<CertificatePin>), Config(Arc<rustls::ClientConfig>)}, non_exhaustive
 pub struct Connector                                                        // Clone, Debug; a coqui_transport::Connector
 pub const fn Connector::new(dialer: Dialer, endpoint: Url) -> Self
-pub fn Dialer::with_tls(tls: Arc<rustls::ClientConfig>) -> Result<Self, Failure>
-pub const fn Dialer::with_limits(self, limits: Limits) -> Self
-pub const fn Dialer::with_local_addr(self, address: SocketAddr) -> Self    // binds the UDP socket there, one per address tried
-pub fn Listener::bind(address: SocketAddr, tls: Arc<rustls::ServerConfig>) -> Result<Self, Failure>
-pub fn Listener::on_port(port: &webrtc::Port, tls: Arc<rustls::ServerConfig>) -> Result<Self, Failure>  // feature webrtc; one per port, a second is Failure::Permission
-pub const fn Listener::with_limits(self, limits: Limits) -> Self
-pub fn Listener::with_origins(self, origins: impl IntoIterator<Item = String>) -> Self
-pub fn Listener::with_admission(self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self
-pub fn Listener::with_tls_per_connection(self, tls: impl Fn(SocketAddr, SocketAddr) -> Arc<rustls::ServerConfig> + Send + Sync + 'static) -> Self  // (source, local) -> this connection's TLS
+impl DialerBuilder {                          // Clone, Debug, must_use; build() -> Result<Dialer, Failure>
+    pub const fn limits(self, limits: Limits) -> Self
+    pub const fn local_addr(self, address: SocketAddr) -> Self    // binds the UDP socket there, one per address tried
+    pub fn settings(self, settings: DialerSettings) -> Self
+}
+#[non_exhaustive] pub struct DialerSettings { pub limits: Limits, pub local_addr: Option<SocketAddr> }  // guatiao value
+pub fn Dialer::settings(&self) -> DialerSettings
+pub fn Dialer::non_defaults(&self) -> Vec<NonDefault>
+pub fn Listener::builder(binding: impl Into<Binding>, tls: Arc<rustls::ServerConfig>) -> ListenerBuilder   // Binding::{Address(SocketAddr), Port(webrtc::Port)} (feature webrtc: one listener per port, a second is Failure::Permission), non_exhaustive
+impl ListenerBuilder {                        // Debug, must_use; build() -> Result<Listener, Failure>
+    pub const fn limits(self, limits: Limits) -> Self
+    pub fn origins(self, origins: impl IntoIterator<Item = String>) -> Self
+    pub fn admission(self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self
+    pub fn tls_per_connection(self, tls: impl Fn(SocketAddr, SocketAddr) -> Arc<rustls::ServerConfig> + Send + Sync + 'static) -> Self  // (source, local) -> this connection's TLS
+    pub fn settings(self, settings: ListenerSettings) -> Self
+}
+#[non_exhaustive] pub struct ListenerSettings { pub limits: Limits, pub origins: Vec<String> }  // guatiao value
+pub fn Listener::settings(&self) -> ListenerSettings
+pub fn Listener::non_defaults(&self) -> Vec<NonDefault>
 pub const fn Listener::local_addr(&self) -> SocketAddr
 pub fn Listener::next(&self, timeout: Option<Duration>) -> Result<Pending, Failure>
 pub const fn Pending::peer_addr(&self) -> SocketAddr                         // the source admission judged; on a Port the client's, not its relay's
@@ -358,7 +372,7 @@ pub fn Pending::handshake(self) -> Result<Channel, Failure>
 pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Failure>
 ```
 
-`with_tls_per_connection` builds each connection's TLS configuration in `Pending::handshake`, before its QUIC handshake, from the source and the local address `Pending` reports, so a client certificate verifier can judge a client by both, or keep strangers from different sources apart. The handshake itself runs on the listener's runtime threads, where nothing set up around `Pending::handshake` (a thread-local scope) is in force. Its ALPN is set to WebTransport's; without it every connection gets the configuration the listener was bound with. A dialer whose certificate the server refuses, or which presented none to a server requiring one, fails with `Failure::Certificate`, as a TLS WebSocket reads the same alerts (bad, unsupported, revoked, expired or unknown certificate, unknown CA, access denied, certificate required); another TLS alert is `Failure::Unsupported`.
+`tls_per_connection` builds each connection's TLS configuration in `Pending::handshake`, before its QUIC handshake, from the source and the local address `Pending` reports, so a client certificate verifier can judge a client by both, or keep strangers from different sources apart. The handshake itself runs on the listener's runtime threads, where nothing set up around `Pending::handshake` (a thread-local scope) is in force. Its ALPN is set to WebTransport's; without it every connection gets the configuration the listener was built with. A dialer whose certificate the server refuses, or which presented none to a server requiring one, fails with `Failure::Certificate`, as a TLS WebSocket reads the same alerts (bad, unsupported, revoked, expired or unknown certificate, unknown CA, access denied, certificate required); another TLS alert is `Failure::Unsupported`.
 
 `Listener::next` sends a source to retry first, since UDP sources are forgeable, then judges it by admission, and `Pending::handshake` completes it. A source admission refuses, or a `Pending` dropped before its handshake, is closed with QUIC's CONNECTION_REFUSED, which its dialer reports as `Failure::Permission` and never falls back from. The client cannot tell that from any QUIC server refusing a connection (quinn also does when it runs out of connection IDs), and anyone who saw its first packet can forge one, as with a TCP reset. Each dialer and listener runs its own runtime, and its calls block. Inside an async runtime, call them from its blocking pool.
 
@@ -368,16 +382,7 @@ pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Fai
 
 ```rust
 pub struct Settings { pub enabled: bool, pub attempt: Duration, pub path_mtu: usize, pub public_address: Option<SocketAddr>, pub any_candidate: bool, pub signaling: Signaling, pub max_sessions: usize, pub max_relays: usize, pub max_per_address: usize, pub relay_idle: Duration }
-pub const fn with_enabled(self, enabled: bool) -> Self
-pub const fn with_attempt(self, limit: Duration) -> Self
-pub const fn with_path_mtu(self, bytes: usize) -> Self
-pub const fn with_public_address(self, address: SocketAddr) -> Self
-pub const fn with_any_candidate(self) -> Self
-pub const fn with_signaling(self, signaling: Signaling) -> Self
-pub const fn with_max_sessions(self, sessions: usize) -> Self
-pub const fn with_max_relays(self, relays: usize) -> Self
-pub const fn with_max_per_address(self, held: usize) -> Self
-pub const fn with_relay_idle(self, limit: Duration) -> Self
+// A guatiao value (ToValue, FromValue, Schema); signaling is "on-channel" or "by-caller".
 pub enum Signaling { OnChannel, ByCaller }            // non_exhaustive; default OnChannel
 pub struct Port                                       // Clone; Debug
 pub fn Port::bind(address: SocketAddr, settings: Settings) -> Result<Self, Failure>   // Permission when taken or not allowed; Unsupported for settings that leave no room
@@ -386,11 +391,11 @@ pub fn Port::relays(&self) -> usize                   // QUIC sources relayed no
 pub fn Port::data_channels(&self) -> usize            // data channels held now, opening or open
 ```
 
-`#[non_exhaustive]`. Defaults: on, 5 s for an attempt, a path of 1280 bytes, no public address, a candidate only where the peer is, `OnChannel`, 256 data channels, 512 relays, 64 of either for one IP address, 120 s for a relay's silence on the listener's side. Settings with a `path_mtu` of 116 or less, or a zero time or count, are `Failure::Unsupported` from `Port::bind` and from a `with_webrtc` dialer's `dial`.
+`#[non_exhaustive]`. Defaults: on, 5 s for an attempt, a path of 1280 bytes, no public address, a candidate only where the peer is, `OnChannel`, 256 data channels, 512 relays, 64 of either for one IP address, 120 s for a relay's silence on the listener's side. Settings with a `path_mtu` of 116 or less, or a zero time or count, are `Failure::Unsupported` from `Port::bind` and from a `webrtc` dialer's `dial`.
 
-A `Port` reads the first byte of each packet (RFC 9443): QUIC to a loopback relay in front of `webtransport::Listener::on_port`, STUN and DTLS to a data channel, anything else dropped. One worker thread serves it and sleeps while nothing is due; at rest it wakes when `str0m` asks, every few seconds per data channel. It ends with its last clone, listener or channel: the socket and relays close and the thread is joined.
+A `Port` reads the first byte of each packet (RFC 9443): QUIC to a loopback relay in front of a `webtransport::Listener` built on a `Binding::Port`, STUN and DTLS to a data channel, anything else dropped. One worker thread serves it and sleeps while nothing is due; at rest it wakes when `str0m` asks, every few seconds per data channel. It ends with its last clone, listener or channel: the socket and relays close and the thread is joined.
 
-A WebSocket with `Dialer::with_webrtc` asks for `coqui-web-ladder.1` and `coqui-web-datagrams.1`, and a listener with `with_webrtc` prefers the first, which adds tag 2, a signal: one byte, 1 offer, 2 answer or 3 refused, then the session description. A listener with no port never agrees to it, and a dialer without `with_webrtc` never asks. The attempt starts at each end when `datagrams()` is first called there, once per channel. The channel is unordered with no retransmits, created by the dialer. Until it opens, and after it dies, datagrams stay in the WebSocket; each switch is reported by `path_changes`. An attempt that fails changes nothing and reports nothing.
+A WebSocket whose dialer sets `webrtc` asks for `coqui-web-ladder.1` and `coqui-web-datagrams.1`, and a listener built with `webrtc(&port)` prefers the first, which adds tag 2, a signal: one byte, 1 offer, 2 answer or 3 refused, then the session description. A listener with no port never agrees to it, and a dialer without `webrtc` never asks. The attempt starts at each end when `datagrams()` is first called there, once per channel. The channel is unordered with no retransmits, created by the dialer. Until it opens, and after it dies, datagrams stay in the WebSocket; each switch is reported by `path_changes`. An attempt that fails changes nothing and reports nothing.
 
 ## Gotchas
 
@@ -398,10 +403,10 @@ A WebSocket with `Dialer::with_webrtc` asks for `coqui-web-ladder.1` and `coqui-
 
 - `Unverified` proves nothing about the peer. Run the identity proof before `into_verified`.
 - `connect` never retries after returning, and an endpoint with pins never falls back, even on a path failure.
-- A pin needs a certificate valid for at most 14 days, ECDSA P-256, in browsers and in `Dialer::pinned` alike. Otherwise it is refused as `Failure::Certificate`.
+- A pin needs a certificate valid for at most 14 days, ECDSA P-256, in browsers and in `ClientTrust::Pinned` alike. Otherwise it is refused as `Failure::Certificate`.
 - A WebTransport dialer given a host name tries every address it resolves to, the families taking turns from the resolver's first, a new attempt every 250 ms beside those still opening (RFC 8305); the first to open wins. A failure that is not about the path, such as a rejected certificate, ends the dial at once, whichever address gave it. The name is resolved by the system before the dial's timeout starts, as a WebSocket dialer's is. An address literal is dialled as it is.
 - WebSocket `Text` frames: `Channel::send` refuses bytes that are not UTF-8 before they reach the wire.
-- `Dialer::with_local_addr` (both drivers) binds before connecting, so a listener's admission and `Pending::peer_addr` see that
+- `DialerBuilder::local_addr` (both drivers) binds before connecting, so a listener's admission and `Pending::peer_addr` see that
   address. Give port 0. Only endpoint addresses of its family are tried. An address this host cannot bind, or an endpoint with
   none of its family, fails the dial with `Failure::Unsupported` before anything is sent (`Failure::Permission` when the address
   is taken or not allowed). A second loopback address such as `127.0.0.2` works only where the system binds it and routes it to
@@ -413,7 +418,7 @@ A WebSocket with `Dialer::with_webrtc` asks for `coqui-web-ladder.1` and `coqui-
   that still owes a proof, stage it with `set_max_receive_after(1, larger)` before the peer can send either.
 - `set_pending` after a handshake reaches only what the driver has not read yet, and a driver starts reading as soon as the channel
   opens: up to `Limits::pending` messages (64 by default) may already be held by then. To hold a peer that still owes a proof to one
-  message from its first, give the listener `Limits::with_pending(1)` and call `set_pending` with a larger value on each channel once
+  message from its first, give the listener `Limits { pending: 1, .. }` and call `set_pending` with a larger value on each channel once
   its peer is proved. Besides those messages, a channel holds only bytes below them, none of which `max_message` multiplies: what
   its last read brought in beyond the message (under tungstenite's 128 KiB read buffer on a WebSocket, under 16 KiB on WebTransport),
   what TLS has decrypted, and the transport's own window: the system's TCP receive buffer, or QUIC's stream window (quinn's default,
@@ -422,12 +427,12 @@ A WebSocket with `Dialer::with_webrtc` asks for `coqui-web-ladder.1` and `coqui-
 - An empty datagram sent from Rust on a data channel is refused with `Failure::Protocol`: `str0m` writes nothing for one. One arriving from a browser is delivered.
 - A datagram sent from a data channel's end before the other end has switched still arrives: each end listens on both paths.
 - `Port`'s candidate names the address the WebSocket connection arrived at, with the UDP port's number. Behind a proxy or NAT set `Settings::public_address`: the default is wrong there, and tells the peer an address it had no other way to learn. A peer always learns the address it is given. On a host with several addresses, bind one: a reply leaves by whichever the system picks, on a wildcard socket.
-- A peer can name any candidate in an answer. `with_webrtc` refuses one not at the WebSocket's peer unless `Settings::any_candidate`; candidates in an offer are discarded. A browser has no such check for a server named by host name.
+- A peer can name any candidate in an answer. the dialer's `webrtc` setting refuses one not at the WebSocket's peer unless `Settings::any_candidate`; candidates in an offer are discarded. A browser has no such check for a server named by host name.
 - A listening data channel answers checks only from its WebSocket peer's IP address, and once its peer nominates a source it hears from that one alone, so a client holding the credentials cannot point the port's traffic elsewhere or take another session's path. A check is routed by the fragment it names, anything else by its source. Behind a proxy the WebSocket peer is the proxy: set `any_candidate` on the `Port`, and each session is then held to the first source its peer nominated, which that peer could have forged.
 - One IP address holds at most `max_per_address` relays and as many data channels. Behind a proxy every client has the proxy's address.
 - Through a reverse proxy a UDP path needs a stream block for the port, or the host's own port with `public_address`. Without one the attempt fails and the ladder ends at the WebSocket.
 - A relay is a socket per QUIC source, so a flood of forged sources is a real cost, which the caps bound. Past either cap a new source replaces the oldest of the same kind with no finished handshake and at least half a second old, or is dropped, and takes at least a 1200-byte first packet. A relay whose WebTransport handshake finished is never replaced and ends when its connection does, after which only a first packet of 1200 bytes from that source starts another for 10 s; one is kept alive only by what the listener sends, never by the source. A flood of more than the cap per half second still holds back new WebTransport sessions, which fall back like any failed WebTransport. It shares the port's one thread with the data channels, so it can slow them too.
 - A relay's address is a loopback port the system hands out, so it can come back for another source. A Retry token names that address and lasts seconds, and went only to the source it was minted for. No address-validation token is handed out on a port: one is bound to an IP address, and every relay is 127.0.0.1.
-- `webtransport::Listener::on_port` sees the relay's address, not the client's, inside `wtransport`; admission and `Debug` read through to the real one. A local process reaching its loopback socket directly is refused when admission is set. QUIC's ECN does not cross the relay.
+- a `webtransport::Listener` on a `Binding::Port` sees the relay's address, not the client's, inside `wtransport`; admission and `Debug` read through to the real one. A local process reaching its loopback socket directly is refused when admission is set. QUIC's ECN does not cross the relay.
 - `Datagrams::path_changes` before `datagrams()` is not possible, and an event between the two calls is missed: read `delivery()` after subscribing. A climbing channel tells only its 16 most recent subscriptions.
 - Signals on the channel have what TLS gives them. For datagrams bound to a peer proof use `Signaling::ByCaller` and carry them inside the proven link. Then, while the data channel is open, a datagram tagged inside the WebSocket is discarded and counted, so everything received is inside the proof; before it opens, and after it dies, they are what TLS gives them.

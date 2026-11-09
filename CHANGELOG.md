@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Builders and settings.** `websocket::Dialer::builder()`, `websocket::Listener::builder(address, ServerTls)`, `webtransport::Dialer::builder(ClientTrust)` and `webtransport::Listener::builder(Binding, tls)` set a dialer or listener up by the setting's name (`limits`, `frames`, `datagrams`, `origins`, `admission`, `tls_per_connection`, `local_addr`, `plain_beyond_loopback`, `webrtc`, `settings`, ...), then `build()`; there are no `new`, `bind`, `bind_plain`, `pinned`, `with_tls`, `on_port` or `with_` setters. `DialerSettings` and `ListenerSettings` (per driver), `Limits` and `webrtc::Settings` are guatiao values a file fills, and `settings(..)` takes one whole; `Limits` and `Settings` are assigned field by field. `non_defaults()` is generated from the settings' schema and names every difference by key path (`limits.max_message`).
 - `coqui_transport::Connector` and `Listener` for both drivers (`websocket::Connector`, `webtransport::Connector`, and the
   listeners), and `capabilities()` and `is_closed()` on both channels. `capabilities()` never starts datagram reading or a
   data-channel attempt.
@@ -19,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `NonDefault` is `coqui_transport::NonDefault` (`setting` is a `String`, and the order is setting, value, default), and a `Capabilities` is set by `carrier`, `limits` and `datagrams`.
 - The crate is `coqui-transport-web` (it was `coqui-web-channel`), in the `coqui-transport` family: the repository is
   `Boriken-Dev/coqui-transport-web` with the history of the old one, the library `coqui_transport_web`, the Dart package
   `coqui_transport_web`. `coqui-web-channel` is a deprecated crate that re-exports this one.

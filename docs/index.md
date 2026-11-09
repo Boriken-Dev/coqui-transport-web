@@ -51,8 +51,8 @@ A browser with no WebTransport, or a path where QUIC is blocked, can still have 
 
 ```rust
 let port = webrtc::Port::bind(address, webrtc::Settings::default())?;
-let quic = webtransport::Listener::on_port(&port, tls.clone())?;
-let websocket = websocket::Listener::bind(port.local_addr(), Some(tls))?.with_webrtc(&port);
+let quic = webtransport::Listener::builder(port.clone(), tls.clone()).build()?;
+let websocket = websocket::Listener::builder(port.local_addr(), websocket::ServerTls::Config(tls)).webrtc(&port).build()?;
 ```
 
 **One port.** A `Port` owns the socket and reads the first byte of each packet, as [RFC 9443](https://www.rfc-editor.org/rfc/rfc9443) lays out: QUIC goes through a relay to an unmodified
