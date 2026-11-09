@@ -180,6 +180,15 @@ impl core::convert::From<alloc::vec::Vec<coqui_transport_web::CertificatePin>> f
 pub fn coqui_transport_web::webtransport::ClientTrust::from(alloc::vec::Vec<coqui_transport_web::CertificatePin>) -> Self
 impl core::fmt::Debug for coqui_transport_web::webtransport::ClientTrust
 pub fn coqui_transport_web::webtransport::ClientTrust::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum coqui_transport_web::webtransport::ServerTls
+pub coqui_transport_web::webtransport::ServerTls::Config(alloc::sync::Arc<rustls::server::server_conn::ServerConfig>)
+pub coqui_transport_web::webtransport::ServerTls::PerConnection(alloc::sync::Arc<(dyn core::ops::function::Fn(core::net::socket_addr::SocketAddr, core::net::socket_addr::SocketAddr) -> alloc::sync::Arc<rustls::server::server_conn::ServerConfig> + core::marker::Send + core::marker::Sync)>)
+impl coqui_transport_web::webtransport::ServerTls
+pub fn coqui_transport_web::webtransport::ServerTls::per_connection(impl core::ops::function::Fn(core::net::socket_addr::SocketAddr, core::net::socket_addr::SocketAddr) -> alloc::sync::Arc<rustls::server::server_conn::ServerConfig> + core::marker::Send + core::marker::Sync + 'static) -> Self
+impl core::convert::From<alloc::sync::Arc<rustls::server::server_conn::ServerConfig>> for coqui_transport_web::webtransport::ServerTls
+pub fn coqui_transport_web::webtransport::ServerTls::from(alloc::sync::Arc<rustls::server::server_conn::ServerConfig>) -> Self
+impl core::fmt::Debug for coqui_transport_web::webtransport::ServerTls
+pub fn coqui_transport_web::webtransport::ServerTls::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct coqui_transport_web::webtransport::Channel
 impl coqui_transport::channel::Channel for coqui_transport_web::webtransport::Channel
 pub fn coqui_transport_web::webtransport::Channel::capabilities(&self) -> coqui_transport::capabilities::Capabilities
@@ -228,7 +237,7 @@ pub coqui_transport_web::webtransport::DialerSettings::local_addr: core::option:
 pub struct coqui_transport_web::webtransport::Listener
 impl coqui_transport_web::webtransport::Listener
 pub fn coqui_transport_web::webtransport::Listener::accept(&self, core::option::Option<core::time::Duration>) -> core::result::Result<coqui_transport_web::webtransport::Channel, coqui_transport::failure::Failure>
-pub fn coqui_transport_web::webtransport::Listener::builder(impl core::convert::Into<coqui_transport_web::webtransport::Binding>, alloc::sync::Arc<rustls::server::server_conn::ServerConfig>) -> coqui_transport_web::webtransport::ListenerBuilder
+pub fn coqui_transport_web::webtransport::Listener::builder(impl core::convert::Into<coqui_transport_web::webtransport::Binding>, impl core::convert::Into<coqui_transport_web::webtransport::ServerTls>) -> coqui_transport_web::webtransport::ListenerBuilder
 pub const fn coqui_transport_web::webtransport::Listener::local_addr(&self) -> core::net::socket_addr::SocketAddr
 pub fn coqui_transport_web::webtransport::Listener::next(&self, core::option::Option<core::time::Duration>) -> core::result::Result<coqui_transport_web::webtransport::Pending, coqui_transport::failure::Failure>
 pub fn coqui_transport_web::webtransport::Listener::non_defaults(&self) -> alloc::vec::Vec<coqui_transport::non_default::NonDefault>
@@ -246,7 +255,6 @@ pub fn coqui_transport_web::webtransport::ListenerBuilder::build(self) -> core::
 pub const fn coqui_transport_web::webtransport::ListenerBuilder::limits(self, coqui_transport_web::Limits) -> Self
 pub fn coqui_transport_web::webtransport::ListenerBuilder::origins(self, impl core::iter::traits::collect::IntoIterator<Item = alloc::string::String>) -> Self
 pub fn coqui_transport_web::webtransport::ListenerBuilder::settings(self, coqui_transport_web::webtransport::ListenerSettings) -> Self
-pub fn coqui_transport_web::webtransport::ListenerBuilder::tls_per_connection(self, impl core::ops::function::Fn(core::net::socket_addr::SocketAddr, core::net::socket_addr::SocketAddr) -> alloc::sync::Arc<rustls::server::server_conn::ServerConfig> + core::marker::Send + core::marker::Sync + 'static) -> Self
 impl core::fmt::Debug for coqui_transport_web::webtransport::ListenerBuilder
 pub fn coqui_transport_web::webtransport::ListenerBuilder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub struct coqui_transport_web::webtransport::ListenerSettings

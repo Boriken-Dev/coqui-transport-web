@@ -825,6 +825,69 @@ impl crate::Dialer for Dialer {
 /// Builds one connection's TLS configuration from its source and the local address it reached.
 type TlsFor = Arc<dyn Fn(SocketAddr, SocketAddr) -> Arc<ServerConfig> + Send + Sync>;
 
+/// The TLS a [`Listener`] serves, given to [`Listener::builder`].
+///
+/// Its ALPN is set to WebTransport's either way.
+#[derive(Clone)]
+#[non_exhaustive]
+pub enum ServerTls {
+    /// Every connection gets this configuration.
+    Config(Arc<ServerConfig>),
+    /// Each connection gets the configuration this builds before its handshake from the client's source and the local address it
+    /// reached (on a wildcard bind, the one it sent to), so a client certificate verifier can judge a client by both. It runs on
+    /// the driver's own threads, where nothing the caller set up around [`Pending::handshake`] is in scope.
+    PerConnection(Arc<dyn Fn(SocketAddr, SocketAddr) -> Arc<ServerConfig> + Send + Sync>),
+}
+
+impl ServerTls {
+    /// A configuration built for each connection from its source and the local address it reached; see
+    /// [`ServerTls::PerConnection`].
+    pub fn per_connection(
+        build: impl Fn(SocketAddr, SocketAddr) -> Arc<ServerConfig> + Send + Sync + 'static,
+    ) -> Self {
+        Self::PerConnection(Arc::new(build))
+    }
+}
+
+impl fmt::Debug for ServerTls {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Config(_) => f.write_str("Config(..)"),
+            Self::PerConnection(_) => f.write_str("PerConnection(..)"),
+        }
+    }
+}
+
+impl From<Arc<ServerConfig>> for ServerTls {
+    fn from(config: Arc<ServerConfig>) -> Self {
+        Self::Config(config)
+    }
+}
+
+/// Refuses every handshake for want of a certificate. A listener that builds its TLS per connection never serves a handshake
+/// from the configuration its endpoint starts with, because each connection's own replaces it before the handshake.
+#[derive(Debug)]
+struct NoCertificate;
+
+impl rustls::server::ResolvesServerCert for NoCertificate {
+    fn resolve(
+        &self,
+        _: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        None
+    }
+}
+
+fn unserved() -> Arc<ServerConfig> {
+    Arc::new(
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the default protocol versions")
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(NoCertificate)),
+    )
+}
+
 /// The QUIC endpoint behind a listener, on quinn itself so each connection can have a TLS configuration of its own, and the
 /// configuration a connection otherwise gets.
 fn server_endpoint(
@@ -931,9 +994,8 @@ pub struct ListenerSettings {
 #[must_use]
 pub struct ListenerBuilder {
     binding: Binding,
-    tls: Arc<ServerConfig>,
+    tls: ServerTls,
     settings: ListenerSettings,
-    tls_for: Option<TlsFor>,
     admission: Option<Admission>,
 }
 
@@ -959,18 +1021,6 @@ impl ListenerBuilder {
         self
     }
 
-    /// Builds each connection's TLS configuration before its handshake from the client's source and the local address it reached
-    /// (on a wildcard bind, the one it sent to), so a client certificate verifier can judge a client by both. The handshake runs
-    /// on the driver's own threads, where nothing the caller set up around [`Pending::handshake`] is in scope. Its ALPN is set to
-    /// WebTransport's. Without this, every connection gets the configuration the listener was built with.
-    pub fn tls_per_connection(
-        mut self,
-        tls: impl Fn(SocketAddr, SocketAddr) -> Arc<ServerConfig> + Send + Sync + 'static,
-    ) -> Self {
-        self.tls_for = Some(Arc::new(tls));
-        self
-    }
-
     /// Refuses a source address before any handshake, so a denied peer costs nothing. Decided on each connection.
     pub fn admission(mut self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self {
         self.admission = Some(Arc::new(admit));
@@ -990,27 +1040,31 @@ impl ListenerBuilder {
     ///
     /// Why it could not bind, or start; [`Failure::Permission`] when a [`Binding::Port`] already has its listener.
     pub fn build(self) -> Result<Listener, Failure> {
+        let (tls, tls_for) = match self.tls {
+            ServerTls::Config(config) => (config, None),
+            ServerTls::PerConnection(build) => (unserved(), Some(build)),
+        };
         let mut listener = match self.binding {
-            Binding::Address(address) => Listener::bind(address, self.tls)?,
+            Binding::Address(address) => Listener::bind(address, tls)?,
             #[cfg(feature = "webrtc")]
-            Binding::Port(port) => Listener::on_port(&port, self.tls)?,
+            Binding::Port(port) => Listener::on_port(&port, tls)?,
         };
         listener.limits = self.settings.limits;
         listener.origins = self.settings.origins;
-        listener.tls_for = self.tls_for;
+        listener.tls_for = tls_for;
         listener.admission = self.admission;
         Ok(listener)
     }
 }
 
 impl Listener {
-    /// A builder for a listener on `binding` serving `tls`, with every setting at its default.
-    pub fn builder(binding: impl Into<Binding>, tls: Arc<ServerConfig>) -> ListenerBuilder {
+    /// A builder for a listener on `binding` serving `tls`, with every setting at its default. `tls` is an
+    /// `Arc<rustls::ServerConfig>` or a [`ServerTls`].
+    pub fn builder(binding: impl Into<Binding>, tls: impl Into<ServerTls>) -> ListenerBuilder {
         ListenerBuilder {
             binding: binding.into(),
-            tls,
+            tls: tls.into(),
             settings: ListenerSettings::default(),
-            tls_for: None,
             admission: None,
         }
     }

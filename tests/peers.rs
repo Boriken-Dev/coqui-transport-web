@@ -485,13 +485,15 @@ fn noting_tls(address: SocketAddr, server: &Identity) -> (webtransport::Listener
     let tls = server_tls(server, server, Ask::Nothing);
     let noted = Addressed::default();
     let noting = Arc::clone(&noted);
-    let listener = webtransport::Listener::builder(address, Arc::clone(&tls))
-        .tls_per_connection(move |source, local| {
+    let listener = webtransport::Listener::builder(
+        address,
+        webtransport::ServerTls::per_connection(move |source, local| {
             noting.lock().unwrap().push((source, local));
             Arc::clone(&tls)
-        })
-        .build()
-        .unwrap();
+        }),
+    )
+    .build()
+    .unwrap();
     (listener, noted)
 }
 
