@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **Builders and settings.** `websocket::Dialer::builder()`, `websocket::Listener::builder(address, ServerTls)`, `webtransport::Dialer::builder(ClientTrust)` and `webtransport::Listener::builder(Binding, ServerTls)` (`ServerTls::{Config, PerConnection}`: the per-connection hook is a required argument, never a setter that overrides the configuration) set a dialer or listener up by the setting's name (`limits`, `frames`, `datagrams`, `origins`, `admission`, `local_addr`, `plain_beyond_loopback`, `webrtc`, `settings`, ...), then `build()`; there are no `new`, `bind`, `bind_plain`, `pinned`, `with_tls`, `on_port` or `with_` setters. `DialerSettings` and `ListenerSettings` (per driver), `Limits` and `webrtc::Settings` are guatiao values a file fills, and `settings(..)` takes one whole; `Limits` and `Settings` are assigned field by field. `non_defaults()` is generated from the settings' schema and names every difference by key path (`limits.max_message`).
+- **Builders and settings.** `websocket::Dialer::builder()`, `websocket::Listener::builder(address, ServerTls)`, `webtransport::Dialer::builder(ClientTrust)` and `webtransport::Listener::builder(Binding, ServerTls)` (`ServerTls::{Config, PerConnection}`: the per-connection hook is a required argument, never a setter that overrides the configuration) set a dialer or listener up by the setting's name (`limits`, `frames`, `datagrams`, `origins`, `admission`, `local_addr`, `plain_beyond_loopback`, `webrtc`, ...), then `build()`; there are no `new`, `bind`, `bind_plain`, `pinned`, `with_tls`, `on_port` or `with_` setters. `DialerSettings` and `ListenerSettings` (per driver), `Limits` and `webrtc::Settings` are `coqui_builder::Describe` types a file fills (a `Partial` of one, with coqui-builder's `serde` feature), and `fill(Partial::from(settings))` takes one whole; `Limits` and `Settings` are assigned field by field. `non_defaults()` is generated from the settings' schema and names every difference by key path (`limits.max_message`).
 - `coqui_transport::Connector` and `Listener` for both drivers (`websocket::Connector`, `webtransport::Connector`, and the
   listeners), and `capabilities()` and `is_closed()` on both channels. `capabilities()` never starts datagram reading or a
   data-channel attempt.
@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`tests/vectors/webtransport_frame.json`) it is checked against.
 
 ### Changed
+
+- **The settings and builders are coqui-builder's.** `Limits`, `webrtc::Settings` and each driver's `DialerSettings` and `ListenerSettings` derive `coqui_builder::Describe` (`Frames` and `Signaling` derive `Leaf`), and `guatiao` and `guatiao-serde` are no longer dependencies. A file's text is read as `Partial<T>` and `build()`; a duration is a number with an optional unit (`30`, `250ms`, `1.5h`) and `[secs, nanos]` and `{secs, nanos}` are no longer read. Each builder is derived from a `*Parts` struct (`websocket::{DialerParts, ListenerParts}`, `webtransport::{DialerParts, ListenerParts}`) by `coqui_builder::Builder`: every setting has a setter taking `impl Into<..>` (a `bool` takes a `bool`), `fill(Partial<..>)` and `fill_from(source)` layer a file or the environment, the last write of a key wins, and `parts()` gives what `build()` converts. The entries keep their call shape (`Listener::builder(address, tls)`, `webtransport::Dialer::builder(trust)`); `ListenerBuilder::new()`, `.address(..)`, `.binding(..)`, `.tls(..)` and `.trust(..)` are the same inputs set by name.
+- The WebSocket listener's `address` is an input of its builder, not a key of `ListenerSettings`; `tls`, `binding`, `trust`, `admission`, the data-channel `webrtc` port and the dialer's `tls` and `headers` are inputs too.
+- `build()` answers `Result<X, BuildError<Failure>>` for the WebSocket and WebTransport listeners and the WebTransport dialer (`Missing(..)` for an input not given, `Failed(failure)` for what it answered before), and `Result<Dialer, Missing>` for the WebSocket dialer.
+- `NonDefault` is `coqui_builder::NonDefault`: `value` and `default` are `Shown`, printed `Type(text)` (`bool(true)`, `Duration(30s)`, `unset`), and `NonDefault::new` takes `Shown`s.
+- `websocket::DialerBuilder::webrtc(settings)` sets the `webrtc` key only; `build()` still asks for datagrams when it is set. `ListenerBuilder::origins` takes `impl Into<Vec<String>>`, and a listener builder's `webrtc` takes `impl Into<Port>` (`&Port` converts).
+- Setters are no longer `const`.
 
 - `NonDefault` is `coqui_transport::NonDefault` (`setting` is a `String`, and the order is setting, value, default), and a `Capabilities` is set by `carrier`, `limits` and `datagrams`.
 - The crate is `coqui-transport-web` (it was `coqui-web-channel`), in the `coqui-transport` family: the repository is
@@ -38,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Breaking for a Dart class that implements these: `WebDatagrams.changes` and `DatagramWebChannel.carriedSignals` are new abstract members.
 - `Limits::pending` is exact: a driver holds at most that many messages its reader has not taken. A WebSocket held one more, in its
   worker, and WebTransport one more, in its read loop.
+
+### Removed
+
+- `guatiao` and `guatiao-serde` as dependencies, and the writers they gave the settings types (`ToValue`, `Schema`): nothing writes a settings value out.
+- The builders' `settings(s)`: use `fill(Partial::from(s))`.
+- `websocket::DialerBuilder::header(name, value)`: set the whole list with `headers(vec)`, which replaces any earlier one.
+- `Clone` on `websocket::DialerBuilder`, `webtransport::DialerBuilder` and the listener builders: keep the inputs and build twice from them.
+- `NonDefault::of_settings` and `NonDefault::new(&str, &str, &str)`: `coqui_builder::non_defaults(&settings)` lists a settings type's differences.
 
 ### Fixed
 

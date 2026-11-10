@@ -8,12 +8,16 @@ Header-file-style reference for the `coqui-transport-web` crate: every public it
 | `webtransport` | `webtransport::{Channel, Dialer, Listener}`, on `wtransport`, with a small runtime inside | off |
 | `webrtc` | `webrtc::{Port, Settings, Signaling}`, and a WebSocket channel that climbs onto a data channel, on `str0m`; implies both others | off |
 
-MSRV Rust 1.89. A default build depends on `url`, `guatiao` and `coqui-transport` (by git revision, `c550956`: the family has no releases yet). Version
+MSRV Rust 1.89. A default build depends on `url`, `coqui-builder` and `coqui-transport` (by git revision: the family has no releases yet). Version
 `0.0.0-alpha.0`, not published; the API may change in any release before 1.0.
 
 Imports: the crate root holds the channel contract (`Channel`, `Datagrams`, `Delivery`, `Failure`, `Capabilities`, `Carrier`,
 re-exported from `coqui-transport`, which defines them), `connect`, `Dialer`, `FailureExt`, `Endpoints`, `NonDefault` and, with a
-driver feature, `Limits` and `Cancel`. Public modules: `frame`, `webrtc`, `websocket`, `webtransport`.
+driver feature, `Limits`, `Admission` and `Cancel`. Public modules: `frame`, `prelude`, `webrtc`, `websocket`, `webtransport`.
+
+`prelude` re-exports the settings setters traits (`LimitsSetters`, `WebSocketDialerSettingsSetters`, `WebSocketListenerSettingsSetters`, `WebTransportDialerSettingsSetters`, `WebTransportListenerSettingsSetters`, `WebrtcSettingsSetters`) for a builder in another crate that holds one of these settings types. This crate's own builders have the setters as methods and need no import.
+
+The builders are `coqui_builder` derives (`#[derive(Builder)]` on a `*Parts` struct, named below): `Partial`, `Source`, `FillError`, `Missing` and `builder::BuildError` are coqui-builder's, not re-exported here. A driver's `build` is `Result<X, BuildError<Failure>>` where it can fail (`Missing(..)` for an input not given, `Failed(failure)` for what the old `Result<X, Failure>` said), `Result<Dialer, Missing>` for the WebSocket dialer. A builder is not `Clone`: keep the inputs and the `Partial`, and build twice from them.
 
 It was `coqui-web-channel`, now a deprecated crate that re-exports this one and `coqui-transport`. A name that crate had is
 here, except that `Failure::recovery` is a method of the `FailureExt` trait: import it.
@@ -132,7 +136,7 @@ fallback (`VerifyFallback` while opening, `VerifyAndReconcile` once active); a p
 peer-proof, permission or cancel failure never. An operation of uncertain outcome is never replayed.
 
 ```rust
-pub use coqui_transport::NonDefault;   // { setting: String (a key path in the settings type), value: String, default: String }; NonDefault::new(setting, value, default); NonDefault::of_settings(&T) lists a guatiao settings type's differences from its defaults
+pub use coqui_builder::NonDefault;   // { setting: String (a key path in the settings type), value: Shown, default: Shown }; Shown prints `Type(text)` (`bool(true)`, `Duration(30s)`, `unset`); coqui_builder::non_defaults(&T) lists a settings type's differences from its defaults
 ```
 
 A setting that differs from its default, as data. `websocket::Dialer::non_defaults()` and `websocket::Listener::non_defaults()` return
@@ -267,7 +271,7 @@ Methods for the `Decoder` struct.
 
 ```rust
 #[non_exhaustive] pub struct Limits { pub max_message: usize, pub pending: usize, pub handshake: Duration, pub queued_bytes: usize, pub send: Duration, pub idle: Duration, pub pending_datagrams: usize, pub websocket_datagram: usize }
-// A guatiao value (ToValue, FromValue, Schema): every key optional, unknown keys refused, a duration is seconds, [secs, nanos] or {secs, nanos}.
+// A coqui_builder::Describe type: every key optional, unknown keys refused, a duration is a number with an optional unit (`30`, `250ms`, `1.5h`); read a file's text as `Partial<Limits>` (coqui-builder's `serde` feature) and `build()`.
 ```
 
 `#[non_exhaustive]`. Defaults: 1 MiB, 64 messages, 10 s in total for a handshake, 64 MiB queued to send, 30 s for a WebSocket peer to take nothing while there is something to send, which ends the channel with `Failure::NoProgress`, a ping after 60 s of silence and `Failure::NoProgress` after 120 s. A message over `max_message` ends the channel with `Failure::Protocol`. When `pending`
@@ -275,6 +279,15 @@ messages wait for a slow reader, the driver stops reading from the peer, which h
 channel starts, `Channel::set_pending` changes it for one, and 0 is 1. A WebSocket that has
 stopped reading does not count the peer's silence, which it cannot hear, and pings the peer every `idle`, so neither end takes a
 stalled reader for gone. The sending end still ends the channel with `Failure::NoProgress` once the peer has taken nothing for `send`.
+
+## Admission (crate root, with a driver feature)
+
+```rust
+pub struct Admission                  // Clone, Debug; a listener builder's admission input
+impl<F: Fn(SocketAddr) -> bool + Send + Sync + 'static> From<F> for Admission
+```
+
+Decides, for each connection and before any handshake work, whether a source address may start one. Pass a closure to a listener builder's `admission`; `Admission` only gives that setter a type to convert into.
 
 ## Cancelling a handshake (crate root, with a driver feature)
 
@@ -291,35 +304,45 @@ A cancel before or during `Pending::handshake`, from any thread, makes it return
 pub enum Frames { Text, Binary }            // default Text; a binary message on a Text channel is Failure::Protocol
 pub struct Channel                          // implements coqui_transport_web::Channel
 pub fn Dialer::builder() -> DialerBuilder     // no TLS until .tls(..): reaches only ws://; wss:// fails with Failure::Certificate
-impl DialerBuilder {                          // Clone, Debug, must_use; every setter takes and returns self, the last wins; build() -> Dialer
-    pub fn tls(self, tls: Arc<rustls::ClientConfig>) -> Self
-    pub const fn limits(self, limits: Limits) -> Self
-    pub const fn local_addr(self, address: SocketAddr) -> Self    // binds each connection's socket there first
-    pub const fn frames(self, frames: Frames) -> Self
-    pub const fn datagrams(self, datagrams: bool) -> Self          // asks the server to agree; one that does not makes the dial Failure::Unsupported
-    pub const fn webrtc(self, settings: webrtc::Settings) -> Self  // feature webrtc; datagrams too, and a climb where the listener can
-    pub fn header(self, name: impl Into<String>, value: impl Into<String>) -> Self  // a value never prints; each call adds one
-    pub const fn plain_beyond_loopback(self, allow: bool) -> Self  // ws:// beyond loopback too: not the default, reported
-    pub const fn settings(self, settings: DialerSettings) -> Self  // everything but tls and headers, whole
+pub struct DialerParts                        // Debug (a header's value never prints); what DialerBuilder holds (derived by coqui_builder::Builder): settings, tls, headers
+impl DialerBuilder {                          // derived; every setter takes and returns self, the last write wins; no Clone
+    pub fn tls(self, tls: impl Into<Arc<rustls::ClientConfig>>) -> Self         // optional input
+    pub fn headers(self, headers: impl Into<Vec<(String, String)>>) -> Self     // optional input: the whole list, in order, replacing the one before; a value never prints
+    pub fn limits(self, limits: impl Into<Limits>) -> Self                        // a setter for every DialerSettings key
+    pub fn local_addr(self, address: impl Into<Option<SocketAddr>>) -> Self    // binds each connection's socket there first
+    pub fn frames(self, frames: impl Into<Frames>) -> Self
+    pub fn datagrams(self, datagrams: bool) -> Self          // asks the server to agree; one that does not makes the dial Failure::Unsupported
+    pub fn webrtc(self, settings: impl Into<Option<webrtc::Settings>>) -> Self  // feature webrtc; Some asks for datagrams too, and a climb where the listener can
+    pub fn plain_beyond_loopback(self, allow: bool) -> Self  // ws:// beyond loopback too: not the default, reported
+    pub fn fill(self, settings: Partial<DialerSettings>) -> Self                  // layers: only the keys the partial sets
+    pub fn fill_from(self, source: &mut impl Source) -> Result<Self, FillError>
+    pub fn build(self) -> Result<Dialer, Missing>   // nothing can be missing: every input is optional
+    pub fn parts(self) -> Result<DialerParts, Missing>
 }
-#[non_exhaustive] pub struct DialerSettings { pub frames: Frames, pub datagrams: bool, pub limits: Limits, pub plain_beyond_loopback: bool, pub local_addr: Option<SocketAddr>, pub webrtc: Option<webrtc::Settings> }  // guatiao value; webrtc with feature webrtc
+#[non_exhaustive] pub struct DialerSettings { pub frames: Frames, pub datagrams: bool, pub limits: Limits, pub plain_beyond_loopback: bool, pub local_addr: Option<SocketAddr>, pub webrtc: Option<webrtc::Settings> }  // coqui_builder::Describe; webrtc with feature webrtc; trait DialerSettingsSetters
 pub fn Dialer::settings(&self) -> DialerSettings
 pub const fn Dialer::plain_beyond_loopback(&self) -> bool
 pub fn Dialer::non_defaults(&self) -> Vec<NonDefault>   // every DialerSettings key that differs, by key path
 pub struct Connector                                                        // Clone, Debug; a coqui_transport::Connector
 pub const fn Connector::new(dialer: Dialer, endpoint: Url) -> Self          // connect(timeout) dials that endpoint, each call with a clone of the dialer
-pub fn Listener::builder(address: SocketAddr, tls: impl Into<ServerTls>) -> ListenerBuilder   // ServerTls::{Plain, Config(Arc<rustls::ServerConfig>)}, non_exhaustive; From<Arc<ServerConfig>>
-impl ListenerBuilder {                        // Debug, must_use; build() -> Result<Listener, Failure>
-    pub const fn limits(self, limits: Limits) -> Self
-    pub const fn frames(self, frames: Frames) -> Self
-    pub fn origins(self, origins: impl IntoIterator<Item = String>) -> Self
-    pub const fn plain_beyond_loopback(self, allow: bool) -> Self   // plain WebSocket beyond loopback, such as 0.0.0.0: reported
-    pub fn admission(self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self
-    pub fn webrtc(self, port: &webrtc::Port) -> Self                 // feature webrtc
-    pub fn settings(self, settings: ListenerSettings) -> Self        // everything but the address, TLS, admission and port, whole
+pub fn Listener::builder(address: SocketAddr, tls: impl Into<ServerTls>) -> ListenerBuilder   // ServerTls::{Plain, Config(Arc<rustls::ServerConfig>)}, non_exhaustive; From<Arc<ServerConfig>>; ListenerBuilder::new().address(address).tls(tls)
+pub struct ListenerParts                      // Debug; settings, address, tls, admission, webrtc
+impl ListenerBuilder {                        // derived; no Clone
+    pub fn new() -> Self                      // also Default
+    pub fn address(self, address: impl Into<SocketAddr>) -> Self   // required input: placement, not a setting
+    pub fn tls(self, tls: impl Into<ServerTls>) -> Self            // required input
+    pub fn admission(self, admit: impl Into<Admission>) -> Self    // any Fn(SocketAddr) -> bool + Send + Sync + 'static; decided on each connection
+    pub fn webrtc(self, port: impl Into<webrtc::Port>) -> Self     // feature webrtc; a &Port converts; a port whose settings are not enabled is the same as none
+    pub fn limits(self, limits: impl Into<Limits>) -> Self
+    pub fn frames(self, frames: impl Into<Frames>) -> Self
+    pub fn origins(self, origins: impl Into<Vec<String>>) -> Self   // replaces the list set before
+    pub fn plain_beyond_loopback(self, allow: bool) -> Self         // plain WebSocket beyond loopback, such as 0.0.0.0: reported
+    pub fn fill(self, settings: Partial<ListenerSettings>) -> Self
+    pub fn fill_from(self, source: &mut impl Source) -> Result<Self, FillError>
+    pub fn build(self) -> Result<Listener, BuildError<Failure>>     // Missing(address, tls), or Failed(Failure::Permission | why it could not bind)
+    pub fn parts(self) -> Result<ListenerParts, Missing>
 }
-#[non_exhaustive] pub struct ListenerSettings { pub frames: Frames, pub limits: Limits, pub origins: Vec<String>, pub plain_beyond_loopback: bool }  // guatiao value
-pub fn Listener::settings(&self) -> ListenerSettings
+#[non_exhaustive] pub struct ListenerSettings { pub frames: Frames, pub limits: Limits, pub origins: Vec<String>, pub plain_beyond_loopback: bool }  // coqui_builder::Describe; trait ListenerSettingsSetters
 pub fn Listener::plain_beyond_loopback(&self) -> bool
 pub fn Listener::non_defaults(&self) -> Vec<NonDefault>
 pub fn Listener::local_addr(&self) -> Result<SocketAddr, Failure>
@@ -332,7 +355,7 @@ pub fn Channel::next_signal(&self, timeout: Option<Duration>) -> Result<Option<V
 pub fn Channel::deliver_signal(&self, signal: &[u8]) -> Result<(), Failure>                        // feature webrtc, Signaling::ByCaller
 ```
 
-`ServerTls::Plain` on a non-loopback address is `Failure::Permission` at `build`, unless `plain_beyond_loopback(true)` makes the deliberate choice. A dialer refuses `ws://` beyond loopback with `Failure::Permission` before connecting, unless `plain_beyond_loopback(true)`. A listener or dialer that allows it says so in `plain_beyond_loopback()` and in its `Debug`, for the host to show; neither prints. `Endpoints` still takes `ws://` only on loopback. `accept` runs one handshake, bounded in total by `Limits::handshake`. `Listener::next` returns a `Pending` before its handshake, for a server that runs `Pending::handshake` on threads of its own so one slow peer cannot hold up others. `send` answers `Failure::NoProgress` at once while `Limits::queued_bytes`, or 256 messages, wait to be sent; `send_timeout` waits for room instead, woken by the worker only while a sender waits, and answers why the worker ended once it has: `Failure::Protocol` when either end refused what the other sent, otherwise `Failure::PathLost`. A message over the bound a reader set, or one that breaks the wire, ends the channel with a close code saying so (1009, 1002, 1003 or 1007): the reading end reports `Failure::Protocol`, and so does the sending end once the close arrives, to its reader and its senders. The reading end then reads and discards what the peer still sends until the peer closes, for up to 500 ms, so the close is not lost to a reset. `close` returns once what was queued has gone, or the peer has taken nothing for `Limits::send`. Each channel has a worker thread that sleeps on its socket and on its callers, so an idle channel takes no CPU and a message goes as soon as it is sent; the wait holds up to two file handles beside the socket. `Failure::Certificate` means a certificate was rejected, by this side or the peer's; any other TLS error is `Failure::Protocol`, since one forged record can cause it.
+`ServerTls::Plain` on a non-loopback address is `BuildError::Failed(Failure::Permission)` at `build`, unless `plain_beyond_loopback(true)` makes the deliberate choice. A dialer refuses `ws://` beyond loopback with `Failure::Permission` before connecting, unless `plain_beyond_loopback(true)`. A listener or dialer that allows it says so in `plain_beyond_loopback()` and in its `Debug`, for the host to show; neither prints. `Endpoints` still takes `ws://` only on loopback. `accept` runs one handshake, bounded in total by `Limits::handshake`. `Listener::next` returns a `Pending` before its handshake, for a server that runs `Pending::handshake` on threads of its own so one slow peer cannot hold up others. `send` answers `Failure::NoProgress` at once while `Limits::queued_bytes`, or 256 messages, wait to be sent; `send_timeout` waits for room instead, woken by the worker only while a sender waits, and answers why the worker ended once it has: `Failure::Protocol` when either end refused what the other sent, otherwise `Failure::PathLost`. A message over the bound a reader set, or one that breaks the wire, ends the channel with a close code saying so (1009, 1002, 1003 or 1007): the reading end reports `Failure::Protocol`, and so does the sending end once the close arrives, to its reader and its senders. The reading end then reads and discards what the peer still sends until the peer closes, for up to 500 ms, so the close is not lost to a reset. `close` returns once what was queued has gone, or the peer has taken nothing for `Limits::send`. Each channel has a worker thread that sleeps on its socket and on its callers, so an idle channel takes no CPU and a message goes as soon as it is sent; the wait holds up to two file handles beside the socket. `Failure::Certificate` means a certificate was rejected, by this side or the peer's; any other TLS error is `Failure::Protocol`, since one forged record can cause it.
 
 Both listeners are `coqui_transport::Listener`s: `accept()` with no timeout waits for the next connection, and a failed handshake
 fails that call only. Their own `accept(timeout)` is the inherent method; call the trait's as `coqui_transport::Listener::accept(&l)`.
@@ -341,25 +364,38 @@ fails that call only. Their own `accept(timeout)` is the inherent method; call t
 
 ```rust
 pub struct Channel                          // implements coqui_transport_web::Channel
-pub fn Dialer::builder(trust: impl Into<ClientTrust>) -> DialerBuilder   // ClientTrust::{Pinned(Vec<CertificatePin>), Config(Arc<rustls::ClientConfig>)}, non_exhaustive
+pub fn Dialer::builder(trust: impl Into<ClientTrust>) -> DialerBuilder   // ClientTrust::{Pinned(Vec<CertificatePin>), Config(Arc<rustls::ClientConfig>)}, non_exhaustive; DialerBuilder::new().trust(trust)
 pub struct Connector                                                        // Clone, Debug; a coqui_transport::Connector
 pub const fn Connector::new(dialer: Dialer, endpoint: Url) -> Self
-impl DialerBuilder {                          // Clone, Debug, must_use; build() -> Result<Dialer, Failure>
-    pub const fn limits(self, limits: Limits) -> Self
-    pub const fn local_addr(self, address: SocketAddr) -> Self    // binds the UDP socket there, one per address tried
-    pub fn settings(self, settings: DialerSettings) -> Self
+pub struct DialerParts                                  // Debug; what DialerBuilder holds (derived by coqui_builder::Builder): settings, trust
+impl DialerBuilder {                                    // derived; Debug is not promised; no Clone
+    pub fn new() -> Self                                // also Default
+    pub fn trust(self, trust: impl Into<ClientTrust>) -> Self   // required input
+    pub fn limits(self, limits: impl Into<Limits>) -> Self       // a setter for every DialerSettings key, the last write wins
+    pub fn local_addr(self, address: impl Into<Option<SocketAddr>>) -> Self   // binds the UDP socket there, one per address tried
+    pub fn fill(self, settings: Partial<DialerSettings>) -> Self                        // layers: only the keys the partial sets
+    pub fn fill_from(self, source: &mut impl Source) -> Result<Self, FillError>
+    pub fn build(self) -> Result<Dialer, BuildError<Failure>>    // Missing(trust), or Failed(Failure::Unsupported) when the runtime could not start
+    pub fn parts(self) -> Result<DialerParts, Missing>
 }
-#[non_exhaustive] pub struct DialerSettings { pub limits: Limits, pub local_addr: Option<SocketAddr> }  // guatiao value
+#[non_exhaustive] pub struct DialerSettings { pub limits: Limits, pub local_addr: Option<SocketAddr> }  // coqui_builder::Describe; trait DialerSettingsSetters
 pub fn Dialer::settings(&self) -> DialerSettings
 pub fn Dialer::non_defaults(&self) -> Vec<NonDefault>
-pub fn Listener::builder(binding: impl Into<Binding>, tls: impl Into<ServerTls>) -> ListenerBuilder   // ServerTls::{Config(Arc<rustls::ServerConfig>), PerConnection(Arc<dyn Fn(SocketAddr, SocketAddr) -> Arc<ServerConfig>>)} (ServerTls::per_connection(f); From<Arc<ServerConfig>>), non_exhaustive; Binding::{Address(SocketAddr), Port(webrtc::Port)} (feature webrtc: one listener per port, a second is Failure::Permission), non_exhaustive
-impl ListenerBuilder {                        // Debug, must_use; build() -> Result<Listener, Failure>
-    pub const fn limits(self, limits: Limits) -> Self
-    pub fn origins(self, origins: impl IntoIterator<Item = String>) -> Self
-    pub fn admission(self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self
-    pub fn settings(self, settings: ListenerSettings) -> Self
+pub fn Listener::builder(binding: impl Into<Binding>, tls: impl Into<ServerTls>) -> ListenerBuilder   // ServerTls::{Config(Arc<rustls::ServerConfig>), PerConnection(Arc<dyn Fn(SocketAddr, SocketAddr) -> Arc<ServerConfig>>)} (ServerTls::per_connection(f); From<Arc<ServerConfig>>), non_exhaustive; Binding::{Address(SocketAddr), Port(webrtc::Port)} (feature webrtc: one listener per port, a second is Failure::Permission), non_exhaustive; ListenerBuilder::new().binding(binding).tls(tls)
+pub struct ListenerParts                                // Debug; settings, binding, tls, admission
+impl ListenerBuilder {                                  // derived; no Clone
+    pub fn new() -> Self                                // also Default
+    pub fn binding(self, binding: impl Into<Binding>) -> Self    // required input
+    pub fn tls(self, tls: impl Into<ServerTls>) -> Self          // required input
+    pub fn admission(self, admit: impl Into<Admission>) -> Self  // any Fn(SocketAddr) -> bool + Send + Sync + 'static
+    pub fn limits(self, limits: impl Into<Limits>) -> Self
+    pub fn origins(self, origins: impl Into<Vec<String>>) -> Self      // replaces the list set before
+    pub fn fill(self, settings: Partial<ListenerSettings>) -> Self
+    pub fn fill_from(self, source: &mut impl Source) -> Result<Self, FillError>
+    pub fn build(self) -> Result<Listener, BuildError<Failure>>
+    pub fn parts(self) -> Result<ListenerParts, Missing>
 }
-#[non_exhaustive] pub struct ListenerSettings { pub limits: Limits, pub origins: Vec<String> }  // guatiao value
+#[non_exhaustive] pub struct ListenerSettings { pub limits: Limits, pub origins: Vec<String> }  // coqui_builder::Describe; trait ListenerSettingsSetters
 pub fn Listener::settings(&self) -> ListenerSettings
 pub fn Listener::non_defaults(&self) -> Vec<NonDefault>
 pub const fn Listener::local_addr(&self) -> SocketAddr
@@ -381,7 +417,7 @@ pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Fai
 
 ```rust
 pub struct Settings { pub enabled: bool, pub attempt: Duration, pub path_mtu: usize, pub public_address: Option<SocketAddr>, pub any_candidate: bool, pub signaling: Signaling, pub max_sessions: usize, pub max_relays: usize, pub max_per_address: usize, pub relay_idle: Duration }
-// A guatiao value (ToValue, FromValue, Schema); signaling is "on-channel" or "by-caller".
+// A coqui_builder::Describe type; signaling is "on-channel" or "by-caller"; trait SettingsSetters.
 pub enum Signaling { OnChannel, ByCaller }            // non_exhaustive; default OnChannel
 pub struct Port                                       // Clone; Debug
 pub fn Port::bind(address: SocketAddr, settings: Settings) -> Result<Self, Failure>   // Permission when taken or not allowed; Unsupported for settings that leave no room
