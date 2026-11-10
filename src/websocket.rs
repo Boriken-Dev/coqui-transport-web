@@ -38,8 +38,8 @@ use crate::frame::{self, WS_DATAGRAMS_PROTOCOL, WsPart};
 use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, Reading, Received, bind_failure};
 #[cfg(feature = "webrtc")]
 use crate::webrtc::{Climb, Plan, Port, Settings};
+use coqui_builder::{Builder, Describe, NonDefault};
 use coqui_transport::Failure;
-use coqui_transport::NonDefault;
 
 /// How often a listener looks for a connection.
 const POLL: Duration = Duration::from_millis(10);
@@ -50,17 +50,7 @@ const CALLER: Token = Token(1);
 const OUTGOING: usize = 256;
 
 /// How messages appear on the wire.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    Eq,
-    PartialEq,
-    guatiao::ToValue,
-    guatiao::FromValue,
-    guatiao::Schema,
-)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, coqui_builder::Leaf)]
 #[map(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum Frames {
@@ -1368,24 +1358,16 @@ impl fmt::Debug for Dialer {
     }
 }
 
-/// What a [`DialerBuilder`] takes whole through `settings`, in the form a file, a form or a peer fills.
+/// What a [`DialerBuilder`] takes whole through `fill`, in the form a file, a form or a peer fills.
 ///
-/// The TLS configuration and the headers hold code and credentials, so the builder takes them as arguments. Every key is
-/// optional (an absent one is its default) and an unknown key is refused. The type is a guatiao value (`from_value`,
-/// `to_value`, `schema`), and `guatiao_serde::text` reads and writes its text. It is `#[non_exhaustive]`: start from
+/// The TLS configuration and the headers hold code and credentials, so the builder takes them as inputs. Every key is
+/// optional (an absent one is its default) and an unknown key is refused. The type is a [`coqui_builder::Describe`]: a
+/// `Partial` of it reads a file's text (with coqui-builder's `serde` feature), its setters are methods of
+/// [`DialerBuilder`], and [`DialerSettingsSetters`] gives them to a builder elsewhere. It is `#[non_exhaustive]`: start from
 /// [`Default`] and assign the fields.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    guatiao::ToValue,
-    guatiao::FromValue,
-    guatiao::Schema,
-)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Describe)]
 #[map(deny_unknown_fields)]
+#[builder(setters_on = DialerBuilder)]
 #[non_exhaustive]
 pub struct DialerSettings {
     /// How messages appear on the wire.
@@ -1415,101 +1397,53 @@ pub struct DialerSettings {
     pub webrtc: Option<Settings>,
 }
 
-/// Builds a [`Dialer`]: [`Dialer::builder`], the settings, then [`build`](Self::build).
-#[derive(Clone, Debug, Default)]
-#[must_use]
-pub struct DialerBuilder {
-    dialer: Dialer,
+/// What a [`DialerBuilder`] holds: the settings, the TLS configuration and the headers of the opening request. Build with
+/// [`Dialer::builder`].
+///
+/// `tls` is the configuration `wss://` uses, and decides which certificates are trusted: without it the dialer can reach only
+/// `ws://`. `headers` are added to the opening request, in order. A value may be a credential: it is never printed. A header
+/// authenticates nothing by itself and does not replace proving the peer.
+#[derive(Builder)]
+#[builder(build = Dialer)]
+pub struct DialerParts {
+    settings: DialerSettings,
+    #[builder(input)]
+    tls: Option<Arc<ClientConfig>>,
+    #[builder(input)]
+    headers: Option<Vec<(alloc::string::String, alloc::string::String)>>,
 }
 
-impl DialerBuilder {
-    /// The TLS configuration `wss://` uses. It decides which certificates are trusted. Without it the dialer can reach only
-    /// `ws://`.
-    pub fn tls(mut self, tls: Arc<ClientConfig>) -> Self {
-        self.dialer.tls = Some(tls);
-        self
+impl fmt::Debug for DialerParts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DialerParts")
+            .field("settings", &self.settings)
+            .field("tls", &self.tls.is_some())
+            .field("headers", &self.headers.as_ref().map(Vec::len))
+            .finish()
     }
+}
 
-    /// Adds a header to the opening request, after any added before. A value may be a credential: it is never printed. A header
-    /// authenticates nothing by itself and does not replace proving the peer.
-    pub fn header(
-        mut self,
-        name: impl Into<alloc::string::String>,
-        value: impl Into<alloc::string::String>,
-    ) -> Self {
-        self.dialer.headers.push((name.into(), value.into()));
-        self
-    }
-
-    /// The bounds of channels this dialer opens; see [`DialerSettings::limits`].
-    pub const fn limits(mut self, limits: Limits) -> Self {
-        self.dialer.limits = limits;
-        self
-    }
-
-    /// The local address connections bind to; see [`DialerSettings::local_addr`].
-    pub const fn local_addr(mut self, address: SocketAddr) -> Self {
-        self.dialer.local = Some(address);
-        self
-    }
-
-    /// How messages appear on the wire.
-    pub const fn frames(mut self, frames: Frames) -> Self {
-        self.dialer.frames = frames;
-        self
-    }
-
-    /// Whether to ask the listener to agree to datagrams; see [`DialerSettings::datagrams`].
-    pub const fn datagrams(mut self, datagrams: bool) -> Self {
-        self.dialer.datagrams = datagrams;
-        self
-    }
-
-    /// Whether this dialer may open `ws://` beyond loopback; see [`DialerSettings::plain_beyond_loopback`].
-    pub const fn plain_beyond_loopback(mut self, allow: bool) -> Self {
-        self.dialer.plain_beyond_loopback = allow;
-        self
-    }
-
-    /// Asks for datagrams that climb onto a data channel; see [`DialerSettings::webrtc`]. Asks for datagrams too.
-    #[cfg(feature = "webrtc")]
-    pub const fn webrtc(mut self, settings: Settings) -> Self {
-        self.dialer.datagrams = true;
-        self.dialer.webrtc = Some(settings);
-        self
-    }
-
-    /// Every setting from `settings`. Replaces what the setters set before, and is replaced by what they set after it. The TLS
-    /// configuration and the headers are arguments, not settings, and stay.
-    pub const fn settings(mut self, settings: DialerSettings) -> Self {
-        self.dialer.frames = settings.frames;
-        #[cfg(feature = "webrtc")]
-        {
-            self.dialer.datagrams = settings.datagrams || settings.webrtc.is_some();
-            self.dialer.webrtc = settings.webrtc;
+impl From<DialerParts> for Dialer {
+    fn from(parts: DialerParts) -> Self {
+        let settings = parts.settings;
+        Self {
+            headers: parts.headers.unwrap_or_default(),
+            tls: parts.tls,
+            limits: settings.limits,
+            frames: settings.frames,
+            #[cfg(feature = "webrtc")]
+            datagrams: settings.datagrams || settings.webrtc.is_some(),
+            #[cfg(not(feature = "webrtc"))]
+            datagrams: settings.datagrams,
+            plain_beyond_loopback: settings.plain_beyond_loopback,
+            local: settings.local_addr,
+            #[cfg(feature = "webrtc")]
+            webrtc: settings.webrtc,
         }
-        #[cfg(not(feature = "webrtc"))]
-        {
-            self.dialer.datagrams = settings.datagrams;
-        }
-        self.dialer.limits = settings.limits;
-        self.dialer.plain_beyond_loopback = settings.plain_beyond_loopback;
-        self.dialer.local = settings.local_addr;
-        self
-    }
-
-    /// The dialer.
-    pub fn build(self) -> Dialer {
-        self.dialer
     }
 }
 
 impl Dialer {
-    /// A builder for a dialer with no TLS configuration, which can reach only `ws://`, and every setting at its default.
-    pub fn builder() -> DialerBuilder {
-        DialerBuilder::default()
-    }
-
     /// The settings this dialer was built with.
     #[must_use]
     pub fn settings(&self) -> DialerSettings {
@@ -1535,7 +1469,7 @@ impl Dialer {
     /// silently dropped.
     #[must_use]
     pub fn non_defaults(&self) -> Vec<NonDefault> {
-        NonDefault::of_settings(&self.settings())
+        coqui_builder::non_defaults(&self.settings())
     }
 
     fn protocols_asked(&self) -> &'static str {
@@ -1798,16 +1732,16 @@ impl From<Arc<ServerConfig>> for ServerTls {
     }
 }
 
-/// What a [`ListenerBuilder`] takes whole through `settings`, in the form a file, a form or a peer fills.
+/// What a [`ListenerBuilder`] takes whole through `fill`, in the form a file, a form or a peer fills.
 ///
-/// The address, the TLS configuration, the admission function and the data-channel port hold code, so the builder takes
-/// them as arguments. Every key is optional (an absent one is its default) and an unknown key is refused. The type is a
-/// guatiao value (`from_value`, `to_value`, `schema`), and `guatiao_serde::text` reads and writes its text. It is
-/// `#[non_exhaustive]`: start from [`Default`] and assign the fields.
-#[derive(
-    Clone, Debug, Default, PartialEq, Eq, guatiao::ToValue, guatiao::FromValue, guatiao::Schema,
-)]
+/// The address, the TLS configuration, the admission function and the data-channel port are inputs of the builder, not
+/// settings: the address is placement, and the others hold code. Every key is optional (an absent one is its default) and an
+/// unknown key is refused. The type is a [`coqui_builder::Describe`]: a `Partial` of it reads a file's text (with
+/// coqui-builder's `serde` feature), its setters are methods of [`ListenerBuilder`], and [`ListenerSettingsSetters`] gives
+/// them to a builder elsewhere. It is `#[non_exhaustive]`: start from [`Default`] and assign the fields.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Describe)]
 #[map(deny_unknown_fields)]
+#[builder(setters_on = ListenerBuilder)]
 #[non_exhaustive]
 pub struct ListenerSettings {
     /// How messages appear on the wire.
@@ -1826,20 +1760,32 @@ pub struct ListenerSettings {
     pub plain_beyond_loopback: bool,
 }
 
-/// Builds a [`Listener`]: [`Listener::builder`], the settings, then [`build`](Self::build).
-#[must_use]
-pub struct ListenerBuilder {
-    address: SocketAddr,
-    tls: ServerTls,
+/// What a [`ListenerBuilder`] holds: the settings, the address, the TLS, the admission function and the data-channel port.
+/// Build with [`Listener::builder`], or [`ListenerBuilder::new`] and the `address` and `tls` setters, which `build` requires.
+///
+/// `admission` refuses a source address before any handshake, so a denied peer costs nothing; it is decided on each
+/// connection. `webrtc` lets a client that asks climb from its WebSocket onto a data channel on that [`Port`]; one with no use
+/// for that sees no change, and a port whose settings are not `enabled` is the same as none. With plain WebSocket only a
+/// loopback address is accepted, unless the settings allow otherwise: `build` is then [`Failure::Permission`], or why the
+/// address could not be bound.
+#[derive(Builder)]
+#[builder(build = Listener, fallible, entry = "new")]
+pub struct ListenerParts {
     settings: ListenerSettings,
+    #[builder(input)]
+    address: SocketAddr,
+    #[builder(input)]
+    tls: ServerTls,
+    #[builder(input)]
     admission: Option<Admission>,
     #[cfg(feature = "webrtc")]
+    #[builder(input)]
     webrtc: Option<Port>,
 }
 
-impl fmt::Debug for ListenerBuilder {
+impl fmt::Debug for ListenerParts {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ListenerBuilder")
+        f.debug_struct("ListenerParts")
             .field("address", &self.address)
             .field("tls", &self.tls)
             .field("settings", &self.settings)
@@ -1847,84 +1793,36 @@ impl fmt::Debug for ListenerBuilder {
     }
 }
 
-impl ListenerBuilder {
-    /// How messages appear on the wire.
-    pub const fn frames(mut self, frames: Frames) -> Self {
-        self.settings.frames = frames;
-        self
-    }
+impl TryFrom<ListenerParts> for Listener {
+    type Error = Failure;
 
-    /// The bounds of channels this listener accepts.
-    pub const fn limits(mut self, limits: Limits) -> Self {
-        self.settings.limits = limits;
-        self
-    }
-
-    /// Refuses a browser whose `Origin` is not listed; see [`ListenerSettings::origins`]. Replaces the list set before.
-    pub fn origins(mut self, origins: impl IntoIterator<Item = alloc::string::String>) -> Self {
-        self.settings.origins = origins.into_iter().collect();
-        self
-    }
-
-    /// Serves plain WebSocket beyond loopback; see [`ListenerSettings::plain_beyond_loopback`].
-    pub const fn plain_beyond_loopback(mut self, allow: bool) -> Self {
-        self.settings.plain_beyond_loopback = allow;
-        self
-    }
-
-    /// Refuses a source address before any handshake, so a denied peer costs nothing. Decided on each connection.
-    pub fn admission(mut self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self {
-        self.admission = Some(Arc::new(admit));
-        self
-    }
-
-    /// Lets a client that asks climb from its WebSocket onto a data channel on `port`. One with no use for that sees no change.
-    #[cfg(feature = "webrtc")]
-    pub fn webrtc(mut self, port: &Port) -> Self {
-        self.webrtc = port.settings().enabled.then(|| port.clone());
-        self
-    }
-
-    /// Every setting from `settings`. Replaces what the setters set before, and is replaced by what they set after it. The
-    /// address, the TLS configuration, the admission function and the port are arguments, not settings, and stay.
-    pub fn settings(mut self, settings: ListenerSettings) -> Self {
-        self.settings = settings;
-        self
-    }
-
-    /// Binds the address.
-    ///
-    /// # Errors
-    ///
-    /// [`Failure::Permission`] for a plain socket beyond loopback the settings do not allow; otherwise why it could not
-    /// bind.
-    pub fn build(self) -> Result<Listener, Failure> {
-        let plain = matches!(self.tls, ServerTls::Plain);
-        if plain && !self.settings.plain_beyond_loopback && !self.address.ip().is_loopback() {
+    fn try_from(parts: ListenerParts) -> Result<Self, Failure> {
+        let plain = matches!(parts.tls, ServerTls::Plain);
+        if plain && !parts.settings.plain_beyond_loopback && !parts.address.ip().is_loopback() {
             return Err(Failure::Permission);
         }
-        let socket = TcpListener::bind(self.address).map_err(|e| io_failure(&e))?;
+        let socket = TcpListener::bind(parts.address).map_err(|e| io_failure(&e))?;
         socket.set_nonblocking(true).map_err(|e| io_failure(&e))?;
         let beyond = plain
             && !socket
                 .local_addr()
                 .is_ok_and(|address| address.ip().is_loopback());
-        let mut settings = self.settings;
+        let mut settings = parts.settings;
         settings.plain_beyond_loopback = beyond;
-        let tls = match self.tls {
+        let tls = match parts.tls {
             ServerTls::Plain => None,
             ServerTls::Config(config) => Some(config),
         };
-        Ok(Listener {
+        Ok(Self {
             socket,
             tls,
             limits: settings.limits,
             frames: settings.frames,
             origins: settings.origins.clone(),
             settings,
-            admission: self.admission,
+            admission: parts.admission,
             #[cfg(feature = "webrtc")]
-            webrtc: self.webrtc,
+            webrtc: parts.webrtc.filter(|port| port.settings().enabled),
         })
     }
 }
@@ -1933,14 +1831,7 @@ impl Listener {
     /// A builder for a listener on `address`, with every setting at its default. With plain WebSocket only a loopback address
     /// is accepted, unless the settings allow otherwise.
     pub fn builder(address: SocketAddr, tls: impl Into<ServerTls>) -> ListenerBuilder {
-        ListenerBuilder {
-            address,
-            tls: tls.into(),
-            settings: ListenerSettings::default(),
-            admission: None,
-            #[cfg(feature = "webrtc")]
-            webrtc: None,
-        }
+        ListenerBuilder::new().address(address).tls(tls)
     }
 
     /// The settings this listener was built with, `plain_beyond_loopback` being whether it serves plain WebSocket beyond
@@ -1960,7 +1851,7 @@ impl Listener {
     /// crate neither logs nor warns about them.
     #[must_use]
     pub fn non_defaults(&self) -> Vec<NonDefault> {
-        NonDefault::of_settings(&self.settings)
+        coqui_builder::non_defaults(&self.settings)
     }
 
     /// The address it is bound to.
@@ -2008,7 +1899,11 @@ impl Listener {
         loop {
             match self.socket.accept() {
                 Ok((tcp, source)) => {
-                    if self.admission.as_ref().is_none_or(|admit| admit(source)) {
+                    if self
+                        .admission
+                        .as_ref()
+                        .is_none_or(|admit| admit.admits(source))
+                    {
                         return Ok((tcp, source));
                     }
                 }

@@ -94,6 +94,7 @@ fn dial_to(listener: &websocket::Listener, to: SocketAddr, settings: Settings) -
             .frames(Frames::Binary)
             .webrtc(settings)
             .build()
+            .unwrap()
             .dial(Kind::WebSocket, &url, WAIT)
             .unwrap();
         Pair {
@@ -422,7 +423,8 @@ fn quic_session(
         let accepted = scope.spawn(|| listener.accept(Some(limit)));
         let near =
             webtransport::Dialer::builder(webtransport::ClientTrust::Pinned(Vec::from([pin])))
-                .build()?
+                .build()
+                .expect("the dialer builds")
                 .dial(Kind::WebTransport, &url, limit);
         let far = accepted.join().unwrap();
         let (near, far) = (near?, far?);
@@ -471,7 +473,9 @@ fn a_second_webtransport_listener_on_one_port_is_refused() {
         .unwrap();
     assert!(matches!(
         webtransport::Listener::builder(port.clone(), tls).build(),
-        Err(Failure::Permission)
+        Err(coqui_builder::builder::BuildError::Failed(
+            Failure::Permission
+        ))
     ));
 }
 
@@ -529,6 +533,7 @@ fn settings_that_leave_no_room_are_refused() {
             value
         })
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, Duration::from_secs(2));
     assert!(matches!(dialed, Err(Failure::Unsupported)));
 }

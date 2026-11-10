@@ -117,6 +117,7 @@ fn plain_websocket_carries_ordered_messages_on_loopback() {
     });
     let client = websocket::Dialer::builder()
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     round_trip(&client);
@@ -131,7 +132,7 @@ fn a_plain_websocket_listener_beyond_loopback_is_refused() {
         websocket::Listener::builder(address, websocket::ServerTls::Plain)
             .build()
             .unwrap_err(),
-        Failure::Permission
+        coqui_builder::builder::BuildError::Failed(Failure::Permission)
     );
 }
 
@@ -160,11 +161,13 @@ fn wss_verifies_the_certificate_and_a_stranger_is_rejected() {
     let refused = websocket::Dialer::builder()
         .tls(client_tls(&stranger))
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT);
     assert_eq!(refused.unwrap_err(), Failure::Certificate);
     let client = websocket::Dialer::builder()
         .tls(client_tls(&trusted))
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     round_trip(&client);
@@ -174,10 +177,11 @@ fn wss_verifies_the_certificate_and_a_stranger_is_rejected() {
 #[test]
 fn wss_with_no_tls_configuration_fails_closed() {
     let url = Url::parse("wss://localhost:1/").unwrap();
-    let refused =
-        websocket::Dialer::builder()
-            .build()
-            .dial(Kind::WebSocket, &url, Duration::from_secs(2));
+    let refused = websocket::Dialer::builder().build().unwrap().dial(
+        Kind::WebSocket,
+        &url,
+        Duration::from_secs(2),
+    );
     assert!(refused.is_err());
 }
 
@@ -199,6 +203,7 @@ fn a_websocket_message_over_the_limit_ends_the_channel_as_a_protocol_failure() {
     });
     let client = websocket::Dialer::builder()
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     client.send(&[b'x'; 64]).unwrap();
@@ -218,6 +223,7 @@ fn a_binary_websocket_message_is_refused_on_a_text_channel() {
     let client = websocket::Dialer::builder()
         .frames(Frames::Binary)
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     client.send(&[0xff, 0x00]).unwrap();
@@ -233,6 +239,7 @@ fn invalid_text_is_refused_before_it_reaches_the_wire() {
     let server = thread::spawn(move || listener.accept(Some(WAIT)).map(|_| ()));
     let client = websocket::Dialer::builder()
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     assert_eq!(client.send(&[0xff]), Err(Failure::Protocol));
@@ -283,7 +290,7 @@ fn a_denied_source_never_starts_a_handshake() {
             .map(|_| ())
     });
     let url = plain_ws_url(address);
-    let refused = websocket::Dialer::builder().build().dial(
+    let refused = websocket::Dialer::builder().build().unwrap().dial(
         Kind::WebSocket,
         &url,
         Duration::from_millis(500),
@@ -316,8 +323,12 @@ fn a_dialer_header_and_the_path_reach_the_server_and_a_value_never_prints() {
     });
     let url = Url::parse(&format!("ws://127.0.0.1:{port}/v1/assistant/agent-link")).unwrap();
     let mut dialer = websocket::Dialer::builder()
-        .header("authorization", "Bearer secret-token")
-        .build();
+        .headers(vec![(
+            "authorization".to_owned(),
+            "Bearer secret-token".to_owned(),
+        )])
+        .build()
+        .unwrap();
     assert!(!format!("{dialer:?}").contains("secret-token"));
     let _channel = dialer.dial(Kind::WebSocket, &url, WAIT).unwrap();
     let (path, header) = server.join().unwrap();
@@ -341,6 +352,7 @@ fn close_delivers_what_was_queued_before_it_returns() {
     });
     let client = websocket::Dialer::builder()
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     let sent: Vec<Vec<u8>> = (0..20).map(|n| format!("{n}").into_bytes()).collect();
@@ -354,7 +366,7 @@ fn close_delivers_what_was_queued_before_it_returns() {
 #[test]
 fn plain_websocket_from_a_dialer_is_refused_beyond_loopback() {
     let url = Url::parse("ws://192.0.2.1:9/").unwrap();
-    let refused = websocket::Dialer::builder().build().dial(
+    let refused = websocket::Dialer::builder().build().unwrap().dial(
         Kind::WebSocket,
         &url,
         Duration::from_millis(200),
@@ -370,7 +382,7 @@ fn plain_websocket_from_a_dialer_is_refused_beyond_loopback() {
         && !address.ip().is_unspecified()
     {
         let url = Url::parse(&format!("ws://{}:{port}/", address.ip())).unwrap();
-        let refused = websocket::Dialer::builder().build().dial(
+        let refused = websocket::Dialer::builder().build().unwrap().dial(
             Kind::WebSocket,
             &url,
             Duration::from_secs(2),
@@ -417,13 +429,18 @@ fn a_plain_websocket_listener_beyond_loopback_is_a_choice_it_reports() {
 
 #[test]
 fn a_dialer_opens_plain_websocket_beyond_loopback_only_when_told_to() {
-    let refused = websocket::Dialer::builder().build().dial(
+    let refused = websocket::Dialer::builder().build().unwrap().dial(
         Kind::WebSocket,
         &Url::parse("ws://192.0.2.1:9/").unwrap(),
         Duration::from_secs(5),
     );
     assert_eq!(refused.unwrap_err(), Failure::Permission);
-    assert!(!websocket::Dialer::builder().build().plain_beyond_loopback());
+    assert!(
+        !websocket::Dialer::builder()
+            .build()
+            .unwrap()
+            .plain_beyond_loopback()
+    );
     let Some(address) = beyond_loopback() else {
         eprintln!("no address beyond loopback with a route: the dial itself is not tried");
         return;
@@ -441,11 +458,13 @@ fn a_dialer_opens_plain_websocket_beyond_loopback_only_when_told_to() {
     });
     let refused = websocket::Dialer::builder()
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT);
     assert_eq!(refused.unwrap_err(), Failure::Permission);
     let mut dialer = websocket::Dialer::builder()
         .plain_beyond_loopback(true)
-        .build();
+        .build()
+        .unwrap();
     assert!(dialer.plain_beyond_loopback());
     assert!(format!("{dialer:?}").contains("plain_beyond_loopback: true"));
     let client = dialer.dial(Kind::WebSocket, &url, WAIT).unwrap();
@@ -508,6 +527,7 @@ fn a_peer_that_goes_silent_is_noticed_and_a_live_one_is_not() {
     let client = websocket::Dialer::builder()
         .limits(limits)
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     thread::sleep(idle * 4);
@@ -527,6 +547,7 @@ fn a_peer_that_goes_silent_is_noticed_and_a_live_one_is_not() {
     let client = websocket::Dialer::builder()
         .limits(limits)
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     assert_eq!(client.receive(Some(WAIT)), Err(Failure::NoProgress));
@@ -598,6 +619,7 @@ fn a_raised_limit_takes_effect_both_ways_and_a_lowered_one_refuses() {
     });
     let client = websocket::Dialer::builder()
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     assert_eq!(client.receive(Some(WAIT)).unwrap().unwrap(), b"raised");
@@ -622,6 +644,7 @@ fn queued_bytes_over_the_budget_are_refused_rather_than_held() {
     let client = websocket::Dialer::builder()
         .limits(limits)
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     assert_eq!(client.send(&[b'x'; 64]), Err(Failure::NoProgress));
@@ -646,6 +669,7 @@ fn a_receive_timeout_leaves_the_channel_usable() {
     });
     let client = websocket::Dialer::builder()
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     wait_for_it.recv_timeout(WAIT).unwrap();
@@ -675,6 +699,7 @@ fn a_slow_reader_does_not_lose_messages_past_the_pending_bound() {
     });
     let client = websocket::Dialer::builder()
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     let sent: Vec<Vec<u8>> = (0..50).map(|n| format!("{n}").into_bytes()).collect();
@@ -831,6 +856,7 @@ fn websocket_pair(
     let accepted = thread::spawn(move || listener.accept(Some(WAIT)).unwrap());
     let client = dialer(websocket::Dialer::builder().limits(limits).frames(frames))
         .build()
+        .unwrap()
         .dial(
             Kind::WebSocket,
             &Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap(),
@@ -934,6 +960,7 @@ fn a_websocket_datagram_size_is_a_setting_with_no_floor_and_it_binds_both_ways()
         .frames(Frames::Binary)
         .datagrams(true)
         .build()
+        .unwrap()
         .dial(
             Kind::WebSocket,
             &Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap(),
@@ -1030,11 +1057,15 @@ fn a_server_that_does_not_agree_is_a_failure_a_caller_can_read() {
         let (stream, _) = server.accept().unwrap();
         let _ = tungstenite::accept(stream);
     });
-    let refused = websocket::Dialer::builder().datagrams(true).build().dial(
-        Kind::WebSocket,
-        &Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap(),
-        WAIT,
-    );
+    let refused = websocket::Dialer::builder()
+        .datagrams(true)
+        .build()
+        .unwrap()
+        .dial(
+            Kind::WebSocket,
+            &Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap(),
+            WAIT,
+        );
     assert_eq!(refused.err(), Some(Failure::Unsupported));
 }
 
@@ -1095,6 +1126,7 @@ fn webtransport_and_websocket_serve_one_port_number_on_one_address() {
     let socket = websocket::Dialer::builder()
         .tls(client_tls(&id))
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &named, WAIT)
         .unwrap();
     round_trip(&socket);
@@ -1275,7 +1307,7 @@ fn a_blocked_webtransport_path_falls_back_to_websocket() {
         .build()
         .unwrap();
     let mut dialer = Both {
-        websocket: websocket::Dialer::builder().build(),
+        websocket: websocket::Dialer::builder().build().unwrap(),
         webtransport: webtransport::Dialer::builder(webtransport::ClientTrust::Config(client_tls(
             &identity(),
         )))
@@ -1392,6 +1424,7 @@ fn a_websocket_handshake_can_be_abandoned_from_another_thread() {
     let client = thread::spawn(move || {
         websocket::Dialer::builder()
             .build()
+            .unwrap()
             .dial(Kind::WebSocket, &url, WAIT)
     });
     let pending = listener.next(Some(WAIT)).unwrap();

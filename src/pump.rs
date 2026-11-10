@@ -10,12 +10,10 @@ use coqui_transport::Failure;
 
 /// The bounds a peer cannot exceed. Every value has a finite default.
 ///
-/// A guatiao value (`from_value`, `to_value`, `schema`) a file fills: every key is optional (an absent one is its default),
-/// an unknown key is refused, and a duration is a number of seconds, `[secs, nanos]` or `{secs, nanos}`. It is
-/// `#[non_exhaustive]`: start from [`Default`] and assign the fields.
-#[derive(
-    Clone, Copy, Debug, Eq, PartialEq, guatiao::ToValue, guatiao::FromValue, guatiao::Schema,
-)]
+/// A [`coqui_builder::Describe`] type a file fills: every key is optional (an absent one is its default), an unknown key is
+/// refused, and a duration is a number with an optional unit (`30`, `250ms`, `1.5h`). It is `#[non_exhaustive]`: start from
+/// [`Default`] and assign the fields.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, coqui_builder::Describe)]
 #[map(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Limits {
@@ -263,9 +261,38 @@ pub(crate) fn bind_failure(error: &std::io::Error) -> Failure {
     }
 }
 
-/// Decides whether a source address may start a handshake.
+/// Decides whether a source address may start a handshake, before any handshake work: a listener's `admission` input.
+///
+/// Any `Fn(SocketAddr) -> bool + Send + Sync + 'static` converts into one, so a closure is passed as it is. It is called on each
+/// connection.
 #[cfg(any(feature = "websocket", feature = "webtransport"))]
-pub(crate) type Admission = alloc::sync::Arc<dyn Fn(core::net::SocketAddr) -> bool + Send + Sync>;
+#[derive(Clone)]
+pub struct Admission(alloc::sync::Arc<dyn Fn(core::net::SocketAddr) -> bool + Send + Sync>);
+
+#[cfg(any(feature = "websocket", feature = "webtransport"))]
+impl Admission {
+    /// Whether `source` may start a handshake.
+    pub(crate) fn admits(&self, source: core::net::SocketAddr) -> bool {
+        (self.0)(source)
+    }
+}
+
+#[cfg(any(feature = "websocket", feature = "webtransport"))]
+impl<F> From<F> for Admission
+where
+    F: Fn(core::net::SocketAddr) -> bool + Send + Sync + 'static,
+{
+    fn from(admit: F) -> Self {
+        Self(alloc::sync::Arc::new(admit))
+    }
+}
+
+#[cfg(any(feature = "websocket", feature = "webtransport"))]
+impl core::fmt::Debug for Admission {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Admission(..)")
+    }
+}
 
 /// What the driver's worker hands to the channel's reader. An `Err` ends the channel.
 pub(crate) type Received = Result<Vec<u8>, Failure>;

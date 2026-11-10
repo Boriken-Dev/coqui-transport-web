@@ -58,6 +58,7 @@ fn websocket_pair(client: Limits, server: Limits) -> (websocket::Channel, websoc
         .limits(client)
         .frames(websocket::Frames::Binary)
         .build()
+        .unwrap()
         .dial(Kind::WebSocket, &url, WAIT)
         .unwrap();
     (near, accepted.join().unwrap())

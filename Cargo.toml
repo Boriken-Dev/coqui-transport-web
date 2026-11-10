@@ -28,11 +28,11 @@ webtransport = ["dep:wtransport", "dep:tokio", "dep:rustls"]
 webrtc = ["websocket", "webtransport", "dep:str0m"]
 
 [dependencies]
-# The settings types' value form and schema; alpha, by revision, as the family pins it.
-guatiao = { git = "https://github.com/Boriken-Dev/guatiao", rev = "0350bae7fef4cef2aa46ce73f1ef6be15983d83b", default-features = false, features = ["derive"] }
+# Describes, fills and builds the settings types and their builders; alpha, by revision, as the family pins it.
+coqui-builder = { git = "https://github.com/Boriken-Dev/coqui-builder", rev = "c1875f8276bd6366c38e9133fdb1181a0ffbaaad", features = ["derive"] }
 # The channel, datagram and failure contracts every transport shares, and the length-prefix codec a WebTransport
 # stream is framed with. The family has no releases for now: its crates depend on each other by git revision.
-coqui-transport = { git = "https://github.com/Boriken-Dev/coqui-transport", rev = "19183aa8fa40dff74132d46e18d1ff07fc1cbf38", default-features = false }
+coqui-transport = { git = "https://github.com/Boriken-Dev/coqui-transport", rev = "1283116a22de6a8918faa3d0ebd78b8b6777ff0a", default-features = false }
 # Endpoints are validated URLs; validation backs a trust decision, so it is not hand-written.
 url = "2.5"
 
@@ -51,8 +51,9 @@ tokio = { version = "1", optional = true, default-features = false, features = [
 str0m = { version = "0.24", optional = true, default-features = false, features = ["rust-crypto"] }
 
 [dev-dependencies]
-# The settings types' text forms in tests, through guatiao-serde.
-guatiao-serde = { git = "https://github.com/Boriken-Dev/guatiao", rev = "0350bae7fef4cef2aa46ce73f1ef6be15983d83b", default-features = false, features = ["json", "toml"] }
+# Reads a settings type from the TOML and JSON the tests write: `Partial` deserializes with `serde`.
+coqui-builder = { git = "https://github.com/Boriken-Dev/coqui-builder", rev = "c1875f8276bd6366c38e9133fdb1181a0ffbaaad", features = ["derive", "serde"] }
+toml = "=1.1.8"
 serde_json = "1"
 proptest = { version = "1", default-features = false, features = ["std"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }

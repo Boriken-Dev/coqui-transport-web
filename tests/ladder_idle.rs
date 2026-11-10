@@ -48,6 +48,7 @@ fn a_climbed_channel_at_rest_takes_no_cpu_and_closing_ends_every_thread() {
             .frames(Frames::Binary)
             .webrtc(Settings::default())
             .build()
+            .unwrap()
             .dial(Kind::WebSocket, &url, WAIT)
             .unwrap();
         (near, accepted.join().unwrap())

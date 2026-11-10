@@ -62,6 +62,20 @@ fn pin(identity: &Identity) -> CertificatePin {
     CertificatePin::from_bytes(*certificate.hash().as_ref())
 }
 
+/// What a non-default says, as `(setting, value, default)` texts.
+fn lines(found: &[NonDefault]) -> Vec<(String, String, String)> {
+    found
+        .iter()
+        .map(|item| {
+            (
+                item.setting.clone(),
+                item.value.to_string(),
+                item.default.to_string(),
+            )
+        })
+        .collect()
+}
+
 fn websocket_pair(
     dialer: websocket::DialerBuilder,
     frames: Frames,
@@ -75,6 +89,7 @@ fn websocket_pair(
     let client = dialer
         .frames(frames)
         .build()
+        .unwrap()
         .dial(
             Kind::WebSocket,
             &Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap(),
@@ -206,7 +221,10 @@ fn a_websocket_connector_and_listener_are_the_traits_of_coqui_transport() {
     let port = listener.local_addr().unwrap().port();
     let accepted = thread::spawn(move || coqui_transport::Listener::accept(&listener).unwrap());
     let connector = websocket::Connector::new(
-        websocket::Dialer::builder().frames(Frames::Binary).build(),
+        websocket::Dialer::builder()
+            .frames(Frames::Binary)
+            .build()
+            .unwrap(),
         Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap(),
     );
     let client = connector.connect(WAIT).unwrap();
@@ -249,7 +267,7 @@ fn a_connector_to_a_closed_port_fails() {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     let connector = websocket::Connector::new(
-        websocket::Dialer::builder().build(),
+        websocket::Dialer::builder().build().unwrap(),
         Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap(),
     );
     assert!(connector.connect(Duration::from_secs(2)).is_err());
@@ -257,13 +275,21 @@ fn a_connector_to_a_closed_port_fails() {
 
 #[test]
 fn a_dialer_and_a_listener_report_each_setting_that_differs_from_the_default() {
-    assert_eq!(websocket::Dialer::builder().build().non_defaults(), []);
     assert_eq!(
-        websocket::Dialer::builder()
-            .plain_beyond_loopback(true)
-            .build()
-            .non_defaults(),
-        [NonDefault::new("plain_beyond_loopback", "true", "false")]
+        websocket::Dialer::builder().build().unwrap().non_defaults(),
+        []
+    );
+    assert_eq!(
+        lines(
+            &websocket::Dialer::builder()
+                .plain_beyond_loopback(true)
+                .build()
+                .unwrap()
+                .non_defaults()
+        ),
+        [("plain_beyond_loopback", "bool(true)", "bool(false)")].map(
+            |(setting, value, default)| (setting.to_owned(), value.to_owned(), default.to_owned())
+        )
     );
     let on_loopback = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
         .build()
@@ -277,6 +303,6 @@ fn a_dialer_and_a_listener_report_each_setting_that_differs_from_the_default() {
     let reported = wide.non_defaults();
     assert_eq!(reported.len(), 1);
     assert_eq!(reported[0].setting, "plain_beyond_loopback");
-    assert_eq!(reported[0].default, "false");
-    assert_eq!(reported[0].value, "true");
+    assert_eq!(reported[0].default.to_string(), "bool(false)");
+    assert_eq!(reported[0].value.to_string(), "bool(true)");
 }

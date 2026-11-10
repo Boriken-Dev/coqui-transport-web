@@ -194,7 +194,8 @@ fn dial(listener: &websocket::Listener, settings: Option<Settings>) -> Pair {
             Some(settings) => dialer.webrtc(settings),
             None => dialer.datagrams(true),
         }
-        .build();
+        .build()
+        .unwrap();
         let near = dialer.dial(Kind::WebSocket, &url, WAIT).unwrap();
         Pair {
             near,
@@ -932,6 +933,7 @@ fn climbs_over_tls(address: SocketAddr) {
             .frames(Frames::Binary)
             .webrtc(Settings::default())
             .build()
+            .unwrap()
             .dial(Kind::WebSocket, &url, WAIT)
             .unwrap();
         let far = accepted.join().unwrap();

@@ -29,17 +29,7 @@ use coqui_transport::Failure;
 use worker::{Command, Relays, WAKER, Worker};
 
 /// How an offer and its answer reach the other end.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    Eq,
-    PartialEq,
-    guatiao::ToValue,
-    guatiao::FromValue,
-    guatiao::Schema,
-)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, coqui_builder::Leaf)]
 #[map(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum Signaling {
@@ -53,12 +43,10 @@ pub enum Signaling {
 
 /// How a channel climbs, and what a [`Port`] allows.
 ///
-/// A guatiao value (`from_value`, `to_value`, `schema`) a file fills: every key is optional (an absent one is its default),
-/// an unknown key is refused, a duration is a number of seconds, `[secs, nanos]` or `{secs, nanos}`, and `signaling` is
-/// `on-channel` or `by-caller`. It is `#[non_exhaustive]`: start from [`Default`] and assign the fields.
-#[derive(
-    Clone, Copy, Debug, Eq, PartialEq, guatiao::ToValue, guatiao::FromValue, guatiao::Schema,
-)]
+/// A [`coqui_builder::Describe`] type a file fills: every key is optional (an absent one is its default), an unknown key is
+/// refused, a duration is a number with an optional unit (`30`, `250ms`, `1.5h`), and `signaling` is `on-channel` or
+/// `by-caller`. It is `#[non_exhaustive]`: start from [`Default`] and assign the fields.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, coqui_builder::Describe)]
 #[map(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Settings {
@@ -162,6 +150,12 @@ impl fmt::Debug for Port {
             .field("address", &self.inner.address)
             .field("settings", &self.inner.settings)
             .finish_non_exhaustive()
+    }
+}
+
+impl From<&Port> for Port {
+    fn from(port: &Port) -> Self {
+        port.clone()
     }
 }
 

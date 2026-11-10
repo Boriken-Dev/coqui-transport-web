@@ -169,7 +169,8 @@ fn each_end_of_a_tls_websocket_has_the_chain_the_other_presented() {
     ] {
         let dialer = websocket::Dialer::builder()
             .tls(client_tls(&server, presents.then_some(&client)))
-            .build();
+            .build()
+            .unwrap();
         let seen = over_websocket(Some(server_tls(&server, &client, ask)), dialer);
         assert_eq!(
             seen,
@@ -182,7 +183,7 @@ fn each_end_of_a_tls_websocket_has_the_chain_the_other_presented() {
 #[test]
 fn a_plain_websocket_has_no_certificates() {
     assert_eq!(
-        over_websocket(None, websocket::Dialer::builder().build()),
+        over_websocket(None, websocket::Dialer::builder().build().unwrap()),
         (None, None)
     );
 }
@@ -234,6 +235,7 @@ fn a_boxed_channel_passes_its_certificates_on() {
         websocket::Dialer::builder()
             .tls(client_tls(&server, None))
             .build()
+            .unwrap()
             .dial(Kind::WebSocket, &url, WAIT)
             .unwrap(),
     );
@@ -317,6 +319,7 @@ fn a_websocket_dialer_bound_to_a_local_address_is_admitted_from_it() {
         let near = websocket::Dialer::builder()
             .local_addr(second_loopback())
             .build()
+            .unwrap()
             .dial(Kind::WebSocket, &url, WAIT)
             .unwrap();
         near.send(b"open").unwrap();
@@ -371,11 +374,11 @@ fn a_dialer_whose_local_address_cannot_reach_the_endpoint_says_so() {
         .unwrap();
     let url = Url::parse(&format!("ws://{}/", listener.local_addr().unwrap())).unwrap();
     for local in [not_here(), "[::1]:0".parse().unwrap()] {
-        let dialed = websocket::Dialer::builder().local_addr(local).build().dial(
-            Kind::WebSocket,
-            &url,
-            WAIT,
-        );
+        let dialed = websocket::Dialer::builder()
+            .local_addr(local)
+            .build()
+            .unwrap()
+            .dial(Kind::WebSocket, &url, WAIT);
         assert_eq!(dialed.err(), Some(Failure::Unsupported), "{local}");
     }
     assert_eq!(

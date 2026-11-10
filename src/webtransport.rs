@@ -38,7 +38,8 @@ use crate::frame::{self, Decoder};
 use crate::pump::{Abandon, Admission, Cancel, Inbox, Limits, Reading, Received, bind_failure};
 #[cfg(feature = "webrtc")]
 use crate::webrtc::Port;
-use coqui_transport::{Failure, NonDefault};
+use coqui_builder::{Describe, NonDefault};
+use coqui_transport::Failure;
 
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -539,15 +540,15 @@ impl From<Vec<CertificatePin>> for ClientTrust {
     }
 }
 
-/// What a [`DialerBuilder`] takes whole through `settings`, in the form a file, a form or a peer fills.
+/// What a [`DialerBuilder`] takes whole through `fill`, in the form a file, a form or a peer fills.
 ///
-/// The trust holds certificates and code, so the builder takes it as an argument. Every key is optional (an absent one is its
-/// default) and an unknown key is refused. The type is a guatiao value (`from_value`, `to_value`, `schema`), and
-/// `guatiao_serde::text` reads and writes its text. It is `#[non_exhaustive]`: start from [`Default`] and assign the fields.
-#[derive(
-    Clone, Debug, Default, PartialEq, Eq, guatiao::ToValue, guatiao::FromValue, guatiao::Schema,
-)]
+/// The trust holds certificates and code, so the builder takes it as an input. Every key is optional (an absent one is its
+/// default) and an unknown key is refused. The type is a [`coqui_builder::Describe`]: a `Partial` of it reads a file's text
+/// (with coqui-builder's `serde` feature), its setters are methods of [`DialerBuilder`], and [`DialerSettingsSetters`] gives
+/// them to a builder elsewhere. It is `#[non_exhaustive]`: start from [`Default`] and assign the fields.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Describe)]
 #[map(deny_unknown_fields)]
+#[builder(setters_on = DialerBuilder)]
 #[non_exhaustive]
 pub struct DialerSettings {
     /// The bounds of channels this dialer opens.
@@ -560,41 +561,23 @@ pub struct DialerSettings {
     pub local_addr: Option<SocketAddr>,
 }
 
-/// Builds a [`Dialer`]: [`Dialer::builder`], the settings, then [`build`](Self::build).
-#[derive(Clone, Debug)]
-#[must_use]
-pub struct DialerBuilder {
-    trust: ClientTrust,
+/// What a [`DialerBuilder`] holds: the settings and whom the dialer trusts. Build with [`Dialer::builder`], or
+/// [`DialerBuilder::new`] and the `trust` setter, which `build` requires.
+///
+/// `build` is [`Failure::Unsupported`] when the dialer's runtime could not start.
+#[derive(coqui_builder::Builder, Debug)]
+#[builder(build = Dialer, fallible, entry = "new")]
+pub struct DialerParts {
     settings: DialerSettings,
+    #[builder(input)]
+    trust: ClientTrust,
 }
 
-impl DialerBuilder {
-    /// The bounds of channels this dialer opens; see [`DialerSettings::limits`].
-    pub const fn limits(mut self, limits: Limits) -> Self {
-        self.settings.limits = limits;
-        self
-    }
+impl TryFrom<DialerParts> for Dialer {
+    type Error = Failure;
 
-    /// The local address the UDP socket binds to; see [`DialerSettings::local_addr`].
-    pub const fn local_addr(mut self, address: SocketAddr) -> Self {
-        self.settings.local_addr = Some(address);
-        self
-    }
-
-    /// Every setting from `settings`. Replaces what the setters set before, and is replaced by what they set after it. The
-    /// trust is an argument, not a setting, and stays.
-    pub fn settings(mut self, settings: DialerSettings) -> Self {
-        self.settings = settings;
-        self
-    }
-
-    /// The dialer.
-    ///
-    /// # Errors
-    ///
-    /// [`Failure::Unsupported`] when its runtime could not start.
-    pub fn build(self) -> Result<Dialer, Failure> {
-        let tls = match self.trust {
+    fn try_from(parts: DialerParts) -> Result<Self, Failure> {
+        let tls = match parts.trust {
             ClientTrust::Pinned(pins) => Tls::Pinned(
                 pins.iter()
                     .map(|pin| Sha256Digest::new(*pin.as_bytes()))
@@ -602,10 +585,10 @@ impl DialerBuilder {
             ),
             ClientTrust::Config(config) => Tls::Custom(config),
         };
-        Ok(Dialer {
+        Ok(Self {
             tls,
-            limits: self.settings.limits,
-            local: self.settings.local_addr,
+            limits: parts.settings.limits,
+            local: parts.settings.local_addr,
             runtime: runtime()?,
         })
     }
@@ -614,10 +597,7 @@ impl DialerBuilder {
 impl Dialer {
     /// A builder for a dialer that trusts `trust`, with every setting at its default.
     pub fn builder(trust: impl Into<ClientTrust>) -> DialerBuilder {
-        DialerBuilder {
-            trust: trust.into(),
-            settings: DialerSettings::default(),
-        }
+        DialerBuilder::new().trust(trust)
     }
 
     /// The settings this dialer was built with.
@@ -632,7 +612,7 @@ impl Dialer {
     /// The settings of this dialer that differ from their default, named by key.
     #[must_use]
     pub fn non_defaults(&self) -> Vec<NonDefault> {
-        NonDefault::of_settings(&self.settings())
+        coqui_builder::non_defaults(&self.settings())
     }
 
     /// A client endpoint, which sends a name's session to `address` when given one.
@@ -967,16 +947,16 @@ impl From<Port> for Binding {
     }
 }
 
-/// What a [`ListenerBuilder`] takes whole through `settings`, in the form a file, a form or a peer fills.
+/// What a [`ListenerBuilder`] takes whole through `fill`, in the form a file, a form or a peer fills.
 ///
-/// The binding, the TLS configuration and the admission function hold code, so the builder takes them as arguments. Every key is
-/// optional (an absent one is its default) and an unknown key is refused. The type is a guatiao value (`from_value`,
-/// `to_value`, `schema`), and `guatiao_serde::text` reads and writes its text. It is `#[non_exhaustive]`: start from
-/// [`Default`] and assign the fields.
-#[derive(
-    Clone, Debug, Default, PartialEq, Eq, guatiao::ToValue, guatiao::FromValue, guatiao::Schema,
-)]
+/// The binding, the TLS configuration and the admission function are inputs of the builder, not settings: the binding is
+/// placement, and the others hold code. Every key is optional (an absent one is its default) and an unknown key is refused. The
+/// type is a [`coqui_builder::Describe`]: a `Partial` of it reads a file's text (with coqui-builder's `serde` feature), its
+/// setters are methods of [`ListenerBuilder`], and [`ListenerSettingsSetters`] gives them to a builder elsewhere. It is
+/// `#[non_exhaustive]`: start from [`Default`] and assign the fields.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Describe)]
 #[map(deny_unknown_fields)]
+#[builder(setters_on = ListenerBuilder)]
 #[non_exhaustive]
 pub struct ListenerSettings {
     /// The bounds of channels this listener accepts.
@@ -988,71 +968,52 @@ pub struct ListenerSettings {
     pub origins: Vec<alloc::string::String>,
 }
 
-/// Builds a [`Listener`]: [`Listener::builder`], the settings, then [`build`](Self::build). TLS is required: WebTransport has
-/// no plain form. Its ALPN is set to WebTransport's. A browser pinning this server by hash needs a certificate valid for at most
-/// 14 days, signed with ECDSA P-256.
-#[must_use]
-pub struct ListenerBuilder {
-    binding: Binding,
-    tls: ServerTls,
+/// What a [`ListenerBuilder`] holds: the settings, where it listens, the TLS it serves and the admission function. Build with
+/// [`Listener::builder`], or [`ListenerBuilder::new`] and the `binding` and `tls` setters, which `build` requires. TLS is
+/// required: WebTransport has no plain form. Its ALPN is set to WebTransport's. A browser pinning this server by hash needs a
+/// certificate valid for at most 14 days, signed with ECDSA P-256.
+///
+/// `admission` refuses a source address before any handshake, so a denied peer costs nothing; it is decided on each
+/// connection. `build` is why it could not bind, or start, and [`Failure::Permission`] when a [`Binding::Port`] already has
+/// its listener.
+#[derive(coqui_builder::Builder)]
+#[builder(build = Listener, fallible, entry = "new")]
+pub struct ListenerParts {
     settings: ListenerSettings,
+    #[builder(input)]
+    binding: Binding,
+    #[builder(input)]
+    tls: ServerTls,
+    #[builder(input)]
     admission: Option<Admission>,
 }
 
-impl fmt::Debug for ListenerBuilder {
+impl fmt::Debug for ListenerParts {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ListenerBuilder")
+        f.debug_struct("ListenerParts")
             .field("binding", &self.binding)
             .field("settings", &self.settings)
             .finish_non_exhaustive()
     }
 }
 
-impl ListenerBuilder {
-    /// The bounds of channels this listener accepts.
-    pub const fn limits(mut self, limits: Limits) -> Self {
-        self.settings.limits = limits;
-        self
-    }
+impl TryFrom<ListenerParts> for Listener {
+    type Error = Failure;
 
-    /// Refuses a browser whose `Origin` is not listed; see [`ListenerSettings::origins`]. Replaces the list set before.
-    pub fn origins(mut self, origins: impl IntoIterator<Item = alloc::string::String>) -> Self {
-        self.settings.origins = origins.into_iter().collect();
-        self
-    }
-
-    /// Refuses a source address before any handshake, so a denied peer costs nothing. Decided on each connection.
-    pub fn admission(mut self, admit: impl Fn(SocketAddr) -> bool + Send + Sync + 'static) -> Self {
-        self.admission = Some(Arc::new(admit));
-        self
-    }
-
-    /// Every setting from `settings`. Replaces what the setters set before, and is replaced by what they set after it. The
-    /// binding, the TLS configuration and the functions are arguments, not settings, and stay.
-    pub fn settings(mut self, settings: ListenerSettings) -> Self {
-        self.settings = settings;
-        self
-    }
-
-    /// Binds the listener.
-    ///
-    /// # Errors
-    ///
-    /// Why it could not bind, or start; [`Failure::Permission`] when a [`Binding::Port`] already has its listener.
-    pub fn build(self) -> Result<Listener, Failure> {
-        let (tls, tls_for) = match self.tls {
+    fn try_from(parts: ListenerParts) -> Result<Self, Failure> {
+        let (tls, tls_for) = match parts.tls {
             ServerTls::Config(config) => (config, None),
             ServerTls::PerConnection(build) => (unserved(), Some(build)),
         };
-        let mut listener = match self.binding {
-            Binding::Address(address) => Listener::bind(address, tls)?,
+        let mut listener = match parts.binding {
+            Binding::Address(address) => Self::bind(address, tls)?,
             #[cfg(feature = "webrtc")]
-            Binding::Port(port) => Listener::on_port(&port, tls)?,
+            Binding::Port(port) => Self::on_port(&port, tls)?,
         };
-        listener.limits = self.settings.limits;
-        listener.origins = self.settings.origins;
+        listener.limits = parts.settings.limits;
+        listener.origins = parts.settings.origins;
         listener.tls_for = tls_for;
-        listener.admission = self.admission;
+        listener.admission = parts.admission;
         Ok(listener)
     }
 }
@@ -1061,12 +1022,7 @@ impl Listener {
     /// A builder for a listener on `binding` serving `tls`, with every setting at its default. `tls` is an
     /// `Arc<rustls::ServerConfig>` or a [`ServerTls`].
     pub fn builder(binding: impl Into<Binding>, tls: impl Into<ServerTls>) -> ListenerBuilder {
-        ListenerBuilder {
-            binding: binding.into(),
-            tls: tls.into(),
-            settings: ListenerSettings::default(),
-            admission: None,
-        }
+        ListenerBuilder::new().binding(binding).tls(tls)
     }
 
     /// The settings this listener was built with.
@@ -1081,7 +1037,7 @@ impl Listener {
     /// The settings of this listener that differ from their default, named by key.
     #[must_use]
     pub fn non_defaults(&self) -> Vec<NonDefault> {
-        NonDefault::of_settings(&self.settings())
+        coqui_builder::non_defaults(&self.settings())
     }
 
     fn bind(address: SocketAddr, tls: Arc<ServerConfig>) -> Result<Self, Failure> {
@@ -1176,7 +1132,7 @@ impl Listener {
         let Some(admit) = &self.admission else {
             return true;
         };
-        source.is_some_and(|source| admit(source))
+        source.is_some_and(|source| admit.admits(source))
     }
 
     /// The address it is bound to.

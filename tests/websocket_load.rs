@@ -100,7 +100,8 @@ impl Setup {
             .frames(Frames::Binary)
             .tls(keys.client)
             .datagrams(self.datagrams)
-            .build();
+            .build()
+            .unwrap();
         let near: Vec<_> = (0..count)
             .map(|_| dialer.dial(Kind::WebSocket, &url, WAIT).unwrap())
             .collect();

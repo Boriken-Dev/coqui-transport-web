@@ -86,6 +86,7 @@ fn websocket_pairs(listener: &websocket::Listener) -> Vec<Pair> {
                 let accepted = scope.spawn(|| listener.accept(Some(WAIT)).unwrap());
                 let near = websocket::Dialer::builder()
                     .build()
+                    .unwrap()
                     .dial(Kind::WebSocket, &url, WAIT)
                     .unwrap();
                 let far = accepted.join().unwrap();

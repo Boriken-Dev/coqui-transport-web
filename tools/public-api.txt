@@ -27,6 +27,45 @@ pub fn coqui_transport_web::frame::ws_message(&[u8]) -> alloc::vec::Vec<u8>
 pub fn coqui_transport_web::frame::ws_part(&[u8]) -> core::result::Result<coqui_transport_web::frame::WsPart<'_>, coqui_transport::frame::FrameError>
 pub fn coqui_transport_web::frame::ws_signal(&[u8]) -> alloc::vec::Vec<u8>
 pub fn coqui_transport_web::frame::ws_signal_part(&[u8]) -> core::option::Option<&[u8]>
+pub mod coqui_transport_web::prelude
+pub trait coqui_transport_web::prelude::LimitsSetters: coqui_builder::builder::Holds<coqui_transport_web::Limits> + core::marker::Sized
+pub fn coqui_transport_web::prelude::LimitsSetters::handshake(self, impl core::convert::Into<core::time::Duration>) -> Self
+pub fn coqui_transport_web::prelude::LimitsSetters::idle(self, impl core::convert::Into<core::time::Duration>) -> Self
+pub fn coqui_transport_web::prelude::LimitsSetters::max_message(self, usize) -> Self
+pub fn coqui_transport_web::prelude::LimitsSetters::pending(self, usize) -> Self
+pub fn coqui_transport_web::prelude::LimitsSetters::pending_datagrams(self, usize) -> Self
+pub fn coqui_transport_web::prelude::LimitsSetters::queued_bytes(self, usize) -> Self
+pub fn coqui_transport_web::prelude::LimitsSetters::send(self, impl core::convert::Into<core::time::Duration>) -> Self
+pub fn coqui_transport_web::prelude::LimitsSetters::websocket_datagram(self, usize) -> Self
+pub trait coqui_transport_web::prelude::WebSocketDialerSettingsSetters: coqui_builder::builder::Holds<coqui_transport_web::websocket::DialerSettings> + core::marker::Sized
+pub fn coqui_transport_web::prelude::WebSocketDialerSettingsSetters::datagrams(self, bool) -> Self
+pub fn coqui_transport_web::prelude::WebSocketDialerSettingsSetters::frames(self, impl core::convert::Into<coqui_transport_web::websocket::Frames>) -> Self
+pub fn coqui_transport_web::prelude::WebSocketDialerSettingsSetters::limits(self, impl core::convert::Into<coqui_transport_web::Limits>) -> Self
+pub fn coqui_transport_web::prelude::WebSocketDialerSettingsSetters::local_addr(self, impl core::convert::Into<core::option::Option<core::net::socket_addr::SocketAddr>>) -> Self
+pub fn coqui_transport_web::prelude::WebSocketDialerSettingsSetters::plain_beyond_loopback(self, bool) -> Self
+pub fn coqui_transport_web::prelude::WebSocketDialerSettingsSetters::webrtc(self, impl core::convert::Into<core::option::Option<coqui_transport_web::webrtc::Settings>>) -> Self
+pub trait coqui_transport_web::prelude::WebSocketListenerSettingsSetters: coqui_builder::builder::Holds<coqui_transport_web::websocket::ListenerSettings> + core::marker::Sized
+pub fn coqui_transport_web::prelude::WebSocketListenerSettingsSetters::frames(self, impl core::convert::Into<coqui_transport_web::websocket::Frames>) -> Self
+pub fn coqui_transport_web::prelude::WebSocketListenerSettingsSetters::limits(self, impl core::convert::Into<coqui_transport_web::Limits>) -> Self
+pub fn coqui_transport_web::prelude::WebSocketListenerSettingsSetters::origins(self, impl core::convert::Into<alloc::vec::Vec<alloc::string::String>>) -> Self
+pub fn coqui_transport_web::prelude::WebSocketListenerSettingsSetters::plain_beyond_loopback(self, bool) -> Self
+pub trait coqui_transport_web::prelude::WebTransportDialerSettingsSetters: coqui_builder::builder::Holds<coqui_transport_web::webtransport::DialerSettings> + core::marker::Sized
+pub fn coqui_transport_web::prelude::WebTransportDialerSettingsSetters::limits(self, impl core::convert::Into<coqui_transport_web::Limits>) -> Self
+pub fn coqui_transport_web::prelude::WebTransportDialerSettingsSetters::local_addr(self, impl core::convert::Into<core::option::Option<core::net::socket_addr::SocketAddr>>) -> Self
+pub trait coqui_transport_web::prelude::WebTransportListenerSettingsSetters: coqui_builder::builder::Holds<coqui_transport_web::webtransport::ListenerSettings> + core::marker::Sized
+pub fn coqui_transport_web::prelude::WebTransportListenerSettingsSetters::limits(self, impl core::convert::Into<coqui_transport_web::Limits>) -> Self
+pub fn coqui_transport_web::prelude::WebTransportListenerSettingsSetters::origins(self, impl core::convert::Into<alloc::vec::Vec<alloc::string::String>>) -> Self
+pub trait coqui_transport_web::prelude::WebrtcSettingsSetters: coqui_builder::builder::Holds<coqui_transport_web::webrtc::Settings> + core::marker::Sized
+pub fn coqui_transport_web::prelude::WebrtcSettingsSetters::any_candidate(self, bool) -> Self
+pub fn coqui_transport_web::prelude::WebrtcSettingsSetters::attempt(self, impl core::convert::Into<core::time::Duration>) -> Self
+pub fn coqui_transport_web::prelude::WebrtcSettingsSetters::enabled(self, bool) -> Self
+pub fn coqui_transport_web::prelude::WebrtcSettingsSetters::max_per_address(self, usize) -> Self
+pub fn coqui_transport_web::prelude::WebrtcSettingsSetters::max_relays(self, usize) -> Self
+pub fn coqui_transport_web::prelude::WebrtcSettingsSetters::max_sessions(self, usize) -> Self
+pub fn coqui_transport_web::prelude::WebrtcSettingsSetters::path_mtu(self, usize) -> Self
+pub fn coqui_transport_web::prelude::WebrtcSettingsSetters::public_address(self, impl core::convert::Into<core::option::Option<core::net::socket_addr::SocketAddr>>) -> Self
+pub fn coqui_transport_web::prelude::WebrtcSettingsSetters::relay_idle(self, impl core::convert::Into<core::time::Duration>) -> Self
+pub fn coqui_transport_web::prelude::WebrtcSettingsSetters::signaling(self, impl core::convert::Into<coqui_transport_web::webrtc::Signaling>) -> Self
 pub mod coqui_transport_web::webrtc
 #[non_exhaustive] pub enum coqui_transport_web::webrtc::Signaling
 pub coqui_transport_web::webrtc::Signaling::ByCaller
@@ -37,6 +76,8 @@ pub fn coqui_transport_web::webrtc::Port::bind(core::net::socket_addr::SocketAdd
 pub fn coqui_transport_web::webrtc::Port::data_channels(&self) -> usize
 pub fn coqui_transport_web::webrtc::Port::local_addr(&self) -> core::net::socket_addr::SocketAddr
 pub fn coqui_transport_web::webrtc::Port::relays(&self) -> usize
+impl core::convert::From<&coqui_transport_web::webrtc::Port> for coqui_transport_web::webrtc::Port
+pub fn coqui_transport_web::webrtc::Port::from(&coqui_transport_web::webrtc::Port) -> Self
 impl core::convert::From<coqui_transport_web::webrtc::Port> for coqui_transport_web::webtransport::Binding
 pub fn coqui_transport_web::webtransport::Binding::from(coqui_transport_web::webrtc::Port) -> Self
 impl core::fmt::Debug for coqui_transport_web::webrtc::Port
@@ -54,6 +95,17 @@ pub coqui_transport_web::webrtc::Settings::relay_idle: core::time::Duration
 pub coqui_transport_web::webrtc::Settings::signaling: coqui_transport_web::webrtc::Signaling
 impl core::default::Default for coqui_transport_web::webrtc::Settings
 pub fn coqui_transport_web::webrtc::Settings::default() -> Self
+pub trait coqui_transport_web::webrtc::SettingsSetters: coqui_builder::builder::Holds<coqui_transport_web::webrtc::Settings> + core::marker::Sized
+pub fn coqui_transport_web::webrtc::SettingsSetters::any_candidate(self, bool) -> Self
+pub fn coqui_transport_web::webrtc::SettingsSetters::attempt(self, impl core::convert::Into<core::time::Duration>) -> Self
+pub fn coqui_transport_web::webrtc::SettingsSetters::enabled(self, bool) -> Self
+pub fn coqui_transport_web::webrtc::SettingsSetters::max_per_address(self, usize) -> Self
+pub fn coqui_transport_web::webrtc::SettingsSetters::max_relays(self, usize) -> Self
+pub fn coqui_transport_web::webrtc::SettingsSetters::max_sessions(self, usize) -> Self
+pub fn coqui_transport_web::webrtc::SettingsSetters::path_mtu(self, usize) -> Self
+pub fn coqui_transport_web::webrtc::SettingsSetters::public_address(self, impl core::convert::Into<core::option::Option<core::net::socket_addr::SocketAddr>>) -> Self
+pub fn coqui_transport_web::webrtc::SettingsSetters::relay_idle(self, impl core::convert::Into<core::time::Duration>) -> Self
+pub fn coqui_transport_web::webrtc::SettingsSetters::signaling(self, impl core::convert::Into<coqui_transport_web::webrtc::Signaling>) -> Self
 pub mod coqui_transport_web::websocket
 #[non_exhaustive] pub enum coqui_transport_web::websocket::Frames
 pub coqui_transport_web::websocket::Frames::Binary
@@ -97,26 +149,30 @@ pub fn coqui_transport_web::websocket::Connector::connect(&self, core::time::Dur
 pub struct coqui_transport_web::websocket::Dialer
 impl coqui_transport_web::websocket::Dialer
 pub fn coqui_transport_web::websocket::Dialer::builder() -> coqui_transport_web::websocket::DialerBuilder
-pub fn coqui_transport_web::websocket::Dialer::non_defaults(&self) -> alloc::vec::Vec<coqui_transport::non_default::NonDefault>
+impl coqui_transport_web::websocket::Dialer
+pub fn coqui_transport_web::websocket::Dialer::non_defaults(&self) -> alloc::vec::Vec<coqui_builder::non_default::NonDefault>
 pub const fn coqui_transport_web::websocket::Dialer::plain_beyond_loopback(&self) -> bool
 pub fn coqui_transport_web::websocket::Dialer::settings(&self) -> coqui_transport_web::websocket::DialerSettings
 impl coqui_transport_web::Dialer for coqui_transport_web::websocket::Dialer
 pub type coqui_transport_web::websocket::Dialer::Connection = coqui_transport_web::websocket::Channel
 pub fn coqui_transport_web::websocket::Dialer::dial(&mut self, coqui_transport_web::Kind, &url::Url, core::time::Duration) -> core::result::Result<coqui_transport_web::websocket::Channel, coqui_transport::failure::Failure>
+impl core::convert::From<coqui_transport_web::websocket::DialerParts> for coqui_transport_web::websocket::Dialer
+pub fn coqui_transport_web::websocket::Dialer::from(coqui_transport_web::websocket::DialerParts) -> Self
 impl core::fmt::Debug for coqui_transport_web::websocket::Dialer
 pub fn coqui_transport_web::websocket::Dialer::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct coqui_transport_web::websocket::DialerBuilder
-impl coqui_transport_web::websocket::DialerBuilder
-pub fn coqui_transport_web::websocket::DialerBuilder::build(self) -> coqui_transport_web::websocket::Dialer
-pub const fn coqui_transport_web::websocket::DialerBuilder::datagrams(self, bool) -> Self
-pub const fn coqui_transport_web::websocket::DialerBuilder::frames(self, coqui_transport_web::websocket::Frames) -> Self
-pub fn coqui_transport_web::websocket::DialerBuilder::header(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
-pub const fn coqui_transport_web::websocket::DialerBuilder::limits(self, coqui_transport_web::Limits) -> Self
-pub const fn coqui_transport_web::websocket::DialerBuilder::local_addr(self, core::net::socket_addr::SocketAddr) -> Self
-pub const fn coqui_transport_web::websocket::DialerBuilder::plain_beyond_loopback(self, bool) -> Self
-pub const fn coqui_transport_web::websocket::DialerBuilder::settings(self, coqui_transport_web::websocket::DialerSettings) -> Self
-pub fn coqui_transport_web::websocket::DialerBuilder::tls(self, alloc::sync::Arc<rustls::client::client_conn::ClientConfig>) -> Self
-pub const fn coqui_transport_web::websocket::DialerBuilder::webrtc(self, coqui_transport_web::webrtc::Settings) -> Self
+pub struct coqui_transport_web::websocket::DialerBuilder where coqui_transport_web::websocket::DialerSettings: coqui_builder::describe::Describe
+impl coqui_transport_web::websocket::DialerBuilder where coqui_transport_web::websocket::DialerSettings: coqui_builder::describe::Describe
+pub fn coqui_transport_web::websocket::DialerBuilder::build(self) -> core::result::Result<coqui_transport_web::websocket::Dialer, coqui_builder::partial::Missing>
+pub fn coqui_transport_web::websocket::DialerBuilder::fill(self, coqui_builder::partial::Partial<coqui_transport_web::websocket::DialerSettings>) -> Self
+pub fn coqui_transport_web::websocket::DialerBuilder::fill_from(self, &mut impl coqui_builder::source::Source) -> core::result::Result<Self, coqui_builder::fill::FillError>
+pub fn coqui_transport_web::websocket::DialerBuilder::headers(self, impl core::convert::Into<alloc::vec::Vec<(alloc::string::String, alloc::string::String)>>) -> Self
+pub fn coqui_transport_web::websocket::DialerBuilder::parts(self) -> core::result::Result<coqui_transport_web::websocket::DialerParts, coqui_builder::partial::Missing>
+pub fn coqui_transport_web::websocket::DialerBuilder::tls(self, impl core::convert::Into<alloc::sync::Arc<rustls::client::client_conn::ClientConfig>>) -> Self
+pub struct coqui_transport_web::websocket::DialerParts
+impl core::convert::From<coqui_transport_web::websocket::DialerParts> for coqui_transport_web::websocket::Dialer
+pub fn coqui_transport_web::websocket::Dialer::from(coqui_transport_web::websocket::DialerParts) -> Self
+impl core::fmt::Debug for coqui_transport_web::websocket::DialerParts
+pub fn coqui_transport_web::websocket::DialerParts::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub struct coqui_transport_web::websocket::DialerSettings
 pub coqui_transport_web::websocket::DialerSettings::datagrams: bool
 pub coqui_transport_web::websocket::DialerSettings::frames: coqui_transport_web::websocket::Frames
@@ -130,27 +186,36 @@ pub fn coqui_transport_web::websocket::Listener::accept(&self, core::option::Opt
 pub fn coqui_transport_web::websocket::Listener::builder(core::net::socket_addr::SocketAddr, impl core::convert::Into<coqui_transport_web::websocket::ServerTls>) -> coqui_transport_web::websocket::ListenerBuilder
 pub fn coqui_transport_web::websocket::Listener::local_addr(&self) -> core::result::Result<core::net::socket_addr::SocketAddr, coqui_transport::failure::Failure>
 pub fn coqui_transport_web::websocket::Listener::next(&self, core::option::Option<core::time::Duration>) -> core::result::Result<coqui_transport_web::websocket::Pending, coqui_transport::failure::Failure>
-pub fn coqui_transport_web::websocket::Listener::non_defaults(&self) -> alloc::vec::Vec<coqui_transport::non_default::NonDefault>
+pub fn coqui_transport_web::websocket::Listener::non_defaults(&self) -> alloc::vec::Vec<coqui_builder::non_default::NonDefault>
 pub fn coqui_transport_web::websocket::Listener::plain_beyond_loopback(&self) -> bool
 pub fn coqui_transport_web::websocket::Listener::settings(&self) -> coqui_transport_web::websocket::ListenerSettings
 impl coqui_transport::connector::Listener for coqui_transport_web::websocket::Listener
 pub type coqui_transport_web::websocket::Listener::Connection = coqui_transport_web::websocket::Channel
 pub type coqui_transport_web::websocket::Listener::Error = coqui_transport::failure::Failure
 pub fn coqui_transport_web::websocket::Listener::accept(&self) -> core::result::Result<coqui_transport_web::websocket::Channel, coqui_transport::failure::Failure>
+impl core::convert::TryFrom<coqui_transport_web::websocket::ListenerParts> for coqui_transport_web::websocket::Listener
+pub type coqui_transport_web::websocket::Listener::Error = coqui_transport::failure::Failure
+pub fn coqui_transport_web::websocket::Listener::try_from(coqui_transport_web::websocket::ListenerParts) -> core::result::Result<Self, coqui_transport::failure::Failure>
 impl core::fmt::Debug for coqui_transport_web::websocket::Listener
 pub fn coqui_transport_web::websocket::Listener::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct coqui_transport_web::websocket::ListenerBuilder
-impl coqui_transport_web::websocket::ListenerBuilder
-pub fn coqui_transport_web::websocket::ListenerBuilder::admission(self, impl core::ops::function::Fn(core::net::socket_addr::SocketAddr) -> bool + core::marker::Send + core::marker::Sync + 'static) -> Self
-pub fn coqui_transport_web::websocket::ListenerBuilder::build(self) -> core::result::Result<coqui_transport_web::websocket::Listener, coqui_transport::failure::Failure>
-pub const fn coqui_transport_web::websocket::ListenerBuilder::frames(self, coqui_transport_web::websocket::Frames) -> Self
-pub const fn coqui_transport_web::websocket::ListenerBuilder::limits(self, coqui_transport_web::Limits) -> Self
-pub fn coqui_transport_web::websocket::ListenerBuilder::origins(self, impl core::iter::traits::collect::IntoIterator<Item = alloc::string::String>) -> Self
-pub const fn coqui_transport_web::websocket::ListenerBuilder::plain_beyond_loopback(self, bool) -> Self
-pub fn coqui_transport_web::websocket::ListenerBuilder::settings(self, coqui_transport_web::websocket::ListenerSettings) -> Self
-pub fn coqui_transport_web::websocket::ListenerBuilder::webrtc(self, &coqui_transport_web::webrtc::Port) -> Self
-impl core::fmt::Debug for coqui_transport_web::websocket::ListenerBuilder
-pub fn coqui_transport_web::websocket::ListenerBuilder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct coqui_transport_web::websocket::ListenerBuilder where coqui_transport_web::websocket::ListenerSettings: coqui_builder::describe::Describe
+impl coqui_transport_web::websocket::ListenerBuilder where coqui_transport_web::websocket::ListenerSettings: coqui_builder::describe::Describe
+pub fn coqui_transport_web::websocket::ListenerBuilder::address(self, impl core::convert::Into<core::net::socket_addr::SocketAddr>) -> Self
+pub fn coqui_transport_web::websocket::ListenerBuilder::admission(self, impl core::convert::Into<coqui_transport_web::Admission>) -> Self
+pub fn coqui_transport_web::websocket::ListenerBuilder::build(self) -> core::result::Result<coqui_transport_web::websocket::Listener, coqui_builder::builder::BuildError<<coqui_transport_web::websocket::Listener as core::convert::TryFrom<coqui_transport_web::websocket::ListenerParts>>::Error>>
+pub fn coqui_transport_web::websocket::ListenerBuilder::fill(self, coqui_builder::partial::Partial<coqui_transport_web::websocket::ListenerSettings>) -> Self
+pub fn coqui_transport_web::websocket::ListenerBuilder::fill_from(self, &mut impl coqui_builder::source::Source) -> core::result::Result<Self, coqui_builder::fill::FillError>
+pub fn coqui_transport_web::websocket::ListenerBuilder::parts(self) -> core::result::Result<coqui_transport_web::websocket::ListenerParts, coqui_builder::partial::Missing>
+pub fn coqui_transport_web::websocket::ListenerBuilder::tls(self, impl core::convert::Into<coqui_transport_web::websocket::ServerTls>) -> Self
+pub fn coqui_transport_web::websocket::ListenerBuilder::webrtc(self, impl core::convert::Into<coqui_transport_web::webrtc::Port>) -> Self
+impl coqui_transport_web::websocket::ListenerBuilder where coqui_transport_web::websocket::ListenerSettings: coqui_builder::describe::Describe
+pub fn coqui_transport_web::websocket::ListenerBuilder::new() -> Self
+pub struct coqui_transport_web::websocket::ListenerParts
+impl core::convert::TryFrom<coqui_transport_web::websocket::ListenerParts> for coqui_transport_web::websocket::Listener
+pub type coqui_transport_web::websocket::Listener::Error = coqui_transport::failure::Failure
+pub fn coqui_transport_web::websocket::Listener::try_from(coqui_transport_web::websocket::ListenerParts) -> core::result::Result<Self, coqui_transport::failure::Failure>
+impl core::fmt::Debug for coqui_transport_web::websocket::ListenerParts
+pub fn coqui_transport_web::websocket::ListenerParts::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub struct coqui_transport_web::websocket::ListenerSettings
 pub coqui_transport_web::websocket::ListenerSettings::frames: coqui_transport_web::websocket::Frames
 pub coqui_transport_web::websocket::ListenerSettings::limits: coqui_transport_web::Limits
@@ -163,6 +228,18 @@ pub fn coqui_transport_web::websocket::Pending::handshake(self) -> core::result:
 pub const fn coqui_transport_web::websocket::Pending::peer_addr(&self) -> core::net::socket_addr::SocketAddr
 impl core::fmt::Debug for coqui_transport_web::websocket::Pending
 pub fn coqui_transport_web::websocket::Pending::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub trait coqui_transport_web::websocket::DialerSettingsSetters: coqui_builder::builder::Holds<coqui_transport_web::websocket::DialerSettings> + core::marker::Sized
+pub fn coqui_transport_web::websocket::DialerSettingsSetters::datagrams(self, bool) -> Self
+pub fn coqui_transport_web::websocket::DialerSettingsSetters::frames(self, impl core::convert::Into<coqui_transport_web::websocket::Frames>) -> Self
+pub fn coqui_transport_web::websocket::DialerSettingsSetters::limits(self, impl core::convert::Into<coqui_transport_web::Limits>) -> Self
+pub fn coqui_transport_web::websocket::DialerSettingsSetters::local_addr(self, impl core::convert::Into<core::option::Option<core::net::socket_addr::SocketAddr>>) -> Self
+pub fn coqui_transport_web::websocket::DialerSettingsSetters::plain_beyond_loopback(self, bool) -> Self
+pub fn coqui_transport_web::websocket::DialerSettingsSetters::webrtc(self, impl core::convert::Into<core::option::Option<coqui_transport_web::webrtc::Settings>>) -> Self
+pub trait coqui_transport_web::websocket::ListenerSettingsSetters: coqui_builder::builder::Holds<coqui_transport_web::websocket::ListenerSettings> + core::marker::Sized
+pub fn coqui_transport_web::websocket::ListenerSettingsSetters::frames(self, impl core::convert::Into<coqui_transport_web::websocket::Frames>) -> Self
+pub fn coqui_transport_web::websocket::ListenerSettingsSetters::limits(self, impl core::convert::Into<coqui_transport_web::Limits>) -> Self
+pub fn coqui_transport_web::websocket::ListenerSettingsSetters::origins(self, impl core::convert::Into<alloc::vec::Vec<alloc::string::String>>) -> Self
+pub fn coqui_transport_web::websocket::ListenerSettingsSetters::plain_beyond_loopback(self, bool) -> Self
 pub mod coqui_transport_web::webtransport
 #[non_exhaustive] pub enum coqui_transport_web::webtransport::Binding
 pub coqui_transport_web::webtransport::Binding::Address(core::net::socket_addr::SocketAddr)
@@ -218,19 +295,29 @@ pub fn coqui_transport_web::webtransport::Connector::connect(&self, core::time::
 pub struct coqui_transport_web::webtransport::Dialer
 impl coqui_transport_web::webtransport::Dialer
 pub fn coqui_transport_web::webtransport::Dialer::builder(impl core::convert::Into<coqui_transport_web::webtransport::ClientTrust>) -> coqui_transport_web::webtransport::DialerBuilder
-pub fn coqui_transport_web::webtransport::Dialer::non_defaults(&self) -> alloc::vec::Vec<coqui_transport::non_default::NonDefault>
+pub fn coqui_transport_web::webtransport::Dialer::non_defaults(&self) -> alloc::vec::Vec<coqui_builder::non_default::NonDefault>
 pub fn coqui_transport_web::webtransport::Dialer::settings(&self) -> coqui_transport_web::webtransport::DialerSettings
 impl coqui_transport_web::Dialer for coqui_transport_web::webtransport::Dialer
 pub type coqui_transport_web::webtransport::Dialer::Connection = coqui_transport_web::webtransport::Channel
 pub fn coqui_transport_web::webtransport::Dialer::dial(&mut self, coqui_transport_web::Kind, &url::Url, core::time::Duration) -> core::result::Result<coqui_transport_web::webtransport::Channel, coqui_transport::failure::Failure>
+impl core::convert::TryFrom<coqui_transport_web::webtransport::DialerParts> for coqui_transport_web::webtransport::Dialer
+pub type coqui_transport_web::webtransport::Dialer::Error = coqui_transport::failure::Failure
+pub fn coqui_transport_web::webtransport::Dialer::try_from(coqui_transport_web::webtransport::DialerParts) -> core::result::Result<Self, coqui_transport::failure::Failure>
 impl core::fmt::Debug for coqui_transport_web::webtransport::Dialer
 pub fn coqui_transport_web::webtransport::Dialer::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct coqui_transport_web::webtransport::DialerBuilder
-impl coqui_transport_web::webtransport::DialerBuilder
-pub fn coqui_transport_web::webtransport::DialerBuilder::build(self) -> core::result::Result<coqui_transport_web::webtransport::Dialer, coqui_transport::failure::Failure>
-pub const fn coqui_transport_web::webtransport::DialerBuilder::limits(self, coqui_transport_web::Limits) -> Self
-pub const fn coqui_transport_web::webtransport::DialerBuilder::local_addr(self, core::net::socket_addr::SocketAddr) -> Self
-pub fn coqui_transport_web::webtransport::DialerBuilder::settings(self, coqui_transport_web::webtransport::DialerSettings) -> Self
+pub struct coqui_transport_web::webtransport::DialerBuilder where coqui_transport_web::webtransport::DialerSettings: coqui_builder::describe::Describe
+impl coqui_transport_web::webtransport::DialerBuilder where coqui_transport_web::webtransport::DialerSettings: coqui_builder::describe::Describe
+pub fn coqui_transport_web::webtransport::DialerBuilder::build(self) -> core::result::Result<coqui_transport_web::webtransport::Dialer, coqui_builder::builder::BuildError<<coqui_transport_web::webtransport::Dialer as core::convert::TryFrom<coqui_transport_web::webtransport::DialerParts>>::Error>>
+pub fn coqui_transport_web::webtransport::DialerBuilder::fill(self, coqui_builder::partial::Partial<coqui_transport_web::webtransport::DialerSettings>) -> Self
+pub fn coqui_transport_web::webtransport::DialerBuilder::fill_from(self, &mut impl coqui_builder::source::Source) -> core::result::Result<Self, coqui_builder::fill::FillError>
+pub fn coqui_transport_web::webtransport::DialerBuilder::parts(self) -> core::result::Result<coqui_transport_web::webtransport::DialerParts, coqui_builder::partial::Missing>
+pub fn coqui_transport_web::webtransport::DialerBuilder::trust(self, impl core::convert::Into<coqui_transport_web::webtransport::ClientTrust>) -> Self
+impl coqui_transport_web::webtransport::DialerBuilder where coqui_transport_web::webtransport::DialerSettings: coqui_builder::describe::Describe
+pub fn coqui_transport_web::webtransport::DialerBuilder::new() -> Self
+pub struct coqui_transport_web::webtransport::DialerParts
+impl core::convert::TryFrom<coqui_transport_web::webtransport::DialerParts> for coqui_transport_web::webtransport::Dialer
+pub type coqui_transport_web::webtransport::Dialer::Error = coqui_transport::failure::Failure
+pub fn coqui_transport_web::webtransport::Dialer::try_from(coqui_transport_web::webtransport::DialerParts) -> core::result::Result<Self, coqui_transport::failure::Failure>
 #[non_exhaustive] pub struct coqui_transport_web::webtransport::DialerSettings
 pub coqui_transport_web::webtransport::DialerSettings::limits: coqui_transport_web::Limits
 pub coqui_transport_web::webtransport::DialerSettings::local_addr: core::option::Option<core::net::socket_addr::SocketAddr>
@@ -240,23 +327,34 @@ pub fn coqui_transport_web::webtransport::Listener::accept(&self, core::option::
 pub fn coqui_transport_web::webtransport::Listener::builder(impl core::convert::Into<coqui_transport_web::webtransport::Binding>, impl core::convert::Into<coqui_transport_web::webtransport::ServerTls>) -> coqui_transport_web::webtransport::ListenerBuilder
 pub const fn coqui_transport_web::webtransport::Listener::local_addr(&self) -> core::net::socket_addr::SocketAddr
 pub fn coqui_transport_web::webtransport::Listener::next(&self, core::option::Option<core::time::Duration>) -> core::result::Result<coqui_transport_web::webtransport::Pending, coqui_transport::failure::Failure>
-pub fn coqui_transport_web::webtransport::Listener::non_defaults(&self) -> alloc::vec::Vec<coqui_transport::non_default::NonDefault>
+pub fn coqui_transport_web::webtransport::Listener::non_defaults(&self) -> alloc::vec::Vec<coqui_builder::non_default::NonDefault>
 pub fn coqui_transport_web::webtransport::Listener::settings(&self) -> coqui_transport_web::webtransport::ListenerSettings
 impl coqui_transport::connector::Listener for coqui_transport_web::webtransport::Listener
 pub type coqui_transport_web::webtransport::Listener::Connection = coqui_transport_web::webtransport::Channel
 pub type coqui_transport_web::webtransport::Listener::Error = coqui_transport::failure::Failure
 pub fn coqui_transport_web::webtransport::Listener::accept(&self) -> core::result::Result<coqui_transport_web::webtransport::Channel, coqui_transport::failure::Failure>
+impl core::convert::TryFrom<coqui_transport_web::webtransport::ListenerParts> for coqui_transport_web::webtransport::Listener
+pub type coqui_transport_web::webtransport::Listener::Error = coqui_transport::failure::Failure
+pub fn coqui_transport_web::webtransport::Listener::try_from(coqui_transport_web::webtransport::ListenerParts) -> core::result::Result<Self, coqui_transport::failure::Failure>
 impl core::fmt::Debug for coqui_transport_web::webtransport::Listener
 pub fn coqui_transport_web::webtransport::Listener::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct coqui_transport_web::webtransport::ListenerBuilder
-impl coqui_transport_web::webtransport::ListenerBuilder
-pub fn coqui_transport_web::webtransport::ListenerBuilder::admission(self, impl core::ops::function::Fn(core::net::socket_addr::SocketAddr) -> bool + core::marker::Send + core::marker::Sync + 'static) -> Self
-pub fn coqui_transport_web::webtransport::ListenerBuilder::build(self) -> core::result::Result<coqui_transport_web::webtransport::Listener, coqui_transport::failure::Failure>
-pub const fn coqui_transport_web::webtransport::ListenerBuilder::limits(self, coqui_transport_web::Limits) -> Self
-pub fn coqui_transport_web::webtransport::ListenerBuilder::origins(self, impl core::iter::traits::collect::IntoIterator<Item = alloc::string::String>) -> Self
-pub fn coqui_transport_web::webtransport::ListenerBuilder::settings(self, coqui_transport_web::webtransport::ListenerSettings) -> Self
-impl core::fmt::Debug for coqui_transport_web::webtransport::ListenerBuilder
-pub fn coqui_transport_web::webtransport::ListenerBuilder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct coqui_transport_web::webtransport::ListenerBuilder where coqui_transport_web::webtransport::ListenerSettings: coqui_builder::describe::Describe
+impl coqui_transport_web::webtransport::ListenerBuilder where coqui_transport_web::webtransport::ListenerSettings: coqui_builder::describe::Describe
+pub fn coqui_transport_web::webtransport::ListenerBuilder::admission(self, impl core::convert::Into<coqui_transport_web::Admission>) -> Self
+pub fn coqui_transport_web::webtransport::ListenerBuilder::binding(self, impl core::convert::Into<coqui_transport_web::webtransport::Binding>) -> Self
+pub fn coqui_transport_web::webtransport::ListenerBuilder::build(self) -> core::result::Result<coqui_transport_web::webtransport::Listener, coqui_builder::builder::BuildError<<coqui_transport_web::webtransport::Listener as core::convert::TryFrom<coqui_transport_web::webtransport::ListenerParts>>::Error>>
+pub fn coqui_transport_web::webtransport::ListenerBuilder::fill(self, coqui_builder::partial::Partial<coqui_transport_web::webtransport::ListenerSettings>) -> Self
+pub fn coqui_transport_web::webtransport::ListenerBuilder::fill_from(self, &mut impl coqui_builder::source::Source) -> core::result::Result<Self, coqui_builder::fill::FillError>
+pub fn coqui_transport_web::webtransport::ListenerBuilder::parts(self) -> core::result::Result<coqui_transport_web::webtransport::ListenerParts, coqui_builder::partial::Missing>
+pub fn coqui_transport_web::webtransport::ListenerBuilder::tls(self, impl core::convert::Into<coqui_transport_web::webtransport::ServerTls>) -> Self
+impl coqui_transport_web::webtransport::ListenerBuilder where coqui_transport_web::webtransport::ListenerSettings: coqui_builder::describe::Describe
+pub fn coqui_transport_web::webtransport::ListenerBuilder::new() -> Self
+pub struct coqui_transport_web::webtransport::ListenerParts
+impl core::convert::TryFrom<coqui_transport_web::webtransport::ListenerParts> for coqui_transport_web::webtransport::Listener
+pub type coqui_transport_web::webtransport::Listener::Error = coqui_transport::failure::Failure
+pub fn coqui_transport_web::webtransport::Listener::try_from(coqui_transport_web::webtransport::ListenerParts) -> core::result::Result<Self, coqui_transport::failure::Failure>
+impl core::fmt::Debug for coqui_transport_web::webtransport::ListenerParts
+pub fn coqui_transport_web::webtransport::ListenerParts::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub struct coqui_transport_web::webtransport::ListenerSettings
 pub coqui_transport_web::webtransport::ListenerSettings::limits: coqui_transport_web::Limits
 pub coqui_transport_web::webtransport::ListenerSettings::origins: alloc::vec::Vec<alloc::string::String>
@@ -268,6 +366,12 @@ pub const fn coqui_transport_web::webtransport::Pending::local_addr(&self) -> co
 pub const fn coqui_transport_web::webtransport::Pending::peer_addr(&self) -> core::net::socket_addr::SocketAddr
 impl core::fmt::Debug for coqui_transport_web::webtransport::Pending
 pub fn coqui_transport_web::webtransport::Pending::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub trait coqui_transport_web::webtransport::DialerSettingsSetters: coqui_builder::builder::Holds<coqui_transport_web::webtransport::DialerSettings> + core::marker::Sized
+pub fn coqui_transport_web::webtransport::DialerSettingsSetters::limits(self, impl core::convert::Into<coqui_transport_web::Limits>) -> Self
+pub fn coqui_transport_web::webtransport::DialerSettingsSetters::local_addr(self, impl core::convert::Into<core::option::Option<core::net::socket_addr::SocketAddr>>) -> Self
+pub trait coqui_transport_web::webtransport::ListenerSettingsSetters: coqui_builder::builder::Holds<coqui_transport_web::webtransport::ListenerSettings> + core::marker::Sized
+pub fn coqui_transport_web::webtransport::ListenerSettingsSetters::limits(self, impl core::convert::Into<coqui_transport_web::Limits>) -> Self
+pub fn coqui_transport_web::webtransport::ListenerSettingsSetters::origins(self, impl core::convert::Into<alloc::vec::Vec<alloc::string::String>>) -> Self
 #[non_exhaustive] pub enum coqui_transport_web::EndpointError
 pub coqui_transport_web::EndpointError::Address
 pub coqui_transport_web::EndpointError::Empty
@@ -290,6 +394,11 @@ pub coqui_transport_web::Phase::Opening
 pub coqui_transport_web::Recovery::Deny
 pub coqui_transport_web::Recovery::VerifyAndReconcile
 pub coqui_transport_web::Recovery::VerifyFallback
+pub struct coqui_transport_web::Admission(_)
+impl core::fmt::Debug for coqui_transport_web::Admission
+pub fn coqui_transport_web::Admission::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<F> core::convert::From<F> for coqui_transport_web::Admission where F: core::ops::function::Fn(core::net::socket_addr::SocketAddr) -> bool + core::marker::Send + core::marker::Sync + 'static
+pub fn coqui_transport_web::Admission::from(F) -> Self
 pub struct coqui_transport_web::Cancel(_)
 impl coqui_transport_web::Cancel
 pub fn coqui_transport_web::Cancel::cancel(&self) -> bool
