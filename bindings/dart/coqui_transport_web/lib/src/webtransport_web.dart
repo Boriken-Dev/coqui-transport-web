@@ -27,27 +27,34 @@ extension type _Duplex._(JSObject _) implements JSObject {
   external _Readable get readable;
   external _Writable get writable;
 }
+
 extension type _Readable._(JSObject _) implements JSObject {
   external _Reader getReader();
 }
+
 extension type _Reader._(JSObject _) implements JSObject {
   external JSPromise<_ReadResult> read();
   external JSPromise<JSAny?> cancel();
 }
+
 extension type _ReadResult._(JSObject _) implements JSObject {
   external bool get done;
   external JSUint8Array? get value;
 }
+
 extension type _Writable._(JSObject _) implements JSObject {
   external _Writer getWriter();
 }
+
 extension type _Writer._(JSObject _) implements JSObject {
   external JSPromise<JSAny?> write(JSUint8Array chunk);
   external JSPromise<JSAny?> close();
 }
+
 extension type _Hash._(JSObject _) implements JSObject {
   external factory _Hash({String algorithm, JSUint8Array value});
 }
+
 extension type _Options._(JSObject _) implements JSObject {
   external factory _Options({JSArray<_Hash> serverCertificateHashes});
 }

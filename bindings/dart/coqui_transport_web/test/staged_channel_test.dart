@@ -151,4 +151,55 @@ void main() {
     expect(() => channel.allowApplicationMessages(), throwsStateError);
     await channel.close();
   });
+
+  test(
+    'a transport end after the application unsubscribed raises nothing',
+    () async {
+      final errors = <Object>[];
+      await runZonedGuarded(() async {
+        final source = Source();
+        final channel = StagedChannel(source);
+        channel.allowApplicationMessages();
+        final sub = channel.messages.listen((_) {});
+        await sub.cancel();
+        await source.events.close();
+        await Future<void>.delayed(Duration.zero);
+        await channel.close();
+        await Future<void>.delayed(Duration.zero);
+      }, (error, _) => errors.add(error));
+      expect(errors, isEmpty);
+    },
+  );
+
+  test(
+    'a transport end while the application listens still reaches it',
+    () async {
+      final source = Source();
+      final channel = StagedChannel(source);
+      channel.allowApplicationMessages();
+      final done = expectLater(channel.messages, emitsError(isA<StateError>()));
+      await source.events.close();
+      await done;
+      await channel.close();
+    },
+  );
+
+  test(
+    'a transport end before the application listens leaves no buffered error',
+    () async {
+      final errors = <Object>[];
+      await runZonedGuarded(() async {
+        final source = Source();
+        final channel = StagedChannel(source);
+        channel.allowApplicationMessages();
+        await source.events.close();
+        await Future<void>.delayed(Duration.zero);
+        final sub = channel.messages.listen((_) {});
+        await Future<void>.delayed(Duration.zero);
+        await sub.cancel();
+        await channel.close();
+      }, (error, _) => errors.add(error));
+      expect(errors, isEmpty);
+    },
+  );
 }

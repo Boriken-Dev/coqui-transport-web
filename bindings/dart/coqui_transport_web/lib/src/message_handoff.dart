@@ -27,12 +27,16 @@ final class MessageHandoff<T> {
   final Future<void> Function(T) _send;
   final Future<void> Function() _closeSource;
   final Queue<T> _pending = Queue<T>();
-  final StreamController<T> _out = StreamController<T>(sync: true);
+  late final StreamController<T> _out = StreamController<T>(
+    sync: true,
+    onCancel: () => _consumerGone = true,
+  );
   late final StreamSubscription<T> _subscription;
   Completer<T>? _waiter;
   Object? _failure;
   bool _handoff = false;
   bool _closed = false;
+  bool _consumerGone = false;
 
   /// Complete, ordered application messages, available after handoff.
   Stream<T> get applicationMessages => _out.stream;
@@ -59,8 +63,10 @@ final class MessageHandoff<T> {
     if (waiter != null && !waiter.isCompleted) {
       waiter.completeError(error, trace);
     }
+    // A transport end with no application listener (it never subscribed, or cancelled) has no one to tell:
+    // an error buffered for no one is reported as unhandled when something listens late.
     if (_handoff && !_out.isClosed) {
-      _out.addError(error, trace);
+      if (!_consumerGone && _out.hasListener) _out.addError(error, trace);
       unawaited(_out.close());
     }
   }
