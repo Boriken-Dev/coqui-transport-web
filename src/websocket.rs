@@ -143,10 +143,21 @@ impl Transport {
     }
 }
 
+/// Runs a blocking call again while a signal interrupts it. A receive with a timeout set is never restarted by the system,
+/// whatever the signal handler asks for, and the handshake above would read the interruption as a lost path.
+fn resumed<T>(mut call: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    loop {
+        match call() {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            done => return done,
+        }
+    }
+}
+
 impl Read for Transport {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         match &mut self.socket {
-            Socket::Blocking(tcp) => tcp.read(buffer),
+            Socket::Blocking(tcp) => resumed(|| tcp.read(buffer)),
             Socket::Ready(tcp) => tcp.read(buffer),
             Socket::Closed => Err(io::ErrorKind::NotConnected.into()),
         }
@@ -156,7 +167,7 @@ impl Read for Transport {
 impl Write for Transport {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         let written = match &mut self.socket {
-            Socket::Blocking(tcp) => tcp.write(data),
+            Socket::Blocking(tcp) => resumed(|| tcp.write(data)),
             Socket::Ready(tcp) => tcp.write(data),
             Socket::Closed => Err(io::ErrorKind::NotConnected.into()),
         };
@@ -165,7 +176,7 @@ impl Write for Transport {
 
     fn write_vectored(&mut self, parts: &[IoSlice<'_>]) -> io::Result<usize> {
         let written = match &mut self.socket {
-            Socket::Blocking(tcp) => tcp.write_vectored(parts),
+            Socket::Blocking(tcp) => resumed(|| tcp.write_vectored(parts)),
             Socket::Ready(tcp) => tcp.write_vectored(parts),
             Socket::Closed => Err(io::ErrorKind::NotConnected.into()),
         };
@@ -174,7 +185,7 @@ impl Write for Transport {
 
     fn flush(&mut self) -> io::Result<()> {
         match &mut self.socket {
-            Socket::Blocking(tcp) => tcp.flush(),
+            Socket::Blocking(tcp) => resumed(|| tcp.flush()),
             Socket::Ready(tcp) => tcp.flush(),
             Socket::Closed => Err(io::ErrorKind::NotConnected.into()),
         }

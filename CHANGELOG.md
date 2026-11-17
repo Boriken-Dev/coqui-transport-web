@@ -56,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A WebSocket dial no longer fails with `Failure::PathLost` when a signal reaches the dialing thread while it waits for the server: a blocking read or write that a signal interrupts is run again, since a receive with a timeout is never restarted by the system.
 - A busy WebSocket on Windows no longer dies with `Failure::PathLost` or loses bytes. A worker polled its socket with a read timeout, which Windows says leaves a connection in an indeterminate state, and a read could fail with OS error 997. It now waits on the socket's readiness, with `mio` under the `websocket` feature: an idle channel takes no CPU and a message no longer waits for a poll to be sent.
 - `close` no longer hangs when a channel's failure cannot reach a reader who is behind.
 - A WebSocket dialer refuses `ws://` beyond loopback before connecting, so the refusal is always `Failure::Permission` and the server

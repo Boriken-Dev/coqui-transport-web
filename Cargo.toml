@@ -51,6 +51,8 @@ tokio = { version = "1", optional = true, default-features = false, features = [
 str0m = { version = "0.24", optional = true, default-features = false, features = ["rust-crypto"] }
 
 [dev-dependencies]
+# The test that signals a dialing thread.
+libc = "0.2"
 # Reads a settings type from the TOML and JSON the tests write: `Partial` deserializes with `serde`.
 coqui-builder = { git = "https://github.com/Boriken-Dev/coqui-builder", rev = "c1875f8276bd6366c38e9133fdb1181a0ffbaaad", features = ["derive", "serde"] }
 toml = "=1.1.8"
