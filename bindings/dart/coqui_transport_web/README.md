@@ -10,6 +10,8 @@ and sends with `sendBytes`, both before the handoff. No keys, trust decisions or
 
 The Dart VM has no WebTransport, so it reports `TransportUnavailable` and uses the WebSocket endpoint.
 
+On the Dart VM a WebSocket reaches its server the way `dart:io` does. A caller whose route is its own (a proxy the platform's library cannot log in to) passes `webSocketDialer: (uri, timeout, pins) => openWebSocketChannel(uri, timeout, pins, connector: (uri, protocols) => IOWebSocketChannel.connect(uri, protocols: protocols, customClient: client))`, and everything after the socket opens is the same.
+
 ## Datagrams
 
 `datagramsOf(channel)` gives raw datagrams beside the messages: WebTransport's own, or inside a WebSocket that asked with

@@ -8,8 +8,16 @@ import 'contracts.dart';
 import 'datachannel.dart';
 import 'datachannel_path.dart';
 
+/// How a WebSocket to [uri] is opened, offering [protocols]: what a caller gives [openWebSocketChannel] to use its own socket
+/// (`IOWebSocketChannel.connect` with an `HttpClient` that reaches the server by a route of its own, say) where the platform's
+/// default would not.
+typedef WebSocketConnector =
+    WebSocketChannel Function(Uri uri, Iterable<String>? protocols);
+
 /// [datagrams] asks the server to agree to them. One that does not still connects, and has none: see [datagramsOf].
 /// [dataChannel] also asks to climb onto a data channel, which starts when the datagrams are first asked for.
+/// [connector] opens the socket in place of `WebSocketChannel.connect`; everything after it, the peer's choice of protocol
+/// included, is as for the default.
 Future<WebChannel> openWebSocketChannel(
   Uri uri,
   Duration timeout,
@@ -17,16 +25,17 @@ Future<WebChannel> openWebSocketChannel(
   bool datagrams = false,
   int maxDatagram = defaultWebSocketDatagram,
   DataChannelSettings? dataChannel,
+  WebSocketConnector? connector,
 }) async {
   final climbing = datagrams && (dataChannel?.enabled ?? false);
-  final channel = WebSocketChannel.connect(
-    uri,
-    protocols: climbing
-        ? const [webSocketLadderProtocol, webSocketDatagramsProtocol]
-        : datagrams
-        ? const [webSocketDatagramsProtocol]
-        : null,
-  );
+  final protocols = climbing
+      ? const [webSocketLadderProtocol, webSocketDatagramsProtocol]
+      : datagrams
+      ? const [webSocketDatagramsProtocol]
+      : null;
+  final channel = connector != null
+      ? connector(uri, protocols)
+      : WebSocketChannel.connect(uri, protocols: protocols);
   try {
     await channel.ready.timeout(timeout);
   } catch (e) {
