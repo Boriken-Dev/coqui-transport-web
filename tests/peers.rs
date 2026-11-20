@@ -302,6 +302,15 @@ fn second_loopback() -> SocketAddr {
     "127.0.0.2:0".parse().unwrap()
 }
 
+/// Whether this host can bind a socket to `second_loopback`: macOS has only 127.0.0.1 unless an alias is added.
+fn has_second_loopback() -> bool {
+    let has = std::net::UdpSocket::bind(second_loopback()).is_ok();
+    if !has {
+        println!("skipped: 127.0.0.2 cannot be bound here");
+    }
+    has
+}
+
 /// An address on no host (RFC 5737), which no socket here can be bound to.
 fn not_here() -> SocketAddr {
     "192.0.2.1:0".parse().unwrap()
@@ -309,6 +318,9 @@ fn not_here() -> SocketAddr {
 
 #[test]
 fn a_websocket_dialer_bound_to_a_local_address_is_admitted_from_it() {
+    if !has_second_loopback() {
+        return;
+    }
     let (noted, admit) = noting();
     let listener = websocket::Listener::builder(loopback(), websocket::ServerTls::Plain)
         .admission(admit)
@@ -335,6 +347,9 @@ fn a_websocket_dialer_bound_to_a_local_address_is_admitted_from_it() {
 
 #[test]
 fn a_webtransport_dialer_bound_to_a_local_address_is_admitted_from_it() {
+    if !has_second_loopback() {
+        return;
+    }
     let id = Identity::new();
     let (noted, admit) = noting();
     let listener = webtransport::Listener::builder(loopback(), server_tls(&id, &id, Ask::Nothing))
@@ -557,6 +572,9 @@ fn session_from(from: [u8; 4], port: u16, server: &Identity) {
 
 #[test]
 fn webtransport_clients_from_different_sources_reach_tls_apart() {
+    if !has_second_loopback() {
+        return;
+    }
     let server = Identity::new();
     let (listener, noted) = noting_tls(loopback(), &server);
     let port = listener.local_addr().port();

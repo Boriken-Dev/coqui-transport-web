@@ -42,7 +42,7 @@ impl Path {
     fn passes(&self, counted: &mut u64) -> bool {
         *counted += 1;
         let each = self.drop_each.load(Ordering::SeqCst);
-        !self.hole.load(Ordering::SeqCst) && !(each > 0 && (*counted).is_multiple_of(each))
+        !self.hole.load(Ordering::SeqCst) && (each == 0 || !(*counted).is_multiple_of(each))
     }
 }
 
