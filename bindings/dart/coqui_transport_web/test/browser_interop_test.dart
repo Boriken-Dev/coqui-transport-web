@@ -119,7 +119,7 @@ void main() {
       final channel = await connectWebChannel(
         WebEndpoints(
           webSocket: Uri.parse('ws://127.0.0.1:${peer['websocket']}/channel'),
-          allowLocalPlainWebSocket: true,
+          allowPlainWebSocket: true,
         ),
       );
       expect(datagramsOf(channel), isNull);
@@ -133,7 +133,7 @@ void main() {
       final channel = await connectWebChannel(
         WebEndpoints(
           webSocket: Uri.parse('ws://127.0.0.1:${peer['websocket']}/channel'),
-          allowLocalPlainWebSocket: true,
+          allowPlainWebSocket: true,
         ),
         webSocketDatagrams: true,
         maxWebSocketDatagram: 100,
@@ -167,7 +167,7 @@ void main() {
     final channel = await connectWebChannel(
       WebEndpoints(
         webSocket: Uri.parse('ws://127.0.0.1:${peer['websocket']}/channel'),
-        allowLocalPlainWebSocket: true,
+        allowPlainWebSocket: true,
       ),
     );
     expect(channel.kind, WebChannelKind.webSocket);
@@ -182,7 +182,7 @@ void main() {
             'https://127.0.0.1:${peer['webtransport']}/channel',
           ),
           webSocket: Uri.parse('ws://127.0.0.1:${peer['websocket']}/channel'),
-          allowLocalPlainWebSocket: true,
+          allowPlainWebSocket: true,
           certificatePins: ['sha256:${'ab' * 32}'],
         ),
         timeout: const Duration(seconds: 5),

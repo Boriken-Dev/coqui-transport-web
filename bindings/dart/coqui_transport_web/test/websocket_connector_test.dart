@@ -97,7 +97,7 @@ void main() {
       final channel = await connectWebChannel(
         WebEndpoints(
           webSocket: Uri.parse('ws://127.0.0.1:${server.port}/'),
-          allowLocalPlainWebSocket: true,
+          allowPlainWebSocket: true,
         ),
         webSocketDialer: (uri, timeout, pins) => openWebSocketChannel(
           uri,

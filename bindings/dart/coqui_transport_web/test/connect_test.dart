@@ -162,7 +162,26 @@ void main() {
     expect(
       () => WebEndpoints(
         webSocket: Uri.parse('ws://localhost:8080/channel'),
-        allowLocalPlainWebSocket: true,
+        allowPlainWebSocket: true,
+      ),
+      returnsNormally,
+    );
+    expect(
+      () => WebEndpoints(webSocket: Uri.parse('ws://192.0.2.7:8080/channel')),
+      throwsArgumentError,
+    );
+    expect(
+      () => WebEndpoints(
+        webSocket: Uri.parse('ws://192.0.2.7:8080/channel'),
+        allowPlainWebSocket: true,
+      ),
+      returnsNormally,
+    );
+    expect(
+      () => WebEndpoints(
+        webSocket: Uri.parse('wss://else.example'),
+        webTransport: wt,
+        requireSameHost: false,
       ),
       returnsNormally,
     );

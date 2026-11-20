@@ -147,7 +147,8 @@ final class WebEndpoints {
     this.webTransport,
     this.webSocket,
     this.certificatePins = const [],
-    this.allowLocalPlainWebSocket = false,
+    this.allowPlainWebSocket = false,
+    this.requireSameHost = true,
     bool impliedPort = false,
   }) {
     if (webTransport == null && webSocket == null) {
@@ -165,22 +166,22 @@ final class WebEndpoints {
       }
     }
     if (webSocket case final url?) {
-      final loopback = _isLoopback(url.host);
       if ((url.scheme != 'wss' &&
-              !(url.scheme == 'ws' && loopback && allowLocalPlainWebSocket)) ||
+              !(url.scheme == 'ws' && allowPlainWebSocket)) ||
           !_plainUrl(url)) {
         throw ArgumentError.value(
           url,
           'webSocket',
-          'Use WSS, or explicitly allow WS on localhost',
+          'Use WSS, or set allowPlainWebSocket for WS',
         );
       }
     }
-    if (webTransport != null &&
+    if (requireSameHost &&
+        webTransport != null &&
         webSocket != null &&
         webTransport!.host.toLowerCase() != webSocket!.host.toLowerCase()) {
       throw ArgumentError(
-        'WebTransport and fallback WebSocket must share a host',
+        'WebTransport and fallback WebSocket must share a host unless requireSameHost is false',
       );
     }
     if (certificatePins.isNotEmpty && webTransport == null) {
@@ -219,7 +220,14 @@ final class WebEndpoints {
   final Uri? webTransport;
   final Uri? webSocket;
   final List<String> certificatePins;
-  final bool allowLocalPlainWebSocket;
+
+  /// Accepts a `ws://` URL on any host. A plain WebSocket is neither encrypted nor authenticated: anything on the path
+  /// reads and changes it, and the peer proof the application runs is all that vouches for the other end.
+  final bool allowPlainWebSocket;
+
+  /// Whether the WebTransport and WebSocket URLs must name one host (the default). With false a fallback can reach
+  /// another machine, so the peer proof on the fallback channel ties both to one peer.
+  final bool requireSameHost;
 
   static bool _plainUrl(Uri url) =>
       url.hasAuthority &&
@@ -227,8 +235,6 @@ final class WebEndpoints {
       url.userInfo.isEmpty &&
       !url.hasQuery &&
       !url.hasFragment;
-  static bool _isLoopback(String host) =>
-      host == 'localhost' || host == '127.0.0.1' || host == '::1';
 }
 
 /// One message as text; what is not UTF-8 is a protocol failure.

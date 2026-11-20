@@ -65,7 +65,7 @@ void main() {
       Uri.parse('ws://127.0.0.1:${peer[service]}/channel');
 
   WebEndpoints endpoints(String service) =>
-      WebEndpoints(webSocket: socket(service), allowLocalPlainWebSocket: true);
+      WebEndpoints(webSocket: socket(service), allowPlainWebSocket: true);
 
   Future<WebChannel> climbing(
     String service, {
@@ -110,7 +110,7 @@ void main() {
             'https://127.0.0.1:${peer['direct']}/channel',
           ),
           webSocket: socket('direct'),
-          allowLocalPlainWebSocket: true,
+          allowPlainWebSocket: true,
         ),
         dataChannel: const DataChannelSettings(),
       );
@@ -482,7 +482,7 @@ void main() {
         final channel = await connectWebChannel(
           WebEndpoints(
             webSocket: Uri.parse('ws://127.0.0.1:$through/channel'),
-            allowLocalPlainWebSocket: true,
+            allowPlainWebSocket: true,
           ),
           dataChannel: const DataChannelSettings(carriedSignals: true),
         );
