@@ -24,7 +24,7 @@ re-exports this one. Documentation: <https://boriken-dev.github.io/coqui-transpo
 - A send that waits for room as long as its caller says, rather than being refused when the queue is full.
 - `connect`: WebTransport first, WebSocket when the path fails or the server does not offer it. A certificate, proof or permission failure never falls back, and a
   pinned endpoint never downgrades.
-- Validated `Endpoints`: explicit URLs, one host, no credentials or query, plain WebSocket only on loopback by opt-in.
+- Validated `Endpoints`: explicit URLs, one host by default, no credentials or query, plain WebSocket and a fallback while pinned by opt-in.
 - Blocking drivers for WebTransport and WebSocket, with a bound on every size and handshake, and a server handshake another thread can
   cancel.
 - The certificate chain TLS accepted from the peer, on either end of a channel, for a peer proof or a pin to decide on.

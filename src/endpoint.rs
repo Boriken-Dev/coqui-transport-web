@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::str::FromStr;
 
-use url::{Host, Url};
+use url::Url;
 
 /// The SHA-256 of a certificate a WebTransport client pins, written `sha256:<64 hex digits>`.
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
@@ -65,11 +65,11 @@ pub enum EndpointError {
     Url,
     /// The WebTransport URL is not `https://` with an explicit port.
     WebTransport,
-    /// The WebSocket URL is neither `wss://` nor an explicitly allowed loopback `ws://`.
+    /// The WebSocket URL is not `wss://`, and plain `ws://` was not allowed.
     WebSocket,
     /// A URL holds credentials, a query or a fragment.
     NotPlain,
-    /// The two endpoints name different hosts.
+    /// The two endpoints name different hosts, and the same host was required.
     HostMismatch,
     /// A pin is not `sha256:<64 hex digits>`, or was given with no WebTransport endpoint.
     Pin,
@@ -83,9 +83,13 @@ impl fmt::Display for EndpointError {
             Self::Empty => "at least one endpoint is required",
             Self::Url => "an endpoint is not a valid url",
             Self::WebTransport => "a webtransport endpoint must be https with an explicit port",
-            Self::WebSocket => "a websocket endpoint must be wss, or ws on loopback when allowed",
+            Self::WebSocket => {
+                "a websocket endpoint must be wss, or ws when plain websocket is allowed"
+            }
             Self::NotPlain => "an endpoint url must hold no credentials, query or fragment",
-            Self::HostMismatch => "webtransport and websocket endpoints must share a host",
+            Self::HostMismatch => {
+                "webtransport and websocket endpoints must share a host unless that is not required"
+            }
             Self::Pin => "a certificate pin must be sha256 hex and needs a webtransport endpoint",
             Self::Address => "an address must be https and is given instead of separate endpoints",
         })
@@ -101,6 +105,9 @@ pub struct Endpoints {
     webtransport: Option<Url>,
     websocket: Option<Url>,
     certificate_pins: Vec<CertificatePin>,
+    plain_websocket: bool,
+    same_host: bool,
+    fallback_with_pins: bool,
 }
 
 impl Endpoints {
@@ -121,10 +128,33 @@ impl Endpoints {
         self.websocket.as_ref()
     }
 
-    /// The WebTransport certificates to pin. When any is set, no failure falls back.
+    /// The WebTransport certificates to pin. When any is set, no failure falls back unless
+    /// [`fallback_with_pins`](Self::fallback_with_pins) is true.
     #[must_use]
     pub fn certificate_pins(&self) -> &[CertificatePin] {
         &self.certificate_pins
+    }
+
+    /// Whether a plain `ws://` URL was allowed, on any host. The traffic of a plain WebSocket is
+    /// readable and changeable by anything on the path: the application decides what that means.
+    #[must_use]
+    pub const fn plain_websocket(&self) -> bool {
+        self.plain_websocket
+    }
+
+    /// Whether the two endpoints had to name the same host. False means a WebTransport and a
+    /// WebSocket URL on different hosts were accepted, so a fallback can reach another machine.
+    #[must_use]
+    pub const fn same_host(&self) -> bool {
+        self.same_host
+    }
+
+    /// Whether [`connect`](crate::connect) falls back to WebSocket on a path failure while
+    /// certificate pins are held. A pin says which certificate WebTransport trusts, and a
+    /// WebSocket carries no such pin: the application proves the peer on that channel itself.
+    #[must_use]
+    pub const fn fallback_with_pins(&self) -> bool {
+        self.fallback_with_pins
     }
 }
 
@@ -136,7 +166,9 @@ pub struct EndpointsBuilder {
     webtransport: Option<String>,
     websocket: Option<String>,
     certificate_pins: Vec<CertificatePin>,
-    allow_plain_loopback: bool,
+    plain_websocket: bool,
+    keep_hosts_apart: bool,
+    fallback_with_pins: bool,
 }
 
 impl EndpointsBuilder {
@@ -165,10 +197,34 @@ impl EndpointsBuilder {
         self
     }
 
-    /// Allows `ws://` on a loopback address, for local development. Encrypted transport stays
-    /// required for every other address.
-    pub fn allow_plain_loopback(mut self, allow: bool) -> Self {
-        self.allow_plain_loopback = allow;
+    /// Allows a `ws://` URL on any host, not only loopback. The default is `wss://` only.
+    ///
+    /// A plain WebSocket is neither encrypted nor authenticated: anything on the path reads and
+    /// changes it, and the peer proof the application runs afterwards is all that vouches for
+    /// the other end. It matches `websocket::Dialer`'s `plain_beyond_loopback`, which the dialer
+    /// also needs to open the socket.
+    pub fn allow_plain_websocket(mut self, allow: bool) -> Self {
+        self.plain_websocket = allow;
+        self
+    }
+
+    /// Whether the WebTransport and WebSocket URLs must name the same host; the default is true.
+    ///
+    /// With false, a fallback can reach a different machine than the one WebTransport named, so
+    /// the application's peer proof on the fallback channel is what ties both to one peer.
+    pub fn require_same_host(mut self, require: bool) -> Self {
+        self.keep_hosts_apart = !require;
+        self
+    }
+
+    /// Whether [`connect`](crate::connect) falls back to WebSocket on a path failure while
+    /// certificate pins are held; the default is false.
+    ///
+    /// A held pin means the caller wants only that certificate. Falling back gives that up for
+    /// the WebSocket endpoint, which has no pin, and leaves the peer proof to the application.
+    /// A certificate failure never falls back either way.
+    pub fn fallback_with_pins(mut self, allow: bool) -> Self {
+        self.fallback_with_pins = allow;
         self
     }
 
@@ -202,13 +258,14 @@ impl EndpointsBuilder {
         {
             return Err(EndpointError::WebTransport);
         }
-        if let Some(url) = &websocket {
-            let plain_allowed = self.allow_plain_loopback && is_loopback(url);
-            if url.scheme() != "wss" && !(url.scheme() == "ws" && plain_allowed) {
-                return Err(EndpointError::WebSocket);
-            }
+        if let Some(url) = &websocket
+            && url.scheme() != "wss"
+            && !(url.scheme() == "ws" && self.plain_websocket)
+        {
+            return Err(EndpointError::WebSocket);
         }
-        if let (Some(first), Some(second)) = (&webtransport, &websocket)
+        if !self.keep_hosts_apart
+            && let (Some(first), Some(second)) = (&webtransport, &websocket)
             && first.host() != second.host()
         {
             return Err(EndpointError::HostMismatch);
@@ -220,6 +277,9 @@ impl EndpointsBuilder {
             webtransport,
             websocket,
             certificate_pins: self.certificate_pins,
+            plain_websocket: self.plain_websocket,
+            same_host: !self.keep_hosts_apart,
+            fallback_with_pins: self.fallback_with_pins,
         })
     }
 }
@@ -235,15 +295,6 @@ fn parse(text: &str) -> Result<Url, EndpointError> {
         return Err(EndpointError::NotPlain);
     }
     Ok(url)
-}
-
-fn is_loopback(url: &Url) -> bool {
-    match url.host() {
-        Some(Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
-        Some(Host::Ipv4(address)) => address.is_loopback(),
-        Some(Host::Ipv6(address)) => address.is_loopback(),
-        None => false,
-    }
 }
 
 #[cfg(test)]
@@ -317,51 +368,78 @@ mod tests {
     }
 
     #[test]
-    fn plain_websocket_is_only_for_an_allowed_loopback() {
-        refused(
-            Endpoints::builder().websocket("ws://agent.example/acp"),
-            EndpointError::WebSocket,
-        );
-        refused(
-            Endpoints::builder().websocket("ws://localhost:8080/acp"),
-            EndpointError::WebSocket,
-        );
-        refused(
-            Endpoints::builder()
-                .websocket("ws://agent.example/")
-                .allow_plain_loopback(true),
-            EndpointError::WebSocket,
-        );
+    fn plain_websocket_is_refused_unless_allowed_and_then_on_any_host() {
         for url in [
+            "ws://agent.example/acp",
             "ws://localhost:8080/acp",
             "ws://127.0.0.1:8080/",
-            "ws://[::1]:8080/",
         ] {
+            refused(
+                Endpoints::builder().websocket(url),
+                EndpointError::WebSocket,
+            );
+            let allowed = Endpoints::builder()
+                .websocket(url)
+                .allow_plain_websocket(true)
+                .build()
+                .unwrap();
+            assert!(allowed.plain_websocket(), "{url}");
+        }
+        for url in ["ws://192.0.2.7:8080/", "ws://[2001:db8::1]:8080/"] {
             assert!(
                 Endpoints::builder()
                     .websocket(url)
-                    .allow_plain_loopback(true)
+                    .allow_plain_websocket(true)
                     .build()
                     .is_ok(),
                 "{url}"
             );
         }
+        assert!(
+            !Endpoints::builder()
+                .websocket(WS)
+                .build()
+                .unwrap()
+                .plain_websocket()
+        );
     }
 
     #[test]
-    fn endpoints_share_a_host() {
-        refused(
+    fn endpoints_share_a_host_unless_not_required() {
+        let apart = || {
             Endpoints::builder()
                 .webtransport(WT)
-                .websocket("wss://else.example/"),
-            EndpointError::HostMismatch,
-        );
+                .websocket("wss://else.example/")
+        };
+        refused(apart(), EndpointError::HostMismatch);
+        let accepted = apart().require_same_host(false).build().unwrap();
+        assert!(!accepted.same_host());
+        refused(apart().require_same_host(true), EndpointError::HostMismatch);
         assert!(
             Endpoints::builder()
                 .webtransport("https://AGENT.example:4433/")
                 .websocket(WS)
                 .build()
-                .is_ok()
+                .unwrap()
+                .same_host()
+        );
+    }
+
+    #[test]
+    fn fallback_with_pins_is_off_until_asked() {
+        let pinned = || {
+            Endpoints::builder()
+                .webtransport(WT)
+                .websocket(WS)
+                .certificate_pin(CertificatePin::from_bytes([1; 32]))
+        };
+        assert!(!pinned().build().unwrap().fallback_with_pins());
+        assert!(
+            pinned()
+                .fallback_with_pins(true)
+                .build()
+                .unwrap()
+                .fallback_with_pins()
         );
     }
 

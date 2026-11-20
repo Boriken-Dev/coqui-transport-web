@@ -154,7 +154,7 @@ impl<C: Channel> Unverified<C> {
 /// Opens WebTransport first, and WebSocket when that fails on the path before anything crossed.
 ///
 /// Certificate, proof and protocol failures never fall back, and a pinned WebTransport failure
-/// never reaches WebSocket. Nothing is retried once a channel is returned: recovering a live
+/// reaches WebSocket only when the endpoints were built with `fallback_with_pins(true)`. Nothing is retried once a channel is returned: recovering a live
 /// session is the application's to do, by [`FailureExt::recovery`].
 ///
 /// # Errors
@@ -174,7 +174,7 @@ where
         match open(Kind::WebTransport, endpoint, dialer, probe, timeout) {
             Ok(link) => return Ok(link),
             Err(reason)
-                if endpoints.certificate_pins().is_empty()
+                if (endpoints.certificate_pins().is_empty() || endpoints.fallback_with_pins())
                     && reason.recovery(
                         Kind::WebTransport,
                         Phase::Opening,
@@ -369,6 +369,37 @@ mod tests {
         );
         assert!(matches!(result, Err(Failure::Timeout)));
         assert_eq!(logged(&log), ["dial:WebTransport".to_string()]);
+    }
+
+    #[test]
+    fn a_pinned_endpoint_falls_back_on_a_path_failure_when_asked() {
+        let pinned = Endpoints::builder()
+            .webtransport("https://peer.example:4433/")
+            .websocket("wss://peer.example/")
+            .certificate_pin(CertificatePin::from_bytes([0xab; 32]))
+            .fallback_with_pins(true)
+            .build()
+            .unwrap();
+        for (problem, falls) in [(Failure::Timeout, true), (Failure::Certificate, false)] {
+            let log = log();
+            let mut dialer = TestDialer {
+                log: log.clone(),
+                webtransport: Err(problem),
+            };
+            let result = connect(
+                &pinned,
+                &mut dialer,
+                &mut NoPreflight,
+                Duration::from_secs(1),
+            );
+            if falls {
+                assert_eq!(result.unwrap().kind(), Kind::WebSocket);
+                assert_eq!(logged(&log), ["dial:WebTransport", "dial:WebSocket"]);
+            } else {
+                assert!(matches!(result, Err(Failure::Certificate)));
+                assert_eq!(logged(&log), ["dial:WebTransport".to_string()]);
+            }
+        }
     }
 
     #[test]

@@ -174,7 +174,20 @@ Explicit endpoints for one expected peer.
 pub struct EndpointsBuilder { /* private */ }
 ```
 
-Builds [`Endpoints`]; all validation happens in [`build`](Self::build).
+Builds [`Endpoints`]; all validation happens in [`build`](Self::build). The defaults are strict; each of these three is the caller's to loosen:
+
+```rust
+pub fn EndpointsBuilder::allow_plain_websocket(self, allow: bool) -> Self   // ws:// on any host; default false
+pub fn EndpointsBuilder::require_same_host(self, require: bool) -> Self     // default true; false lets the WebSocket URL name another host
+pub fn EndpointsBuilder::fallback_with_pins(self, allow: bool) -> Self      // default false; true lets a path failure of a pinned WebTransport fall back
+pub const fn Endpoints::{plain_websocket, same_host, fallback_with_pins}(&self) -> bool   // what was chosen, for the host to report
+```
+
+What each costs: a plain WebSocket is neither encrypted nor authenticated, so anything on the path reads and changes it; `websocket::Dialer` still
+needs its own `plain_beyond_loopback(true)` to open one. Different hosts mean a fallback can reach another machine than WebTransport named. A
+fallback while pins are held leaves the WebSocket with no certificate pin. In all three the application's peer proof is what vouches for the
+other end. A certificate failure never falls back. Dart's `WebEndpoints` has `allowPlainWebSocket` and `requireSameHost` (no pin-fallback switch:
+it never fell back on a pinned certificate failure and still falls back on `TransportUnavailable`).
 
 ## Failures (crate root)
 
@@ -355,7 +368,7 @@ pub fn Channel::next_signal(&self, timeout: Option<Duration>) -> Result<Option<V
 pub fn Channel::deliver_signal(&self, signal: &[u8]) -> Result<(), Failure>                        // feature webrtc, Signaling::ByCaller
 ```
 
-`ServerTls::Plain` on a non-loopback address is `BuildError::Failed(Failure::Permission)` at `build`, unless `plain_beyond_loopback(true)` makes the deliberate choice. A dialer refuses `ws://` beyond loopback with `Failure::Permission` before connecting, unless `plain_beyond_loopback(true)`. A listener or dialer that allows it says so in `plain_beyond_loopback()` and in its `Debug`, for the host to show; neither prints. `Endpoints` still takes `ws://` only on loopback. `accept` runs one handshake, bounded in total by `Limits::handshake`. `Listener::next` returns a `Pending` before its handshake, for a server that runs `Pending::handshake` on threads of its own so one slow peer cannot hold up others. `send` answers `Failure::NoProgress` at once while `Limits::queued_bytes`, or 256 messages, wait to be sent; `send_timeout` waits for room instead, woken by the worker only while a sender waits, and answers why the worker ended once it has: `Failure::Protocol` when either end refused what the other sent, otherwise `Failure::PathLost`. A message over the bound a reader set, or one that breaks the wire, ends the channel with a close code saying so (1009, 1002, 1003 or 1007): the reading end reports `Failure::Protocol`, and so does the sending end once the close arrives, to its reader and its senders. The reading end then reads and discards what the peer still sends until the peer closes, for up to 500 ms, so the close is not lost to a reset. `close` returns once what was queued has gone, or the peer has taken nothing for `Limits::send`. Each channel has a worker thread that sleeps on its socket and on its callers, so an idle channel takes no CPU and a message goes as soon as it is sent; the wait holds up to two file handles beside the socket. `Failure::Certificate` means a certificate was rejected, by this side or the peer's; any other TLS error is `Failure::Protocol`, since one forged record can cause it.
+`ServerTls::Plain` on a non-loopback address is `BuildError::Failed(Failure::Permission)` at `build`, unless `plain_beyond_loopback(true)` makes the deliberate choice. A dialer refuses `ws://` beyond loopback with `Failure::Permission` before connecting, unless `plain_beyond_loopback(true)`. A listener or dialer that allows it says so in `plain_beyond_loopback()` and in its `Debug`, for the host to show; neither prints. `Endpoints` takes `ws://` on any host when `allow_plain_websocket(true)`. `accept` runs one handshake, bounded in total by `Limits::handshake`. `Listener::next` returns a `Pending` before its handshake, for a server that runs `Pending::handshake` on threads of its own so one slow peer cannot hold up others. `send` answers `Failure::NoProgress` at once while `Limits::queued_bytes`, or 256 messages, wait to be sent; `send_timeout` waits for room instead, woken by the worker only while a sender waits, and answers why the worker ended once it has: `Failure::Protocol` when either end refused what the other sent, otherwise `Failure::PathLost`. A message over the bound a reader set, or one that breaks the wire, ends the channel with a close code saying so (1009, 1002, 1003 or 1007): the reading end reports `Failure::Protocol`, and so does the sending end once the close arrives, to its reader and its senders. The reading end then reads and discards what the peer still sends until the peer closes, for up to 500 ms, so the close is not lost to a reset. `close` returns once what was queued has gone, or the peer has taken nothing for `Limits::send`. Each channel has a worker thread that sleeps on its socket and on its callers, so an idle channel takes no CPU and a message goes as soon as it is sent; the wait holds up to two file handles beside the socket. `Failure::Certificate` means a certificate was rejected, by this side or the peer's; any other TLS error is `Failure::Protocol`, since one forged record can cause it.
 
 Both listeners are `coqui_transport::Listener`s: `accept()` with no timeout waits for the next connection, and a failed handshake
 fails that call only. Their own `accept(timeout)` is the inherent method; call the trait's as `coqui_transport::Listener::accept(&l)`.

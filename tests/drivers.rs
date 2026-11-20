@@ -1303,7 +1303,7 @@ fn a_blocked_webtransport_path_falls_back_to_websocket() {
     let endpoints = Endpoints::builder()
         .webtransport(format!("https://127.0.0.1:{port}/channel"))
         .websocket(format!("ws://127.0.0.1:{}/channel", address.port()))
-        .allow_plain_loopback(true)
+        .allow_plain_websocket(true)
         .build()
         .unwrap();
     let mut dialer = Both {

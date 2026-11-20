@@ -419,14 +419,19 @@ pub struct coqui_transport_web::Endpoints
 impl coqui_transport_web::Endpoints
 pub fn coqui_transport_web::Endpoints::builder() -> coqui_transport_web::EndpointsBuilder
 pub fn coqui_transport_web::Endpoints::certificate_pins(&self) -> &[coqui_transport_web::CertificatePin]
+pub const fn coqui_transport_web::Endpoints::fallback_with_pins(&self) -> bool
+pub const fn coqui_transport_web::Endpoints::plain_websocket(&self) -> bool
+pub const fn coqui_transport_web::Endpoints::same_host(&self) -> bool
 pub const fn coqui_transport_web::Endpoints::websocket(&self) -> core::option::Option<&url::Url>
 pub const fn coqui_transport_web::Endpoints::webtransport(&self) -> core::option::Option<&url::Url>
 pub struct coqui_transport_web::EndpointsBuilder
 impl coqui_transport_web::EndpointsBuilder
 pub fn coqui_transport_web::EndpointsBuilder::address(self, impl core::convert::AsRef<str>) -> Self
-pub fn coqui_transport_web::EndpointsBuilder::allow_plain_loopback(self, bool) -> Self
+pub fn coqui_transport_web::EndpointsBuilder::allow_plain_websocket(self, bool) -> Self
 pub fn coqui_transport_web::EndpointsBuilder::build(self) -> core::result::Result<coqui_transport_web::Endpoints, coqui_transport_web::EndpointError>
 pub fn coqui_transport_web::EndpointsBuilder::certificate_pin(self, coqui_transport_web::CertificatePin) -> Self
+pub fn coqui_transport_web::EndpointsBuilder::fallback_with_pins(self, bool) -> Self
+pub fn coqui_transport_web::EndpointsBuilder::require_same_host(self, bool) -> Self
 pub fn coqui_transport_web::EndpointsBuilder::websocket(self, impl core::convert::AsRef<str>) -> Self
 pub fn coqui_transport_web::EndpointsBuilder::webtransport(self, impl core::convert::AsRef<str>) -> Self
 #[non_exhaustive] pub struct coqui_transport_web::Limits
