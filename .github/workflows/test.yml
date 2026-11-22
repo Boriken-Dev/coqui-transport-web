@@ -60,9 +60,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       # The test binaries link every driver and their symbols overflow the Windows PDB on Rust 1.89 (LNK4319); no test
-      # reads them. Stripping makes the linker write no PDB.
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_DEV_STRIP: "symbols"
+      # reads them, so the linker writes none.
+      RUSTFLAGS: ${{ startsWith(matrix.os, 'windows') && '-C link-arg=/DEBUG:NONE' || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
