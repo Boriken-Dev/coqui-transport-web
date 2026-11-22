@@ -402,8 +402,8 @@ fn a_websocket_send_waiting_for_room_ends_with_the_channel() {
     for (closing, ended) in [(false, Failure::PathLost), (true, Failure::Cancelled)] {
         let (client, _server, message) = behind_a_stalled_reader({
             let mut value = Limits::default();
-            // `fill` confirms a full queue over about half a second, and the close comes after a pause: a limit that expires first on a slow runner ends the sender (and `fill`) with the wrong failure.
-            value.send = Duration::from_secs(if closing { 6 } else { 3 });
+            // The close is what ends a sender here, so the limit must outlast the pause before it on a slow runner.
+            value.send = Duration::from_secs(if closing { 5 } else { 1 });
             value
         });
         fill(&client, &message);
