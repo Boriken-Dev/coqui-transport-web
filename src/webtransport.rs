@@ -485,12 +485,135 @@ impl Drop for Channel {
     }
 }
 
+/// The smallest UDP payload size QUIC allows a connection to start from (RFC 9000 section 14), which quinn also requires of
+/// [`Mtu::initial`] and [`Mtu::min`].
+pub const MIN_MTU: u16 = 1200;
+
+/// The UDP payload sizes a connection may use, and whether it searches for a larger one (DPLPMTUD, RFC 8899). A datagram
+/// can carry what remains of the payload after QUIC's and HTTP/3's own headers, so these also set
+/// [`Datagrams::max_size`] and how large a stream packet is.
+///
+/// The defaults are quinn's: start at 1200, never go below 1200, probe up to 1452 and again every ten minutes. They fit
+/// the public internet and cost a path that refuses a probe one lost datagram per probe, which a host may log as a send
+/// error (`EMSGSIZE`, Windows 10040) when the refusal is local. A host or client behind a tunnel or another path of a
+/// smaller MTU lowers `upper_bound`, or turns `discovery` off. Every setting is per connection side: each end runs its own
+/// search, and a path's two directions need not agree.
+///
+/// A [`coqui_builder::Describe`] type: every key is optional and an unknown key is refused. It is `#[non_exhaustive]`:
+/// start from [`Default`] and assign the fields. `build` of a dialer or listener whose `initial` or `min` is below
+/// [`MIN_MTU`] is [`Failure::Unsupported`]; [`Mtu::check`] says which value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Describe)]
+#[map(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Mtu {
+    /// The UDP payload size used before discovery has measured the path, 1200 by default. Larger sends bigger packets from the
+    /// first, which is efficient where the path carries them; a path that does not drops them until black-hole detection
+    /// brings the size down to `min`, which stalls the connection meanwhile. Not below [`MIN_MTU`]; one below `min` is raised to it.
+    #[map(default = Mtu::default().initial)]
+    pub initial: u16,
+    /// The size the path is known to carry, 1200 by default. Initial packets are padded to it, so a value above what the path
+    /// carries means no connection opens, and black-hole detection never goes lower. Not below [`MIN_MTU`].
+    #[map(default = Mtu::default().min)]
+    pub min: u16,
+    /// Whether this side probes for a larger size than `initial`, on by default. Off, the size stays at `initial` (until
+    /// black-hole detection lowers it), so no probe is ever lost, and a path that could carry more is not used to the full: a
+    /// smaller datagram and more packets per megabyte.
+    #[map(default = Mtu::default().discovery)]
+    pub discovery: bool,
+    /// The largest size discovery searches for, 1452 by default (an Ethernet path under IPv4 or IPv6). Above 65527 quinn caps
+    /// it. A search takes longer the further this is above the path's size, and each probe above the path's size is lost; set
+    /// it to the path's size (a tunnel's MTU less 28) to lose none. Higher finds a path with jumbo frames.
+    #[map(default = Mtu::default().upper_bound)]
+    pub upper_bound: u16,
+}
+
+impl Default for Mtu {
+    fn default() -> Self {
+        Self {
+            initial: MIN_MTU,
+            min: MIN_MTU,
+            discovery: true,
+            upper_bound: 1452,
+        }
+    }
+}
+
+impl Mtu {
+    /// Why these sizes cannot be used: a value below [`MIN_MTU`], named with its key.
+    ///
+    /// # Errors
+    /// [`MtuError`] for the first of `initial` and `min` below [`MIN_MTU`].
+    pub const fn check(&self) -> Result<(), MtuError> {
+        if self.initial < MIN_MTU {
+            return Err(MtuError {
+                key: "initial",
+                value: self.initial,
+            });
+        }
+        if self.min < MIN_MTU {
+            return Err(MtuError {
+                key: "min",
+                value: self.min,
+            });
+        }
+        Ok(())
+    }
+
+    /// The QUIC transport configuration for these sizes, otherwise quinn's defaults, which are wtransport's too.
+    fn transport(&self) -> quinn::TransportConfig {
+        let mut transport = quinn::TransportConfig::default();
+        transport.initial_mtu(self.initial).min_mtu(self.min);
+        if self.discovery {
+            let mut search = quinn::MtuDiscoveryConfig::default();
+            search.upper_bound(self.upper_bound);
+            transport.mtu_discovery_config(Some(search));
+        } else {
+            transport.mtu_discovery_config(None);
+        }
+        transport
+    }
+}
+
+/// An [`Mtu`] value QUIC cannot start from: below [`MIN_MTU`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MtuError {
+    key: &'static str,
+    value: u16,
+}
+
+impl MtuError {
+    /// The key of [`Mtu`] that is too small: `initial` or `min`.
+    #[must_use]
+    pub const fn key(&self) -> &'static str {
+        self.key
+    }
+
+    /// The value given.
+    #[must_use]
+    pub const fn value(&self) -> u16 {
+        self.value
+    }
+}
+
+impl fmt::Display for MtuError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "mtu.{} is {}, below the {} bytes QUIC and quinn require",
+            self.key, self.value, MIN_MTU
+        )
+    }
+}
+
+impl core::error::Error for MtuError {}
+
 /// Dials WebTransport endpoints.
 #[derive(Clone)]
 pub struct Dialer {
     tls: Tls,
     limits: Limits,
     local: Option<SocketAddr>,
+    mtu: Mtu,
     runtime: Arc<Runtime>,
 }
 
@@ -559,6 +682,9 @@ pub struct DialerSettings {
     /// endpoint addresses of its family are tried; an address this host cannot bind, or an endpoint with none of its family,
     /// fails the dial with [`Failure::Unsupported`], or [`Failure::Permission`] when the address is taken or not allowed.
     pub local_addr: Option<SocketAddr>,
+    /// The UDP payload sizes this dialer's connections use and whether they search for a larger one. See [`Mtu`].
+    #[map(default = DialerSettings::default().mtu)]
+    pub mtu: Mtu,
 }
 
 /// What a [`DialerBuilder`] holds: the settings and whom the dialer trusts. Build with [`Dialer::builder`], or
@@ -577,6 +703,11 @@ impl TryFrom<DialerParts> for Dialer {
     type Error = Failure;
 
     fn try_from(parts: DialerParts) -> Result<Self, Failure> {
+        parts
+            .settings
+            .mtu
+            .check()
+            .map_err(|_| Failure::Unsupported)?;
         let tls = match parts.trust {
             ClientTrust::Pinned(pins) => Tls::Pinned(
                 pins.iter()
@@ -589,6 +720,7 @@ impl TryFrom<DialerParts> for Dialer {
             tls,
             limits: parts.settings.limits,
             local: parts.settings.local_addr,
+            mtu: parts.settings.mtu,
             runtime: runtime()?,
         })
     }
@@ -606,6 +738,7 @@ impl Dialer {
         DialerSettings {
             limits: self.limits,
             local_addr: self.local,
+            mtu: self.mtu,
         }
     }
 
@@ -630,6 +763,9 @@ impl Dialer {
                 builder.with_custom_tls(tls).build()
             }
         };
+        config
+            .quic_config_mut()
+            .transport_config(Arc::new(self.mtu.transport()));
         if let Some(address) = address {
             config.set_dns_resolver(Resolved(address));
         }
@@ -893,6 +1029,7 @@ pub struct Listener {
     tls_for: Option<TlsFor>,
     address: SocketAddr,
     limits: Limits,
+    mtu: Mtu,
     origins: Vec<alloc::string::String>,
     admission: Option<Admission>,
     runtime: Arc<Runtime>,
@@ -966,6 +1103,9 @@ pub struct ListenerSettings {
     /// list checks nothing; identity still has to be proven afterwards.
     #[map(default = ListenerSettings::default().origins)]
     pub origins: Vec<alloc::string::String>,
+    /// The UDP payload sizes this listener's connections use and whether they search for a larger one. See [`Mtu`].
+    #[map(default = ListenerSettings::default().mtu)]
+    pub mtu: Mtu,
 }
 
 /// What a [`ListenerBuilder`] holds: the settings, where it listens, the TLS it serves and the admission function. Build with
@@ -1001,17 +1141,23 @@ impl TryFrom<ListenerParts> for Listener {
     type Error = Failure;
 
     fn try_from(parts: ListenerParts) -> Result<Self, Failure> {
+        parts
+            .settings
+            .mtu
+            .check()
+            .map_err(|_| Failure::Unsupported)?;
         let (tls, tls_for) = match parts.tls {
             ServerTls::Config(config) => (config, None),
             ServerTls::PerConnection(build) => (unserved(), Some(build)),
         };
         let mut listener = match parts.binding {
-            Binding::Address(address) => Self::bind(address, tls)?,
+            Binding::Address(address) => Self::bind(address, tls, parts.settings.mtu)?,
             #[cfg(feature = "webrtc")]
-            Binding::Port(port) => Self::on_port(&port, tls)?,
+            Binding::Port(port) => Self::on_port(&port, tls, parts.settings.mtu)?,
         };
         listener.limits = parts.settings.limits;
         listener.origins = parts.settings.origins;
+        listener.mtu = parts.settings.mtu;
         listener.tls_for = tls_for;
         listener.admission = parts.admission;
         Ok(listener)
@@ -1031,6 +1177,7 @@ impl Listener {
         ListenerSettings {
             limits: self.limits,
             origins: self.origins.clone(),
+            mtu: self.mtu,
         }
     }
 
@@ -1040,14 +1187,17 @@ impl Listener {
         coqui_builder::non_defaults(&self.settings())
     }
 
-    fn bind(address: SocketAddr, tls: Arc<ServerConfig>) -> Result<Self, Failure> {
+    fn bind(address: SocketAddr, tls: Arc<ServerConfig>, mtu: Mtu) -> Result<Self, Failure> {
         let runtime = runtime()?;
         let mut tls = ServerConfig::clone(&tls);
         tls.alpn_protocols = alloc::vec![WEBTRANSPORT_ALPN.to_vec()];
-        let config = wtransport::ServerConfig::builder()
+        let mut config = wtransport::ServerConfig::builder()
             .with_bind_address(address)
             .with_custom_tls(tls)
             .build();
+        config
+            .quic_config_mut()
+            .transport_config(Arc::new(mtu.transport()));
         let (endpoint, quic) = std::net::UdpSocket::bind(address)
             .and_then(|socket| server_endpoint(&runtime, socket, &config))
             .map_err(|error| match error.kind() {
@@ -1061,6 +1211,7 @@ impl Listener {
             tls_for: None,
             address,
             limits: Limits::default(),
+            mtu: Mtu::default(),
             origins: Vec::new(),
             admission: None,
             runtime,
@@ -1070,7 +1221,7 @@ impl Listener {
     }
 
     #[cfg(feature = "webrtc")]
-    fn on_port(port: &Port, tls: Arc<ServerConfig>) -> Result<Self, Failure> {
+    fn on_port(port: &Port, tls: Arc<ServerConfig>, mtu: Mtu) -> Result<Self, Failure> {
         if !port.take_quic() {
             return Err(Failure::Permission);
         }
@@ -1088,6 +1239,9 @@ impl Listener {
             .sent(0)
             .log(Arc::new(wtransport::quinn::NoneTokenLog));
         config.quic_config_mut().validation_token_config(tokens);
+        config
+            .quic_config_mut()
+            .transport_config(Arc::new(mtu.transport()));
         let (endpoint, quic) = std::net::UdpSocket::bind((core::net::Ipv4Addr::LOCALHOST, 0))
             .and_then(|socket| server_endpoint(&runtime, socket, &config))
             .map_err(|_| Failure::Unsupported)?;
@@ -1098,6 +1252,7 @@ impl Listener {
             tls_for: None,
             address: port.local_addr(),
             limits: Limits::default(),
+            mtu: Mtu::default(),
             origins: Vec::new(),
             admission: None,
             runtime,
