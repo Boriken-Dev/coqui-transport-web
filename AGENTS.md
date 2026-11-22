@@ -385,13 +385,14 @@ impl DialerBuilder {                                    // derived; Debug is not
     pub fn new() -> Self                                // also Default
     pub fn trust(self, trust: impl Into<ClientTrust>) -> Self   // required input
     pub fn limits(self, limits: impl Into<Limits>) -> Self       // a setter for every DialerSettings key, the last write wins
+    pub fn mtu(self, mtu: impl Into<Mtu>) -> Self                  // UDP payload sizes and path-MTU discovery; see below
     pub fn local_addr(self, address: impl Into<Option<SocketAddr>>) -> Self   // binds the UDP socket there, one per address tried
     pub fn fill(self, settings: Partial<DialerSettings>) -> Self                        // layers: only the keys the partial sets
     pub fn fill_from(self, source: &mut impl Source) -> Result<Self, FillError>
     pub fn build(self) -> Result<Dialer, BuildError<Failure>>    // Missing(trust), or Failed(Failure::Unsupported) when the runtime could not start
     pub fn parts(self) -> Result<DialerParts, Missing>
 }
-#[non_exhaustive] pub struct DialerSettings { pub limits: Limits, pub local_addr: Option<SocketAddr> }  // coqui_builder::Describe; trait DialerSettingsSetters
+#[non_exhaustive] pub struct DialerSettings { pub limits: Limits, pub local_addr: Option<SocketAddr>, pub mtu: Mtu }  // coqui_builder::Describe; trait DialerSettingsSetters
 pub fn Dialer::settings(&self) -> DialerSettings
 pub fn Dialer::non_defaults(&self) -> Vec<NonDefault>
 pub fn Listener::builder(binding: impl Into<Binding>, tls: impl Into<ServerTls>) -> ListenerBuilder   // ServerTls::{Config(Arc<rustls::ServerConfig>), PerConnection(Arc<dyn Fn(SocketAddr, SocketAddr) -> Arc<ServerConfig>>)} (ServerTls::per_connection(f); From<Arc<ServerConfig>>), non_exhaustive; Binding::{Address(SocketAddr), Port(webrtc::Port)} (feature webrtc: one listener per port, a second is Failure::Permission), non_exhaustive; ListenerBuilder::new().binding(binding).tls(tls)
@@ -403,12 +404,13 @@ impl ListenerBuilder {                                  // derived; no Clone
     pub fn admission(self, admit: impl Into<Admission>) -> Self  // any Fn(SocketAddr) -> bool + Send + Sync + 'static
     pub fn limits(self, limits: impl Into<Limits>) -> Self
     pub fn origins(self, origins: impl Into<Vec<String>>) -> Self      // replaces the list set before
+    pub fn mtu(self, mtu: impl Into<Mtu>) -> Self
     pub fn fill(self, settings: Partial<ListenerSettings>) -> Self
     pub fn fill_from(self, source: &mut impl Source) -> Result<Self, FillError>
     pub fn build(self) -> Result<Listener, BuildError<Failure>>
     pub fn parts(self) -> Result<ListenerParts, Missing>
 }
-#[non_exhaustive] pub struct ListenerSettings { pub limits: Limits, pub origins: Vec<String> }  // coqui_builder::Describe; trait ListenerSettingsSetters
+#[non_exhaustive] pub struct ListenerSettings { pub limits: Limits, pub origins: Vec<String>, pub mtu: Mtu }  // coqui_builder::Describe; trait ListenerSettingsSetters
 pub fn Listener::settings(&self) -> ListenerSettings
 pub fn Listener::non_defaults(&self) -> Vec<NonDefault>
 pub const fn Listener::local_addr(&self) -> SocketAddr
@@ -421,6 +423,15 @@ pub fn Listener::accept(&self, timeout: Option<Duration>) -> Result<Channel, Fai
 ```
 
 `ServerTls::PerConnection` builds each connection's TLS configuration in `Pending::handshake`, before its QUIC handshake, from the source and the local address `Pending` reports, so a client certificate verifier can judge a client by both, or keep strangers from different sources apart. The handshake itself runs on the listener's runtime threads, where nothing set up around `Pending::handshake` (a thread-local scope) is in force. Its ALPN is set to WebTransport's; `ServerTls::Config` gives every connection the one configuration. A dialer whose certificate the server refuses, or which presented none to a server requiring one, fails with `Failure::Certificate`, as a TLS WebSocket reads the same alerts (bad, unsupported, revoked, expired or unknown certificate, unknown CA, access denied, certificate required); another TLS alert is `Failure::Unsupported`.
+
+```rust
+pub const MIN_MTU: u16 = 1200;
+#[non_exhaustive] pub struct Mtu { pub initial: u16, pub min: u16, pub discovery: bool, pub upper_bound: u16 }   // Copy; coqui_builder::Describe; defaults 1200, 1200, true, 1452
+pub const fn Mtu::check(&self) -> Result<(), MtuError>                       // the first of initial/min below MIN_MTU
+pub struct MtuError                                                            // Display names the key and value; key() -> &'static str, value() -> u16
+```
+
+`mtu` (a setting of both builders, keys `mtu.initial`, `mtu.min`, `mtu.discovery`, `mtu.upper_bound`) sets the UDP payload sizes of that side's connections; each end searches on its own and the two directions of a path need not agree. The defaults are quinn's, so nothing changes unless set. `initial` is the size used before discovery measures the path: larger is more efficient where the path carries it, and a path that does not drops those packets until black-hole detection falls to `min`, stalling meanwhile. `min` is what the path is known to carry, and Initial packets are padded to it: above what the path carries, no connection opens. `discovery` off keeps the size at `initial` (no probe is ever lost; a path that could carry more is not used to the full). `upper_bound` is how far discovery searches (quinn caps it at 65527): every probe above the path's size is lost, which on a tunnel with a smaller MTU than 1452 a host may log as a send error (Windows 10040, 1389-byte datagrams); set it to the path's size, or turn discovery off. A datagram's `max_size` follows the size in force. `initial` or `min` below 1200 is `Failure::Unsupported` from `build` (quinn would raise it silently); `Mtu::check` says which value. Dart and JS have no such setting.
 
 `Listener::next` sends a source to retry first, since UDP sources are forgeable, then judges it by admission, and `Pending::handshake` completes it. A source admission refuses, or a `Pending` dropped before its handshake, is closed with QUIC's CONNECTION_REFUSED, which its dialer reports as `Failure::Permission` and never falls back from. The client cannot tell that from any QUIC server refusing a connection (quinn also does when it runs out of connection IDs), and anyone who saw its first packet can forge one, as with a TCP reset. Each dialer and listener runs its own runtime, and its calls block. Inside an async runtime, call them from its blocking pool.
 
