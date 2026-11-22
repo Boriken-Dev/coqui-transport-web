@@ -402,7 +402,8 @@ fn a_websocket_send_waiting_for_room_ends_with_the_channel() {
     for (closing, ended) in [(false, Failure::PathLost), (true, Failure::Cancelled)] {
         let (client, _server, message) = behind_a_stalled_reader({
             let mut value = Limits::default();
-            value.send = Duration::from_secs(1);
+            // The close is what ends a sender here, so the limit must outlast `fill` and the pause on a slow runner.
+            value.send = Duration::from_secs(if closing { 5 } else { 1 });
             value
         });
         fill(&client, &message);
