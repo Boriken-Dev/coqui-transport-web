@@ -161,7 +161,8 @@ final class _CarriedSignals implements CarriedSignals {
   void end() => unawaited(_outgoing.close());
 }
 
-final class _WebSocketConnection implements DatagramWebChannel {
+final class _WebSocketConnection
+    implements DatagramWebChannel, LimitedWebChannel {
   _WebSocketConnection(
     this._channel, {
     bool tagged = false,
@@ -184,7 +185,7 @@ final class _WebSocketConnection implements DatagramWebChannel {
           _ => null,
         };
         if (identical(bytes, _taken)) return;
-        if (bytes == null || bytes.length > defaultMaxMessage) {
+        if (bytes == null || bytes.length > _maxMessage) {
           _end(
             const TransportProtocolFailure(
               'WebSocket message is unknown or over its limit',
@@ -290,10 +291,23 @@ final class _WebSocketConnection implements DatagramWebChannel {
     _carriedSignals?.end();
   }
 
+  int _maxMessage = defaultMaxMessage;
+
+  @override
+  int get maxMessage => _maxMessage;
+
+  @override
+  set maxMessage(int bytes) {
+    if (bytes < 1) {
+      throw ArgumentError.value(bytes, 'bytes', 'must be at least 1');
+    }
+    _maxMessage = bytes;
+  }
+
   @override
   Future<void> send(String message) async {
     if (_ended) throw const TransportUnavailable('WebSocket connection closed');
-    if (message.isEmpty || utf8.encode(message).length > defaultMaxMessage) {
+    if (message.isEmpty || utf8.encode(message).length > _maxMessage) {
       throw const TransportProtocolFailure(
         'WebSocket message exceeds limits or is empty',
       );
@@ -304,7 +318,7 @@ final class _WebSocketConnection implements DatagramWebChannel {
   @override
   Future<void> sendBytes(Uint8List message) async {
     if (_ended) throw const TransportUnavailable('WebSocket connection closed');
-    if (message.isEmpty || message.length > defaultMaxMessage) {
+    if (message.isEmpty || message.length > _maxMessage) {
       throw const TransportProtocolFailure(
         'WebSocket message exceeds limits or is empty',
       );

@@ -188,7 +188,8 @@ final class _Datagrams implements WebDatagrams {
   }
 }
 
-final class _WebTransportConnection implements DatagramWebChannel {
+final class _WebTransportConnection
+    implements DatagramWebChannel, LimitedWebChannel {
   _WebTransportConnection(this._transport, this._reader, this._writer);
   final _WebTransport _transport;
   final _Reader _reader;
@@ -262,11 +263,23 @@ final class _WebTransportConnection implements DatagramWebChannel {
   }
 
   @override
-  Future<void> send(String message) => _write(encodeFrame(message));
+  int get maxMessage => _decoder.maxBytes;
+
+  @override
+  set maxMessage(int bytes) {
+    if (bytes < 1) {
+      throw ArgumentError.value(bytes, 'bytes', 'must be at least 1');
+    }
+    _decoder.maxBytes = bytes;
+  }
+
+  @override
+  Future<void> send(String message) =>
+      _write(encodeFrame(message, maxBytes: _decoder.maxBytes));
 
   @override
   Future<void> sendBytes(Uint8List message) =>
-      _write(encodeBytesFrame(message));
+      _write(encodeBytesFrame(message, maxBytes: _decoder.maxBytes));
 
   Future<void> _write(Uint8List frame) async {
     if (_ended) {

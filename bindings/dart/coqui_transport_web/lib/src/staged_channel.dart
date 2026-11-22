@@ -8,7 +8,7 @@ import 'connect.dart';
 /// A [WebChannel] with a setup phase, over the protocol-neutral [MessageHandoff] queue.
 /// The queue does not authenticate. A coqui-peer method drives setup and
 /// the authenticated caller calls allowApplicationMessages().
-final class StagedChannel implements ByteWebChannel {
+final class StagedChannel implements LimitedWebChannel {
   StagedChannel(this._source) {
     final source = _source;
     _handoff = MessageHandoff<Uint8List>(
@@ -25,6 +25,24 @@ final class StagedChannel implements ByteWebChannel {
   }
 
   final WebChannel _source;
+
+  /// The source's longest message; [defaultMaxMessage] for a source that cannot change it.
+  @override
+  int get maxMessage {
+    final source = _source;
+    return source is LimitedWebChannel ? source.maxMessage : defaultMaxMessage;
+  }
+
+  /// Sets the source's longest message, either way. A source that cannot change it throws [UnsupportedError].
+  @override
+  set maxMessage(int bytes) {
+    final source = _source;
+    if (source is! LimitedWebChannel) {
+      throw UnsupportedError('This channel has a fixed message limit');
+    }
+    source.maxMessage = bytes;
+  }
+
   late final MessageHandoff<Uint8List> _handoff;
 
   @override
