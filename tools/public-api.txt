@@ -121,6 +121,9 @@ impl core::fmt::Debug for coqui_transport_web::websocket::ServerTls
 pub fn coqui_transport_web::websocket::ServerTls::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct coqui_transport_web::websocket::Channel
 impl coqui_transport_web::websocket::Channel
+pub fn coqui_transport_web::websocket::Channel::abort_without_drain(&self)
+pub fn coqui_transport_web::websocket::Channel::send_completed_until(&self, &[u8], std::time::Instant) -> core::result::Result<(), coqui_transport::failure::Failure>
+impl coqui_transport_web::websocket::Channel
 pub fn coqui_transport_web::websocket::Channel::deliver_signal(&self, &[u8]) -> core::result::Result<(), coqui_transport::failure::Failure>
 pub fn coqui_transport_web::websocket::Channel::next_signal(&self, core::option::Option<core::time::Duration>) -> core::result::Result<core::option::Option<alloc::vec::Vec<u8>>, coqui_transport::failure::Failure>
 impl coqui_transport::channel::Channel for coqui_transport_web::websocket::Channel
@@ -227,6 +230,7 @@ pub struct coqui_transport_web::websocket::Pending
 impl coqui_transport_web::websocket::Pending
 pub fn coqui_transport_web::websocket::Pending::canceller(&self) -> coqui_transport_web::Cancel
 pub fn coqui_transport_web::websocket::Pending::handshake(self) -> core::result::Result<coqui_transport_web::websocket::Channel, coqui_transport::failure::Failure>
+pub fn coqui_transport_web::websocket::Pending::handshake_until(self, std::time::Instant) -> core::result::Result<coqui_transport_web::websocket::Channel, coqui_transport::failure::Failure>
 pub const fn coqui_transport_web::websocket::Pending::peer_addr(&self) -> core::net::socket_addr::SocketAddr
 impl core::fmt::Debug for coqui_transport_web::websocket::Pending
 pub fn coqui_transport_web::websocket::Pending::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result

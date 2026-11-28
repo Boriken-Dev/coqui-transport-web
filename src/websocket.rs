@@ -353,11 +353,25 @@ struct Room {
     ended: AtomicBool,
     // Why, when the wire or the peer said so; set before the worker lets go of the queue.
     failure: Mutex<Option<Failure>>,
+    // Messages the socket has taken whole, by number in the queue: a sender waiting for its own learns it here.
+    completed: AtomicU64,
+    // Set by `abort_without_drain`: the worker stops at its next turn, sending nothing more.
+    aborted: AtomicBool,
 }
 
 impl Room {
     fn end_with(&self, failure: Failure) {
         *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = Some(failure);
+    }
+
+    /// Ends the channel for the worker and for every sender, with nothing more sent.
+    fn abort(&self) {
+        self.failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert(Failure::Cancelled);
+        self.aborted.store(true, Ordering::SeqCst);
+        self.made();
     }
 
     /// What a sender meets once the worker has ended.
@@ -381,6 +395,8 @@ impl Room {
 pub struct Channel {
     inbox: Inbox,
     outgoing: Mutex<Option<SyncSender<Vec<u8>>>>,
+    // Messages queued so far, counted under the `outgoing` lock, so a message's number is its place in the queue.
+    submitted: AtomicU64,
     queued: Arc<AtomicUsize>,
     queued_limit: usize,
     room: Arc<Room>,
@@ -627,6 +643,7 @@ impl Channel {
                     datagrams: for_worker,
                     heard: Instant::now(),
                     pinged: false,
+                    taken: 0,
                     unsent: None,
                     watching_writes: false,
                     reads: Reads::Frames,
@@ -640,6 +657,7 @@ impl Channel {
         Ok(Self {
             inbox: Inbox::new(inbox),
             outgoing: Mutex::new(Some(to_worker)),
+            submitted: AtomicU64::new(0),
             queued,
             queued_limit: limits.queued_bytes,
             room,
@@ -675,8 +693,8 @@ impl Channel {
         Ok(())
     }
 
-    /// Queues a checked message, or answers that there is no room for it now.
-    fn queue(&self, message: &[u8]) -> Result<bool, Failure> {
+    /// Queues a checked message and answers its number, or answers that there is no room for it now.
+    fn queue(&self, message: &[u8]) -> Result<Option<u64>, Failure> {
         let outgoing = self.outgoing.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(queue) = outgoing.as_ref() else {
             return Err(Failure::Cancelled);
@@ -690,47 +708,33 @@ impl Channel {
             .saturating_add(message.len())
             > self.queued_limit
         {
-            return Ok(false);
+            return Ok(None);
         }
         self.queued.fetch_add(message.len(), Ordering::SeqCst);
         if let Err(error) = queue.try_send(message.to_vec()) {
             self.queued.fetch_sub(message.len(), Ordering::SeqCst);
             return match error {
-                TrySendError::Full(_) => Ok(false),
+                TrySendError::Full(_) => Ok(None),
                 TrySendError::Disconnected(_) => Err(self.room.why()),
             };
         }
+        let number = self.submitted.fetch_add(1, Ordering::SeqCst) + 1;
         let _ = self.waker.wake();
-        Ok(true)
-    }
-}
-
-impl coqui_transport::Channel for Channel {
-    fn send(&self, message: &[u8]) -> Result<(), Failure> {
-        self.check(message)?;
-        match self.queue(message)? {
-            true => Ok(()),
-            false => Err(Failure::NoProgress),
-        }
+        Ok(Some(number))
     }
 
-    fn send_timeout(&self, message: &[u8], timeout: Option<Duration>) -> Result<(), Failure> {
-        self.check(message)?;
-        // Room for more than the whole budget never comes.
-        if message.len() > self.queued_limit {
-            return Err(Failure::NoProgress);
-        }
-        let deadline = timeout.map(|limit| Instant::now() + limit);
+    /// Queues a checked message, waiting for room until `deadline`; answers its number.
+    fn queue_until(&self, message: &[u8], deadline: Option<Instant>) -> Result<u64, Failure> {
         let mut held = self
             .room
             .lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         self.room.waiting.fetch_add(1, Ordering::SeqCst);
-        let sent = loop {
+        let queued = loop {
             match self.queue(message) {
-                Ok(true) => break Ok(()),
-                Ok(false) => {}
+                Ok(Some(number)) => break Ok(number),
+                Ok(None) => {}
                 Err(failure) => break Err(failure),
             }
             held = match deadline {
@@ -753,7 +757,27 @@ impl coqui_transport::Channel for Channel {
             };
         };
         self.room.waiting.fetch_sub(1, Ordering::SeqCst);
-        sent
+        queued
+    }
+}
+
+impl coqui_transport::Channel for Channel {
+    fn send(&self, message: &[u8]) -> Result<(), Failure> {
+        self.check(message)?;
+        match self.queue(message)? {
+            Some(_) => Ok(()),
+            None => Err(Failure::NoProgress),
+        }
+    }
+
+    fn send_timeout(&self, message: &[u8], timeout: Option<Duration>) -> Result<(), Failure> {
+        self.check(message)?;
+        // Room for more than the whole budget never comes.
+        if message.len() > self.queued_limit {
+            return Err(Failure::NoProgress);
+        }
+        let deadline = timeout.map(|limit| Instant::now() + limit);
+        self.queue_until(message, deadline).map(|_| ())
     }
 
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
@@ -827,6 +851,87 @@ impl coqui_transport::Channel for Channel {
     fn close(&self) {
         // The worker sends what is queued, then the close frame, then releases the socket. Waiting for it means a
         // process that closes and exits has not lost what it sent.
+        drop(
+            self.outgoing
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
+        let _ = self.waker.wake();
+        let worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(worker) = worker
+            && worker.thread().id() != thread::current().id()
+        {
+            let _ = worker.join();
+        }
+        #[cfg(feature = "webrtc")]
+        if let Some(climb) = self.datagrams.as_ref().and_then(|d| d.climb.as_ref()) {
+            climb.close();
+        }
+    }
+}
+
+impl Channel {
+    /// Sends `message` and waits until it has been handed to the socket whole, for as long as `deadline` allows: room in the
+    /// queue first, then the write itself. Where [`send`](coqui_transport::Channel::send) answers once the message is queued,
+    /// this answers once the operating system (or TLS) has taken every byte of it and what was queued before it, so a caller
+    /// can bound how long a send may take, and know a message went before it ends the channel. It says nothing about the peer
+    /// having read it.
+    ///
+    /// # Errors
+    ///
+    /// [`Failure::Protocol`] for a message the channel may not send, as `send`; [`Failure::NoProgress`] for one larger than
+    /// `Limits::queued_bytes`, which no wait would make room for. [`Failure::Timeout`] when `deadline` passed first: the
+    /// message may be queued still, and goes out if the channel lives, so the caller that gives up ends the channel
+    /// ([`abort_without_drain`](Self::abort_without_drain)). Otherwise why the channel ended: [`Failure::Cancelled`] after an
+    /// abort, the peer's or the wire's failure after one.
+    pub fn send_completed_until(&self, message: &[u8], deadline: Instant) -> Result<(), Failure> {
+        self.check(message)?;
+        // Room for more than the whole budget never comes.
+        if message.len() > self.queued_limit {
+            return Err(Failure::NoProgress);
+        }
+        let number = self.queue_until(message, Some(deadline))?;
+        let mut held = self
+            .room
+            .lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.room.waiting.fetch_add(1, Ordering::SeqCst);
+        let sent = loop {
+            // Looked at before the end: a message that went just before the channel ended did go.
+            if self.room.completed.load(Ordering::SeqCst) >= number {
+                break Ok(());
+            }
+            if self.room.ended.load(Ordering::SeqCst) {
+                break Err(self.room.why());
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break Err(Failure::Timeout);
+            }
+            held = self
+                .room
+                .freed
+                .wait_timeout(held, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        };
+        self.room.waiting.fetch_sub(1, Ordering::SeqCst);
+        sent
+    }
+
+    /// Ends the channel at once: what is queued is dropped, no close frame is sent and the peer is not waited for, where
+    /// [`close`](coqui_transport::Channel::close) sends everything first and may wait as long as `Limits::send` for a peer that
+    /// takes nothing. The socket is released before this returns; the peer sees the connection drop. A sender waiting in
+    /// [`send_completed_until`](Self::send_completed_until) or `send_timeout` gets [`Failure::Cancelled`], and so does any
+    /// send afterwards; the reader sees the channel end. Calling it again, or `close` after it, does nothing.
+    pub fn abort_without_drain(&self) {
+        self.room.abort();
         drop(
             self.outgoing
                 .lock()
@@ -969,6 +1074,8 @@ struct Worker {
     datagrams: Option<WorkerDatagrams>,
     heard: Instant,
     pinged: bool,
+    // Messages taken from the queue, which is the number of the last one.
+    taken: u64,
     // When the socket stopped taking what there is to send.
     unsent: Option<Instant>,
     watching_writes: bool,
@@ -1025,6 +1132,9 @@ impl Worker {
     }
 
     fn turn(&mut self) -> Result<(), Stop> {
+        if self.room.aborted.load(Ordering::SeqCst) {
+            return Err(Stop::Gone);
+        }
         let more = self.write_queued()?;
         // Writing stops when the socket is full, and if that has passed, nothing will say so.
         let was_unsent = self.unsent.is_some();
@@ -1093,6 +1203,7 @@ impl Worker {
                 Err(mpsc::TryRecvError::Disconnected) => return Err(Stop::Closing),
             };
             self.queued.fetch_sub(message.len(), Ordering::SeqCst);
+            self.taken += 1;
             self.room.made();
             taken += message.len();
             let framed = match self.frames {
@@ -1219,6 +1330,10 @@ impl Worker {
         let retry = match self.socket.flush() {
             Ok(()) if !self.socket.get_ref().holds_unsent() => {
                 self.unsent = None;
+                // Everything taken has gone, so a sender waiting for its message to be written may answer.
+                if self.room.completed.swap(self.taken, Ordering::SeqCst) != self.taken {
+                    self.room.made();
+                }
                 return Ok(false);
             }
             Ok(()) => true,
@@ -1278,6 +1393,9 @@ impl Worker {
     /// Whether everything got to the socket, for as long as the peer keeps taking it.
     fn drained(&mut self) -> bool {
         loop {
+            if self.room.aborted.load(Ordering::SeqCst) {
+                return false;
+            }
             match self.flush() {
                 Ok(true) => {}
                 Ok(false) if self.unsent.is_none() => return true,
@@ -1306,7 +1424,7 @@ impl Worker {
         let mut discarded = Vec::new();
         loop {
             let left = until.saturating_duration_since(Instant::now());
-            if left.is_zero() {
+            if left.is_zero() || self.room.aborted.load(Ordering::SeqCst) {
                 return;
             }
             let waiting = match self.reads {
@@ -1974,6 +2092,22 @@ impl Pending {
     // tungstenite fixes the callback's error type, and it is large.
     #[allow(clippy::result_large_err)]
     pub fn handshake(self) -> Result<Channel, Failure> {
+        self.handshake_by(None)
+    }
+
+    /// As [`handshake`](Self::handshake), and no later than `deadline`: whichever of that and the handshake limit comes
+    /// first ends it with [`Failure::Timeout`], so a server can bound a handshake by what it has left of an accept.
+    ///
+    /// # Errors
+    ///
+    /// As [`handshake`](Self::handshake).
+    #[allow(clippy::result_large_err)]
+    pub fn handshake_until(self, deadline: Instant) -> Result<Channel, Failure> {
+        self.handshake_by(Some(deadline))
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn handshake_by(self, until: Option<Instant>) -> Result<Channel, Failure> {
         let Self {
             tcp,
             peer: _,
@@ -1997,7 +2131,10 @@ impl Pending {
         let can_climb = webrtc.is_some();
         // It waits on the socket's readiness, its deadline and a cancel at once: on Windows nothing but data, a reset or its
         // own read timeout ends a blocking read, so neither a deadline nor a cancel could end one from outside.
-        let deadline = Instant::now() + limits.handshake;
+        let mut deadline = Instant::now() + limits.handshake;
+        if let Some(until) = until {
+            deadline = deadline.min(until);
+        }
         let mut poll = Poll::new().map_err(|e| io_failure(&e))?;
         // Held here until the handshake ends: on Linux a waker dropped right after waking closes its eventfd, and the wake
         // is lost before the poll collects it.
